@@ -5,24 +5,28 @@
 - [log](log.md)
 
 ## Framework
-- [persona-knowledge-builder](persona-knowledge-builder.md) — per-persona builder agent contract (extends spec §4 + answers §8.3)
+- [project-overview](project-overview.md) — vision, personas, value loop, v1 scope
+- [personas](personas.md) — knowledge producers (PM/TPM/...) and use-case agents (Aira/portals)
+- [persona-knowledge-builder](persona-knowledge-builder.md) — per-persona builder agent contract
 
-## Compiled by PM
-(empty — PM will populate after ingesting `docs/raw/knowledge-builder-framework-spec.md`)
-- [project-overview](project-overview.md) — TODO
-- [personas](personas.md) — TODO (PM/TPM/Architect/Dev Mgr/Dev/DevOps/Exec/Aira; spec §1)
-- [module-incidents](module-incidents.md) — TODO (spec §4.1)
-- [module-fleet](module-fleet.md) — TODO (spec §4.2)
-- [module-code](module-code.md) — TODO (spec §4.3)
-- [module-pm-tpm-wiki](module-pm-tpm-wiki.md) — TODO (spec §4.4)
-- [module-fa-graph](module-fa-graph.md) — TODO (spec §4.5)
-- [module-jira-roadmap](module-jira-roadmap.md) — TODO (spec §4.6, v2)
+## Modules (one per data type, spec §4)
+- [module-incidents](module-incidents.md) — operational incidents (Phase 1, proven path)
+- [module-fleet](module-fleet.md) — UDAP/Sentinel read-through (Phase 2)
+- [module-code](module-code.md) — Som-style structural code wiki (Phase 2)
+- [module-pm-tpm-wiki](module-pm-tpm-wiki.md) — Confluence-driven PM/TPM wikis (Phase 3)
+- [module-fa-graph](module-fa-graph.md) — FA semantic property graph (Phase 4)
+- [module-jira-roadmap](module-jira-roadmap.md) — open / v2 candidate
 
-## Compiled by Architect
-- [architecture](architecture.md) — TODO (mirror spec §3)
-- [data-model](data-model.md) — TODO (mirror spec §6.1: ContentItem/Chunk/Edge)
-- [api-design](api-design.md) — TODO (mirror spec §6.4: MCP retrieval tool surface)
-- [adr/](adr/) — Architecture Decision Records (Phase 0 will populate)
+## Architecture Decision Records (Architect)
+- [ADR-001 — Tech-stack baseline](adr/ADR-001-tech-stack-baseline.md)
+- [ADR-002 — Storage shape per data type](adr/ADR-002-storage-shape.md)
+- [ADR-003 — Core interfaces (§6)](adr/ADR-003-core-interfaces.md)
+- [ADR-004 — Persona-builder config schema](adr/ADR-004-persona-builder-config.md)
+- [ADR-005 — Eval harness](adr/ADR-005-eval-harness.md)
 
 ## Compiled by Dev Manager
-- [engineering/](engineering/) — conventions, eval harness, cost telemetry (Phase 0)
+- `engineering/` — conventions, eval harness wiring, cost telemetry (Phase 0 → Phase 1)
+
+## Raw sources (immutable, in `docs/raw/`)
+- `knowledge-builder-framework-spec.md` — the framework spec (§1–§14)
+- `Meeting Notes - LLM WIki vs KB Approaches.pdf` — design discussion notes

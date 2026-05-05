@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/_template.json",
+  "title": "Persona extraction schema — TEMPLATE",
+  "description": "Copy to framework/parsers/schemas/{persona}/v1.json and edit. Each property's `description` is injected into the LLM parser prompt — write them carefully. Keep field count modest (<=15) for extraction quality. Spec ref: ADR-004, persona-knowledge-builder.md.",
+  "type": "object",
+  "required": [
+    "REPLACE_required_field_1",
+    "REPLACE_required_field_2"
+  ],
+  "properties": {
+    "REPLACE_required_field_1": {
+      "type": "string",
+      "description": "What the LLM should extract for this field. Be precise — vague descriptions degrade extraction quality.",
+      "maxLength": 500
+    },
+    "REPLACE_required_field_2": {
+      "type": "object",
+      "description": "Structured field example. Required nested keys go in the `required` array below.",
+      "required": ["nested_key"],
+      "properties": {
+        "nested_key": {
+          "type": "string",
+          "description": "..."
+        }
+      }
+    },
+    "REPLACE_optional_field": {
+      "type": "array",
+      "description": "Optional list field. Empty list is valid.",
+      "items": { "type": "string" }
+    },
+    "REPLACE_enum_field": {
+      "type": "string",
+      "description": "Use enum for controlled vocabularies — improves extraction consistency.",
+      "enum": ["option_a", "option_b", "option_c"]
+    }
+  },
+  "additionalProperties": false
+}

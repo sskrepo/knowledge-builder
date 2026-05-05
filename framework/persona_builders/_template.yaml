@@ -1,0 +1,65 @@
+# Persona Knowledge Builder — config template
+# Copy to framework/persona_builders/{persona}.yaml and edit.
+# Validate with: kb-cli validate persona_builders/{persona}.yaml
+# Spec reference: docs/wiki/persona-knowledge-builder.md, ADR-004.
+
+persona: REPLACE_ME                     # short id; matches schema dir name
+display_name: "REPLACE_ME Knowledge Builder"
+schema_version: 1                       # bump on breaking schema changes; triggers re-ingest
+status: draft                           # draft | production
+
+# What to extract — JSON-Schema doc the LLM parser uses.
+extraction_schema: parsers/schemas/REPLACE_ME/v1.json
+
+# Where to pull from — at least one source. Kinds are restricted to registered adapters.
+sources:
+  - kind: confluence
+    space: REPLACE_SPACE_KEY
+    space_url: https://confluence.internal/spaces/REPLACE_SPACE_KEY
+    include_labels: []
+    exclude_labels: [archived]
+    auth_secret_ref: vault://kb/confluence-readonly
+  # - kind: jira
+  #   jql: 'project = REPLACE AND issuetype in ("Feature","Epic")'
+  #   filter_url: https://jira.internal/issues/?filter=NNNNN
+  #   auth_secret_ref: vault://kb/jira-readonly
+  # - kind: git
+  #   repo: git@github.com:org/REPLACE_REPO.git
+  #   paths: ["**/*.md"]
+  #   auth_secret_ref: vault://kb/git-readonly
+
+# Where to write — each entry maps to a Store impl per ADR-002.
+stores:
+  - name: REPLACE_ME_wiki_meta
+    kind: wiki
+    root_path: kb-wiki/REPLACE_ME/
+  - name: REPLACE_ME_vectors
+    kind: vector
+    corpus: REPLACE_ME
+
+# Retrieval surface this persona contributes to. Tools must exist in framework/retrievers/.
+retrieval_tools:
+  - search_wiki
+  - read_wiki_page
+  - vector_search
+
+# Metadata defaults injected into every ContentItem this builder produces (spec §10).
+metadata_defaults:
+  persona_visibility: [REPLACE_ME]      # who can read; v2 enforces at retrieval
+  owner: REPLACE_ME                     # who maintains
+  classification: internal              # public | internal | restricted
+
+# Eval gate — builder cannot promote to production without passing.
+eval:
+  gold_set: eval/gold_sets/REPLACE_ME.jsonl
+  exit_criteria:
+    recall_at_5: 0.80
+    faithfulness: 0.85
+    p95_latency_ms: 800
+    max_tokens_per_query: 2000
+
+# Optional: ingestion scheduling and limits.
+ingestion:
+  schedule: "0 */4 * * *"               # cron; default = on-change webhooks only
+  max_concurrent_workers: 4
+  cost_alarm_tokens_per_day: 5000000

@@ -31,3 +31,14 @@ test-results/
 
 # Secrets / scripts that may contain identifiers
 .claude/scripts/.project-name
+
+# Local-only Claude Code permissions (machine-specific)
+.claude/settings.local.json
+
+# Eval run artifacts (large blobs go to OCI Object Storage)
+eval/runs/
+eval/baselines/
+
+# OCI wallets / credentials (paranoid catch-all)
+*wallet*.zip
+*.pem

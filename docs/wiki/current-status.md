@@ -11,25 +11,35 @@ status: current
 # Current Status
 
 ## Where we are
-Project bootstrapped. Building the **Knowledge Builder Framework** per `docs/raw/knowledge-builder-framework-spec.md`. The user has added a **persona-builder agent** requirement on top of the spec — see `persona-knowledge-builder.md`. Phase 0 (Setup) is the next move.
+**Phase 0 — Setup, autonomous run complete.** All Phase-0 documentation and configuration deliverables are drafted: 4 DECISIONs, 5 ADRs, 8 PM wiki pages, persona-builder + extraction-schema templates, an incident extraction schema (`v1`), a 5-question seed eval gold-set, and the Phase-0 kickoff brief. **No production code was written** — Phase 0 is docs/configs only by design.
+
+Two things gate Phase 1:
+1. **Your Gate-1 review** of ADRs + PM ingest (see dashboard)
+2. **External provisioning** — 3 blocking items in [pending-decisions/PHASE-0.md](../../pmo/pending-decisions/PHASE-0.md): Oracle 23ai Autonomous DB, OpenAI API key, OCI Vault
 
 ## Active stories
-(none yet — Phase 0 hasn't kicked off)
+(none yet — Phase 1 backlog drafts after Gate 1)
 
 ## Awaiting user decision
-- **DECISION-001 (pending)** — Phase 1 MVP slice: which incident-KB scope ships first? PM to draft after spec ingest.
-- **DECISION-002 (pending)** — Initial persona set for v1 Knowledge Builders (PM+TPM+Aira proposed). PM to draft after personas.md.
+- 🔴 **Gate 1 — Phase 0**: ADRs 001–005 + PM ingest. Reply `GATE-1-PHASE-0: approved` (or per-artifact: `ADR-001: approved`).
+- 🚨 **External provisioning** (3 blocking items): see [pending-decisions/PHASE-0.md](../../pmo/pending-decisions/PHASE-0.md).
 
 ## Recent decisions
-(none yet)
+- **DECISION-001** (2026-05-04) — Oracle commitment level: full Oracle stack with OpenAI + LangGraph carve-outs.
+- **DECISION-002** (2026-05-04) — Converged Autonomous DB; logical-polyglot (each data type owns its access pattern + schema), physical-converged (one DB instance).
+- **DECISION-003** (2026-05-04) — OpenAI for LLM and embeddings (Oracle-certified). `gpt-4o` + `text-embedding-3-large` (3072 dims).
+- **DECISION-004** (2026-05-04) — v1 personas: PM + TPM + Aira's incident KB.
 
 ## Next milestones
-- PM ingests `docs/raw/knowledge-builder-framework-spec.md` → `project-overview.md`, `personas.md`, one `module-*.md` per spec §4 data type
-- PM links from `project-overview.md` to `persona-knowledge-builder.md`
-- Architect drafts Phase 0 ADRs covering spec §11 tech-stack defaults and §6 interfaces
-- QA seeds the eval gold set (5 incident questions for Phase 1 exit gate)
-- TPM opens DECISION-001 (MVP scope) and DECISION-002 (initial persona set)
+- You: Gate-1 review (ADRs + PM ingest) and external provisioning kickoff.
+- After Gate 1: PM drafts Phase 1 backlog (stories) and Architect breaks ground on `framework/core/`.
+- After external provisioning: Phase 1 begins; first eval pass against real Confluence/Jira data.
 
-## Out of scope reminders
-- Spec §8.1, §8.2, §8.3 are research, not implementation. Don't let agents guess past them — file DECISIONs.
-- Default sports-app stack (Node/Next/Clerk/Twilio) does **not** apply. Tech stack is Python + pgvector + graph + MCP per spec §11.
+## Open problems flagged (research, not implementation — spec §8)
+- §8.1 — LLM wiki storage for remote agents (default: git + cached MCP + TOC-on-demand). DECISION-006 at Phase 3 kickoff.
+- §8.2 — Code accessibility for remote agents (default: hybrid VM-spinup for write paths + central code wiki for reads). DECISION-005 at Phase 2 kickoff.
+- §8.3 — Per-persona extraction schemas. **Resolved by ADR-004**: framework provides the contract; persona teams own the schemas.
+
+## Lint notes (TPM)
+- `init-project.sh` left `api/`, `server/`, `web/` stubs that don't apply. To be cleaned up at Phase 1 entry when `framework/` proper is created.
+- Phase 0 deliverables authored by TPM acting on behalf of PM and Architect (the symlinked subagents weren't loaded as dispatchable types in this session). Future sessions started with `claude` from this dir will dispatch normally.

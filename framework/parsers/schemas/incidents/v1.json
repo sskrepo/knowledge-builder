@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/incidents/v1.json",
+  "title": "Operational incident extraction schema — v1",
+  "description": "Extracts a structured summary from a Jira incident ticket. Owner: aira/incident KB team. Spec ref: §4.1, ADR-003.",
+  "type": "object",
+  "required": [
+    "root_cause_summary",
+    "impact",
+    "resources_affected"
+  ],
+  "properties": {
+    "root_cause_summary": {
+      "type": "string",
+      "description": "One-paragraph (<=500 chars) summary of the underlying root cause. Cite specific subsystems, error codes, or change events. Do not include mitigation steps here.",
+      "maxLength": 500
+    },
+    "impact": {
+      "type": "object",
+      "required": ["blast_radius", "duration_minutes"],
+      "description": "Customer/operational impact.",
+      "properties": {
+        "blast_radius": {
+          "type": "string",
+          "description": "Who/what was affected. Examples: 'all tenants on FA 25.01', 'tenants in EMEA region', 'tenant-123 only'.",
+          "maxLength": 300
+        },
+        "duration_minutes": {
+          "type": "integer",
+          "description": "Total time the incident degraded service, in minutes. Use 0 for near-misses.",
+          "minimum": 0
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["sev1", "sev2", "sev3", "sev4", "near-miss"],
+          "description": "Severity classification."
+        }
+      }
+    },
+    "resources_affected": {
+      "type": "array",
+      "description": "Logical names of services / pods / tenants involved (entity URNs preferred when available).",
+      "items": { "type": "string" }
+    },
+    "ora_codes": {
+      "type": "array",
+      "description": "Oracle error codes seen during the incident (e.g. 'ORA-1017'). Empty if none.",
+      "items": { "type": "string", "pattern": "^ORA-[0-9]+$" }
+    },
+    "tenant_ids": {
+      "type": "array",
+      "description": "Customer/tenant IDs affected. Empty if platform-wide.",
+      "items": { "type": "string" }
+    },
+    "service_owner": {
+      "type": "string",
+      "description": "Primary owning team for the failing service."
+    },
+    "resolution_summary": {
+      "type": "string",
+      "description": "What fixed it. Include the change reference (PR/commit) if known.",
+      "maxLength": 500
+    },
+    "links": {
+      "type": "array",
+      "description": "Related URLs: the incident ticket, related design docs, post-mortems, etc.",
+      "items": { "type": "string", "format": "uri" }
+    }
+  },
+  "additionalProperties": false
+}
