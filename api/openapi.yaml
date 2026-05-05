@@ -1,0 +1,16 @@
+openapi: 3.0.3
+info:
+  title: Knowledgebase API
+  version: 0.1.0
+  description: API for Knowledgebase. Source of truth for all API definitions.
+servers:
+  - url: http://localhost:3000
+    description: Local dev
+paths: {}
+components:
+  schemas: {}
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
