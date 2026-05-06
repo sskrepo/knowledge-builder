@@ -4,7 +4,9 @@
 - [current-status](current-status.md)
 - [log](log.md)
 
-## Framework
+## Framework — start here
+- 📄 **[PDD — Knowledge Builder Framework](pdd/PDD-Knowledge-Builder-Framework.md)** — comprehensive product definition (all decisions consolidated)
+- 📊 **[Executive Brief](exec-brief.md)** — 12-section summary for leadership audiences (mermaid diagrams; PPT-ready)
 - [project-overview](project-overview.md) — vision, personas, value loop, v1 scope
 - [personas](personas.md) — knowledge producers (PM/TPM/...) and use-case agents (Aira/portals)
 - [persona-knowledge-builder](persona-knowledge-builder.md) — per-persona builder agent contract

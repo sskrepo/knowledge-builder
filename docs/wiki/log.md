@@ -16,3 +16,6 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 ## [2026-05-04] qa (acting via tpm) | Seeded eval/gold_sets/incidents.jsonl with 5 placeholder questions
 ## [2026-05-04] tpm | Filed Phase 0 Kickoff Brief and pending-decisions surface for all phases
 ## [2026-05-04] tpm | Updated dashboard with morning briefing, Gate 1 approval surface, and lint findings; updated phases.md and current-status.md
+## [2026-05-05] pm (acting via tpm) | Authored PDD-Knowledge-Builder-Framework.md consolidating all design discussions: 5-layer architecture, polyglot per persona (knowledge_bases, not corpora), skills-default, functional-area + resources dimensions, persona-builder contract, phase plan, v1 acceptance, open ADRs 006-009
+## [2026-05-05] pm (acting via tpm) | Authored exec-brief.md with mermaid diagrams (12 sections; PPT-ready) for leadership review
+## [2026-05-05] tpm | Updated wiki index to surface PDD + exec brief as primary entry points
