@@ -29,13 +29,19 @@
 - [ADR-002 — Storage shape per data type](adr/ADR-002-storage-shape.md)
 - [ADR-003 — Core interfaces (§6)](adr/ADR-003-core-interfaces.md)
 - [ADR-004 — Persona-builder config schema (v2 amended)](adr/ADR-004-persona-builder-config.md)
-- [ADR-005 — Eval harness](adr/ADR-005-eval-harness.md)
+- [ADR-005 — Eval harness (amended for AIRA gold-set + recency)](adr/ADR-005-eval-harness.md)
 - [ADR-006 — Two-shim layered architecture](adr/ADR-006-two-shim-architecture.md)
-- [ADR-007 — Persona context skill contract](adr/ADR-007-persona-context-skill.md)
+- [ADR-007 — Persona context skill contract (amended for char cap + structured synthesis)](adr/ADR-007-persona-context-skill.md)
 - [ADR-008 — Functional-area + resources dimensions](adr/ADR-008-functional-area-and-resources.md)
 - [ADR-009 — Resource ontology](adr/ADR-009-resource-ontology.md)
 - [ADR-010 — Configuration plane](adr/ADR-010-configuration-plane.md)
 - [ADR-011 — Dual-mode source adapters (REST + MCP)](adr/ADR-011-dual-mode-source-adapters.md)
+- [ADR-012 — In-DB embedding via DBMS_VECTOR](adr/ADR-012-in-db-embedding.md)
+- [ADR-013 — Filter strictness contract (hard / soft-with-multiplier)](adr/ADR-013-filter-strictness.md)
+
+## Engineering
+- [dev-guide](engineering/dev-guide.md) — Phase 1 setup + first end-to-end run
+- [runbook](engineering/runbook.md) — operations playbook
 
 ## Persona starter packs (in `framework/persona_builders/`)
 All 8 producer personas have starter configs + extraction schemas + gold sets — labeled `status: draft`. Persona teams refine and promote to `status: production` per ADR-004.

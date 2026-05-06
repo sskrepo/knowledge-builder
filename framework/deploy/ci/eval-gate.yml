@@ -1,0 +1,55 @@
+# CI eval gate — runs on every PR touching parsers/stores/retrievers/orchestrator
+# Per ADR-005. Wire as GitHub Actions or OCI DevOps depending on team choice.
+
+name: eval-gate
+on:
+  pull_request:
+    paths:
+      - "framework/parsers/**"
+      - "framework/stores/**"
+      - "framework/retrievers/**"
+      - "framework/orchestrator/**"
+      - "framework/persona_builders/**"
+      - "framework/parsers/schemas/**"
+      - "eval/gold_sets/**"
+      - "framework/eval/**"
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: install
+        run: pip install -r framework/requirements.txt
+      - name: validate persona builders
+        run: |
+          for f in framework/persona_builders/*.yaml; do
+            [[ "$(basename $f)" == _* ]] && continue
+            python -m framework.cli.kb_cli validate "$f"
+          done
+      - name: run eval (small corpus)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ADB_DEV_PASSWORD: ${{ secrets.ADB_DEV_PASSWORD }}
+        run: |
+          python -m framework.cli.kb_cli eval framework/persona_builders/ops-eng.yaml \
+                 --output eval/runs/PR-${{ github.event.pull_request.number }}.json
+      - name: diff vs baseline
+        run: |
+          python -c "
+          import json
+          from framework.eval.reports.diff import diff_summaries
+          cur = json.load(open('eval/runs/PR-${{ github.event.pull_request.number }}.json'))
+          base = json.load(open('eval/baselines/main.json'))
+          d = diff_summaries(cur['summary'], base['summary'])
+          print(d)
+          if d['regressed']:
+              import sys; sys.exit(1)
+          "
+      - name: upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report-PR-${{ github.event.pull_request.number }}
+          path: eval/runs/PR-${{ github.event.pull_request.number }}.*

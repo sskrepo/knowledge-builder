@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kbf"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.29",
+  "requests>=2.31",
+  "pyyaml>=6.0",
+  "openai>=1.30",
+  "oci>=2.130",
+  "oracledb>=2.2",
+]
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "mypy>=1.10", "ruff>=0.4"]
+
+[tool.pytest.ini_options]
+pythonpath = [".."]
+testpaths = ["framework/tests"]

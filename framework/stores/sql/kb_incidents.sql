@@ -131,3 +131,42 @@ CREATE INDEX ix_edges_dst_rel ON edges (dst, rel);
 -- GRANT SELECT                          ON content_items TO KB_INCIDENTS_RO;
 -- GRANT SELECT                          ON chunks        TO KB_INCIDENTS_RO;
 -- GRANT SELECT                          ON edges         TO KB_INCIDENTS_RO;
+
+-- =========================================================================
+-- ADR-012 — In-DB embedding via DBMS_VECTOR
+-- One-time admin step: create OCI Vector credential
+-- =========================================================================
+-- BEGIN
+--   DBMS_CLOUD.CREATE_CREDENTIAL(
+--     credential_name => 'OCI_VECTOR_CRED',
+--     user_ocid       => '<your-resource-principal>',
+--     tenancy_ocid    => '<tenancy>',
+--     private_key     => '<from OCI Vault>',
+--     fingerprint     => '<fingerprint>'
+--   );
+-- END;
+-- /
+
+-- Embedding procedure for kb_incidents schema
+CREATE OR REPLACE PROCEDURE batch_insert_datasets_vectors_kbi AS
+  CURSOR c_rows IS
+    SELECT id, text
+    FROM   chunks
+    WHERE  embedding IS NULL;
+BEGIN
+  FOR r IN c_rows LOOP
+    UPDATE chunks
+    SET    embedding = DBMS_VECTOR.UTL_TO_EMBEDDING(
+                          r.text,
+                          JSON('{
+                            "provider": "OCIGenAI",
+                            "credential_name": "OCI_VECTOR_CRED",
+                            "url": "https://inference.generativeai.us-ashburn-1.oci.oraclecloud.com/20231130/actions/embedText",
+                            "model": "openai.text-embedding-3-large"
+                          }')
+                       )
+    WHERE  id = r.id;
+  END LOOP;
+  COMMIT;
+END;
+/
