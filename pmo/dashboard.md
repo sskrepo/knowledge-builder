@@ -23,7 +23,7 @@ status: current
 
 **What you can do today (no provisioning needed):**
 1. Read `docs/wiki/engineering/dev-guide.md` for first-run instructions
-2. Read `docs/wiki/persona-onboarding-pm-tpm.md` and share with PM/TPM team leads in parallel
+2. Read `docs/wiki/onboarding/pm-tpm.md` (and `onboarding/ops-eng.md`) and share with persona team leads in parallel
 3. Review the 22 stories in `pmo/stories/STORY-001..022.md`
 4. Run `pytest framework/tests/unit/` (no external deps; verifies chunker, ids, urns, recall metrics, ADR-013 filter strictness)
 

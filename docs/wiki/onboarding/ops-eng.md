@@ -64,11 +64,11 @@ The Ops Engineer Knowledge Builder ships with **5 knowledge bases** — more tha
 | `ops_fleet_state` | sql_passthrough | UDAP / Sentinel views (read-through) | Phase 2 |
 
 The starter pack is at:
-- [`framework/persona_builders/ops-eng.yaml`](../../framework/persona_builders/ops-eng.yaml)
-- [`framework/parsers/schemas/incidents/v1.json`](../../framework/parsers/schemas/incidents/v1.json) — already concrete (matches AIRA's pattern)
-- [`framework/parsers/schemas/ops-eng/runbooks/v1.json`](../../framework/parsers/schemas/ops-eng/runbooks/v1.json)
-- [`framework/parsers/schemas/ops-eng/postmortems/v1.json`](../../framework/parsers/schemas/ops-eng/postmortems/v1.json)
-- [`eval/gold_sets/ops-eng.jsonl`](../../eval/gold_sets/ops-eng.jsonl) — 5 placeholder questions (replace with 25 real ones from AIRA's eval harness)
+- [`framework/persona_builders/ops-eng.yaml`](../../../framework/persona_builders/ops-eng.yaml)
+- [`framework/parsers/schemas/incidents/v1.json`](../../../framework/parsers/schemas/incidents/v1.json) — already concrete (matches AIRA's pattern)
+- [`framework/parsers/schemas/ops-eng/runbooks/v1.json`](../../../framework/parsers/schemas/ops-eng/runbooks/v1.json)
+- [`framework/parsers/schemas/ops-eng/postmortems/v1.json`](../../../framework/parsers/schemas/ops-eng/postmortems/v1.json)
+- [`eval/gold_sets/ops-eng.jsonl`](../../../eval/gold_sets/ops-eng.jsonl) — 5 placeholder questions (replace with 25 real ones from AIRA's eval harness)
 
 ---
 
@@ -76,7 +76,7 @@ The starter pack is at:
 
 ## What we currently extract
 
-Per [`incidents/v1.json`](../../framework/parsers/schemas/incidents/v1.json):
+Per [`incidents/v1.json`](../../../framework/parsers/schemas/incidents/v1.json):
 
 ```json
 {
@@ -114,7 +114,7 @@ AIRA's team already identified gaps in the current schema. Their proposal is to 
 }
 ```
 
-In our framework these map cleanly to existing typed fields (per [`aira-comparison.md`](aira-comparison.md) §1.1):
+In our framework these map cleanly to existing typed fields (per [`aira-comparison.md`](../aira-comparison.md) §1.1):
 
 | AIRA's proposed field | Our equivalent | Where in our schema |
 |---|---|---|
@@ -146,7 +146,7 @@ In our framework these map cleanly to existing typed fields (per [`aira-comparis
 
 ## What we currently extract
 
-Per [`ops-eng/runbooks/v1.json`](../../framework/parsers/schemas/ops-eng/runbooks/v1.json):
+Per [`ops-eng/runbooks/v1.json`](../../../framework/parsers/schemas/ops-eng/runbooks/v1.json):
 
 ```json
 {
@@ -186,7 +186,7 @@ Per [`ops-eng/runbooks/v1.json`](../../framework/parsers/schemas/ops-eng/runbook
 
 ## What we currently extract
 
-Per [`ops-eng/postmortems/v1.json`](../../framework/parsers/schemas/ops-eng/postmortems/v1.json):
+Per [`ops-eng/postmortems/v1.json`](../../../framework/parsers/schemas/ops-eng/postmortems/v1.json):
 
 ```json
 {
@@ -232,7 +232,7 @@ Nothing is extracted directly here; this KB is *materialized* from the others.
 ## What this is
 Read-through to your existing UDAP/Sentinel views. **No ingestion**; the framework wraps allowlisted views as the `query_fleet` and `text_to_sql` MCP tools.
 
-Default views in [`framework/retrievers/fleet_views.yaml`](../../framework/retrievers/fleet_views.yaml):
+Default views in [`framework/retrievers/fleet_views.yaml`](../../../framework/retrievers/fleet_views.yaml):
 - `pod_health` — per-POD health status
 - `restart_counts` — pod restart counts by team/week
 - `refresh_progress` — PODDB refresh state
@@ -269,10 +269,10 @@ This is the most distinctive section vs. PM/TPM — there's an existing producti
 1. **Dual-write window:** are you OK with the framework dual-writing for ~2 weeks during Phase 1 backfill validation? Storage cost is small.
 2. **Cutover trigger:** what eval-gate result would convince you to flip a consumer to the framework's `vector_search`? (Recall@5 ≥ 80% on 25-question set is our default; you may want stricter.)
 3. **Existing 50K-ticket backfill:** can you share a Jira filter that captures the same tickets currently in `<SERVICE>_DATASETS_VECTOR`? We backfill once and verify identity.
-4. **Eval queries:** can you share ~50 query/expected-citation pairs from your existing eval harness? We use 25 for our gold set + 25 for hold-out validation. (Per [ADR-005 amendment 1](adr/ADR-005-eval-harness.md).)
+4. **Eval queries:** can you share ~50 query/expected-citation pairs from your existing eval harness? We use 25 for our gold set + 25 for hold-out validation. (Per [ADR-005 amendment 1](../adr/ADR-005-eval-harness.md).)
 5. **Score threshold:** AIRA filters at score ≥ 0.50. Is that tuned per-tenant, per-service, or globally? We default to global; happy to override if you want.
-6. **Char cap:** AIRA caps context at 50K chars before sending to GenAI. We've adopted the same cap (per [ADR-007 amendment 1](adr/ADR-007-persona-context-skill.md)). Is 50K still right, or has experience suggested different?
-7. **Stack handling:** AIRA's stack is **soft preference** (×0.90 multiplier). Per [ADR-013](adr/ADR-013-filter-strictness.md) we keep stack as soft. Any reason to make it hard for some flows?
+6. **Char cap:** AIRA caps context at 50K chars before sending to GenAI. We've adopted the same cap (per [ADR-007 amendment 1](../adr/ADR-007-persona-context-skill.md)). Is 50K still right, or has experience suggested different?
+7. **Stack handling:** AIRA's stack is **soft preference** (×0.90 multiplier). Per [ADR-013](../adr/ADR-013-filter-strictness.md) we keep stack as soft. Any reason to make it hard for some flows?
 8. **`PROPERTIES`/tags work:** is the AIRA team actively planning to add this to existing tables, or paused? If paused, our framework can effectively ship that improvement first.
 
 ---
@@ -314,7 +314,7 @@ This is **the** gate. The framework ships when it hits ≥80% recall@5 + ≥0.85
 }
 ```
 
-## How to bootstrap (per [ADR-005 amendment 1](adr/ADR-005-eval-harness.md))
+## How to bootstrap (per [ADR-005 amendment 1](../adr/ADR-005-eval-harness.md))
 
 1. **Ask AIRA team for ~50 query/expected-citation pairs** from their existing eval harness
 2. **Pick the 25 most representative** (mix of question types — see below)
@@ -431,17 +431,17 @@ Before our workshop, please come prepared to answer:
 # Resources
 
 - **Per-persona starter pack** (already in repo, status: draft):
-  - Builder config: [`framework/persona_builders/ops-eng.yaml`](../../framework/persona_builders/ops-eng.yaml)
-  - Schemas: [`framework/parsers/schemas/incidents/v1.json`](../../framework/parsers/schemas/incidents/v1.json), [`ops-eng/runbooks/v1.json`](../../framework/parsers/schemas/ops-eng/runbooks/v1.json), [`ops-eng/postmortems/v1.json`](../../framework/parsers/schemas/ops-eng/postmortems/v1.json)
-  - Gold set: [`eval/gold_sets/ops-eng.jsonl`](../../eval/gold_sets/ops-eng.jsonl) — replace 5 placeholders with 25 real questions
-  - Fleet allowlist: [`framework/retrievers/fleet_views.yaml`](../../framework/retrievers/fleet_views.yaml)
+  - Builder config: [`framework/persona_builders/ops-eng.yaml`](../../../framework/persona_builders/ops-eng.yaml)
+  - Schemas: [`framework/parsers/schemas/incidents/v1.json`](../../../framework/parsers/schemas/incidents/v1.json), [`ops-eng/runbooks/v1.json`](../../../framework/parsers/schemas/ops-eng/runbooks/v1.json), [`ops-eng/postmortems/v1.json`](../../../framework/parsers/schemas/ops-eng/postmortems/v1.json)
+  - Gold set: [`eval/gold_sets/ops-eng.jsonl`](../../../eval/gold_sets/ops-eng.jsonl) — replace 5 placeholders with 25 real questions
+  - Fleet allowlist: [`framework/retrievers/fleet_views.yaml`](../../../framework/retrievers/fleet_views.yaml)
 
 - **AIRA-specific reference docs:**
-  - **[`docs/wiki/aira-comparison.md`](aira-comparison.md)** — full extraction + retrieval comparison; what we borrow, what we improve, the migration story
+  - **[`../aira-comparison.md`](../aira-comparison.md)** — full extraction + retrieval comparison; what we borrow, what we improve, the migration story
   - Source: `docs/raw/aira-vector-search-detailed-explained (1).html` — the original AIRA-team walkthrough
 
 - **Framework architecture (deeper read):**
-  - PDD: [`pdd/PDD-Knowledge-Builder-Framework.md`](pdd/PDD-Knowledge-Builder-Framework.md) (also `.docx`)
+  - PDD: [`pdd/PDD-Knowledge-Builder-Framework.md`](../pdd/PDD-Knowledge-Builder-Framework.md) (also `.docx`)
   - ADR-002 — Storage shape per data type
   - ADR-007 (v2) — Persona context skill contract; structured synthesis output (incident_rca matches AIRA's `Root_Cause / Resolution / Similar ticket`)
   - ADR-008 — Functional-area + resources dimensions
@@ -450,8 +450,8 @@ Before our workshop, please come prepared to answer:
   - ADR-014 — LLM access via OCI Generative AI Inference (also AIRA-pattern)
 
 - **Phase 1 dev guide & runbook:**
-  - [`docs/wiki/engineering/dev-guide.md`](engineering/dev-guide.md)
-  - [`docs/wiki/engineering/runbook.md`](engineering/runbook.md)
+  - [`../engineering/dev-guide.md`](../engineering/dev-guide.md)
+  - [`../engineering/runbook.md`](../engineering/runbook.md)
 
 ---
 

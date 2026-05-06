@@ -382,13 +382,13 @@ We seeded `eval/gold_sets/tpm.jsonl` with placeholder questions. **Replace these
 ## Resources
 
 - **Per-persona starter pack already in repo** (status: draft):
-  - PM: [`framework/persona_builders/pm.yaml`](../../framework/persona_builders/pm.yaml) and `framework/parsers/schemas/pm/{briefs,release-plans,research}/v1.json`
-  - TPM: [`framework/persona_builders/tpm.yaml`](../../framework/persona_builders/tpm.yaml) and `framework/parsers/schemas/tpm/{weekly-ops,ecars,dependencies}/v1.json`
+  - PM: [`framework/persona_builders/pm.yaml`](../../../framework/persona_builders/pm.yaml) and `framework/parsers/schemas/pm/{briefs,release-plans,research}/v1.json`
+  - TPM: [`framework/persona_builders/tpm.yaml`](../../../framework/persona_builders/tpm.yaml) and `framework/parsers/schemas/tpm/{weekly-ops,ecars,dependencies}/v1.json`
 - **Gold-set placeholders** in `eval/gold_sets/pm.jsonl`, `eval/gold_sets/tpm.jsonl`
 - **Framework architecture (deeper read if curious):**
-  - PDD: [`docs/wiki/pdd/PDD-Knowledge-Builder-Framework.md`](pdd/PDD-Knowledge-Builder-Framework.md) (or .docx)
-  - Persona-builder contract: [`ADR-004 v2`](adr/ADR-004-persona-builder-config.md)
-  - Functional-area + resources dimensions: [`ADR-008`](adr/ADR-008-functional-area-and-resources.md)
+  - PDD: [`docs/wiki/pdd/PDD-Knowledge-Builder-Framework.md`](../pdd/PDD-Knowledge-Builder-Framework.md) (or .docx)
+  - Persona-builder contract: [`ADR-004 v2`](../adr/ADR-004-persona-builder-config.md)
+  - Functional-area + resources dimensions: [`ADR-008`](../adr/ADR-008-functional-area-and-resources.md)
 
 ---
 
