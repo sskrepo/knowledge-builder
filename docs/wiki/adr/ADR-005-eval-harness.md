@@ -106,6 +106,43 @@ A PR is blocked if any persona's exit criteria regresses by more than the config
 - Persona teams MUST ship a gold set with their builder; CI enforces presence.
 - Phase 0 ships only the seed gold set for incidents (5 questions) plus the runner skeleton; Phase 1 wires it into CI.
 
+## Amendments
+
+### Amendment 1 — Bootstrap gold sets from AIRA's eval harness (2026-05-06)
+Per [aira-comparison.md §1.3.3](../aira-comparison.md): the AIRA team already runs an evaluation harness against production query/citation pairs. Rather than hand-curate the Phase-1 incidents gold set from scratch, **bootstrap with AIRA's existing benchmark**. Action item:
+- Phase 0 close: contact AIRA team for ~50 query/expected-citation pairs from their eval harness
+- Phase 1 Wk 2: pick 25 most representative; promote to `eval/gold_sets/incidents.jsonl` (replace placeholder STARTER questions)
+- Phase 1 exit gate becomes apples-to-apples: same questions AIRA evaluates against, on the new framework
+
+### Amendment 2 — Recency-weighted recall metric (2026-05-06)
+Per AIRA's recency tiebreaker (`ORDER BY SCORE DESC, AGE ASC`) — recall@k as a binary hit/miss is too coarse for an operational system where stale matches are less useful than fresh ones. Add **recency-weighted recall@k**:
+
+```
+recency_weighted_recall@k = sum(  hit_i × age_weight_i  ) / k
+where age_weight_i = exp(-age_days / TAU)   # TAU=180 days default
+```
+
+A 1-day-old hit weights ~1.0; a 1-year-old hit weights ~0.13. This punishes top-K positions that are correct-but-stale and rewards retrievers that surface fresh content.
+
+Reported alongside plain recall@k. The plain recall@k is still the primary gate; recency-weighted recall is an SLI for operational quality.
+
+### Amendment 3 — Stack/filter strictness in eval queries (2026-05-06)
+Per [ADR-013](ADR-013-filter-strictness.md), every gold-set query may carry a `filters_strictness` field describing expected behavior:
+```jsonc
+{
+  "id": "incident-q-001",
+  "question": "...",
+  "filters": {
+    "service": {"values": ["auth-service"], "strictness": "hard"},
+    "stack":   {"values": ["prod"],         "strictness": "soft"}
+  },
+  ...
+}
+```
+The eval runner verifies the retriever applied filters at the expected strictness — soft-fallback fires shouldn't happen on hard-intent queries (that's a routing bug).
+
 ## References
 - Spec §10 (cross-cutting eval requirement), §12 (Phase 1 acceptance criteria).
 - [ADR-001](ADR-001-tech-stack-baseline.md), [ADR-004](ADR-004-persona-builder-config.md).
+- [ADR-013 — Filter strictness](ADR-013-filter-strictness.md)
+- [aira-comparison.md](../aira-comparison.md)
