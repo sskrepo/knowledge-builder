@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/architect/adrs/v1.json",
+  "title": "Architect — ADR — v1",
+  "type": "object",
+  "required": ["adr_id", "title", "status", "context", "decision"],
+  "properties": {
+    "adr_id": { "type": "string", "maxLength": 50 },
+    "title": { "type": "string", "maxLength": 200 },
+    "status": { "type": "string", "enum": ["proposed", "accepted", "deprecated", "superseded"] },
+    "supersedes": { "type": "array", "items": { "type": "string" } },
+    "context": { "type": "string", "maxLength": 1000 },
+    "decision": { "type": "string", "maxLength": 1500 },
+    "consequences": { "type": "string", "maxLength": 1000 }
+  },
+  "additionalProperties": false
+}

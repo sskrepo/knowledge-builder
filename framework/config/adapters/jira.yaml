@@ -1,0 +1,30 @@
+# Jira adapter — dual-mode per ADR-011.
+adapter: jira
+mode: native                              # native | mcp
+
+native:
+  base_url: https://jira.mycompany.internal
+  auth:
+    type: bearer_token
+    token_secret: vault://kb/jira-readonly
+  pagination: { page_size: 100 }
+  rate_limit: { requests_per_minute: 200 }
+  webhook:
+    receiver_path: /webhooks/jira
+    shared_secret: vault://kb/jira-webhook-secret
+  issuetypes_supported: [Bug, Incident, Story, Epic, Feature, Release]
+
+mcp:
+  endpoint: https://jira-mcp.mycompany.internal/mcp
+  auth:
+    type: bearer_token
+    token_secret: vault://kb/jira-mcp-token
+  tool_map:
+    search_issues: jira.search
+    get_issue: jira.get_issue
+    list_comments: jira.list_comments
+    list_attachments: jira.list_attachments
+  required_capabilities: [search_issues, get_issue]
+  rate_limit: { requests_per_minute: 60 }
+  cache_ttl_seconds: 300
+  poll_interval_seconds: 300

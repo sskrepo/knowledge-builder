@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/ops-eng/runbooks/v1.json",
+  "title": "Ops Engineer — runbook — v1",
+  "type": "object",
+  "required": ["title", "trigger", "steps"],
+  "properties": {
+    "title": { "type": "string", "maxLength": 200 },
+    "trigger": { "type": "string", "description": "When this runbook applies.", "maxLength": 300 },
+    "preconditions": { "type": "array", "items": { "type": "string" } },
+    "steps": { "type": "array", "items": { "type": "string" } },
+    "rollback": { "type": "string", "maxLength": 500 },
+    "functional_area": { "type": "string" },
+    "resources": { "type": "array", "items": { "type": "string" } },
+    "escalation_contact": { "type": "string" }
+  },
+  "additionalProperties": false
+}

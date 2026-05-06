@@ -1,0 +1,18 @@
+# Allowlist of UDAP/Sentinel views the framework may read.
+# Adding a new view here requires PR review (Architect + UDAP team).
+views:
+  - name: pod_health
+    description: "Per-POD health status; refreshed every 60s."
+    columns: [pod_id, tenant_id, region, status, last_check_at]
+  - name: restart_counts
+    description: "Pod restart counts by team / week."
+    columns: [team, week, restart_count, top_pods]
+  - name: refresh_progress
+    description: "PODDB refresh state."
+    columns: [pod_id, poddb_id, state, started_at, expected_completion]
+  - name: fleet_inventory
+    description: "Live inventory of customer instances."
+    columns: [pod_id, fa_release, region, tenant_id, status]
+  - name: patching_status
+    description: "Per-resource patching state."
+    columns: [resource_id, resource_kind, current_patch, target_patch, status]

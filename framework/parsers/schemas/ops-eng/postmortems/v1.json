@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/ops-eng/postmortems/v1.json",
+  "title": "Ops Engineer — postmortem — v1",
+  "type": "object",
+  "required": ["incident_id", "summary", "contributing_factors", "action_items"],
+  "properties": {
+    "incident_id": { "type": "string" },
+    "summary": { "type": "string", "maxLength": 800 },
+    "timeline": { "type": "array", "items": { "type": "object", "properties": { "ts": { "type": "string", "format": "date-time" }, "event": { "type": "string" } } } },
+    "contributing_factors": { "type": "array", "items": { "type": "string" } },
+    "what_went_well": { "type": "array", "items": { "type": "string" } },
+    "what_went_poorly": { "type": "array", "items": { "type": "string" } },
+    "action_items": { "type": "array", "items": { "type": "object", "properties": { "description": { "type": "string" }, "owner": { "type": "string" }, "due": { "type": "string", "format": "date" } } } }
+  },
+  "additionalProperties": false
+}

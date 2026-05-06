@@ -1,0 +1,70 @@
+persona: ops_mgr
+display_name: "Operations Manager Knowledge Builder"
+schema_version: 1
+status: draft
+primary_axis: functional_area
+
+functional_areas: [refresh, provisioning, update, patching, db_infra_patching, dr]
+resources_relevant: [pod, poddb, exadata, block_volume]
+kinds_supported: [sla, decision, concept, postmortem]
+
+knowledge_bases:
+  - name: ops_mgr_slas
+    kind: wiki
+    extraction_schema: parsers/schemas/ops-mgr/slas/v1.json
+    sources:
+      - { kind: confluence, space: OPS, include_labels: [sla] }
+    retrieval_tools: [search_wiki, read_wiki_page]
+    kb_card:
+      summary: "SLA documents per service / customer tier / functional area."
+      use_when: "Question is 'what's the SLA for X' or 'what are commitments to tenant Y'."
+      input_shape: "Question; service or tenant filter."
+      output_shape: "Cited SLA sections."
+
+  - name: ops_mgr_escalation
+    kind: wiki
+    extraction_schema: parsers/schemas/ops-mgr/escalation/v1.json
+    sources:
+      - { kind: confluence, space: OPS, include_labels: [escalation, oncall] }
+    retrieval_tools: [search_wiki, read_wiki_page]
+    kb_card:
+      summary: "Escalation paths, on-call rotations, decision authority maps."
+      use_when: "Question is 'who do I escalate X to' or 'who owns this decision'."
+      input_shape: "Question; service or severity filter."
+      output_shape: "Cited escalation procedures."
+
+  - name: ops_mgr_incident_exec_summary
+    kind: vector
+    extraction_schema: parsers/schemas/ops-mgr/incident-exec-summary/v1.json
+    sources:
+      - { kind: jira, jql: 'project IN (P2T, INC) AND priority in (Sev1, Sev2)' }
+    retrieval_tools: [vector_search]
+    kb_card:
+      summary: "Exec-level incident summaries: customer impact, comms posture, follow-ups."
+      use_when: "Question is exec-flavored — 'what happened, who was impacted, what next'."
+      input_shape: "Question; time window strongly recommended."
+      output_shape: "Top-K cited exec summaries."
+
+  - name: ops_mgr_compliance
+    kind: wiki
+    extraction_schema: parsers/schemas/ops-mgr/compliance/v1.json
+    sources:
+      - { kind: confluence, space: OPS, include_labels: [compliance, audit] }
+    retrieval_tools: [search_wiki, read_wiki_page]
+    kb_card:
+      summary: "Compliance posture per service / region / tenant tier."
+      use_when: "Question references compliance frameworks (SOC2, ISO, PCI, HIPAA)."
+      input_shape: "Question; service or framework filter."
+      output_shape: "Cited compliance documents."
+
+metadata_defaults:
+  persona_visibility: [ops_mgr, ops_eng, exec, tpm, service_owner]
+  owner: ops_mgr
+  classification: internal
+
+eval:
+  gold_set: eval/gold_sets/ops-mgr.jsonl
+  exit_criteria: { recall_at_5: 0.80, faithfulness: 0.90, p95_latency_ms: 800, max_tokens_per_query: 2000 }
+
+ingestion:
+  schedule: "0 */6 * * *"

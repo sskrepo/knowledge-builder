@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/architect/designs/v1.json",
+  "title": "Architect — system / module design — v1",
+  "description": "STARTER.",
+  "type": "object",
+  "required": ["design_name", "summary"],
+  "properties": {
+    "design_name": { "type": "string", "maxLength": 200 },
+    "summary": { "type": "string", "maxLength": 800 },
+    "services_touched": { "type": "array", "items": { "type": "string" } },
+    "resources_touched": { "type": "array", "items": { "type": "string" } },
+    "design_decisions": { "type": "array", "items": { "type": "string" } },
+    "rejected_alternatives": { "type": "array", "items": { "type": "string" } },
+    "open_questions": { "type": "array", "items": { "type": "string" } }
+  },
+  "additionalProperties": false
+}

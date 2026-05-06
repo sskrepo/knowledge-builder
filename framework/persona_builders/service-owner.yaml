@@ -1,0 +1,69 @@
+persona: service_owner
+display_name: "Service Owner Knowledge Builder"
+schema_version: 1
+status: draft
+primary_axis: service_id
+
+functional_areas: [refresh, provisioning, update, patching, dr]
+resources_relevant: [pod, poddb, exadata]
+kinds_supported: [catalog_entry, sla, decision, concept]
+
+knowledge_bases:
+  - name: service_catalog
+    kind: wiki
+    extraction_schema: parsers/schemas/service-owner/catalog/v1.json
+    sources:
+      - { kind: confluence, space: SVC-CATALOG }
+      - { kind: git, repo: org/service-catalog, paths: ["**/service.yaml"] }
+    retrieval_tools: [search_wiki, read_wiki_page]
+    kb_card:
+      summary: "Per-service catalog: ownership, SLOs, oncall, dependencies, runbook links."
+      use_when: "Question is 'who owns service X' or 'what is service X's SLO'."
+      input_shape: "Question; service id filter."
+      output_shape: "Cited service catalog entries."
+
+  - name: service_decisions
+    kind: wiki
+    extraction_schema: parsers/schemas/service-owner/decisions/v1.json
+    sources:
+      - { kind: confluence, space: SVC-DECISIONS }
+    retrieval_tools: [search_wiki, read_wiki_page]
+    kb_card:
+      summary: "Decisions made by service owners per service."
+      use_when: "Question is 'why does service X do Y'."
+      input_shape: "Question; service id filter."
+      output_shape: "Cited service decision documents."
+
+  - name: service_incidents
+    kind: vector
+    extraction_schema: parsers/schemas/incidents/v1.json
+    sources:
+      - { kind: jira, jql: 'project IN (P2T, INC)' }
+    retrieval_tools: [vector_search]
+    kb_card:
+      summary: "Service-scoped incident view (filtered subset of ops_incidents)."
+      use_when: "Question is 'what incidents touched service X recently'."
+      input_shape: "Question; service id filter mandatory."
+      output_shape: "Top-K cited incidents for that service."
+
+  - name: service_dependencies
+    kind: graph
+    sources: [derived]
+    retrieval_tools: [graph_traverse]
+    kb_card:
+      summary: "Inbound/outbound service dependencies (derived from FA semantic + service catalog)."
+      use_when: "Question is 'who calls service X' or 'what does service X depend on'."
+      input_shape: "URN start_entity (service)."
+      output_shape: "Paths."
+
+metadata_defaults:
+  persona_visibility: [service_owner, architect, eng_mgr, ops_mgr, ops_eng]
+  owner: service_owner
+  classification: internal
+
+eval:
+  gold_set: eval/gold_sets/service-owner.jsonl
+  exit_criteria: { recall_at_5: 0.80, faithfulness: 0.85, p95_latency_ms: 800, max_tokens_per_query: 2000 }
+
+ingestion:
+  schedule: "0 */4 * * *"

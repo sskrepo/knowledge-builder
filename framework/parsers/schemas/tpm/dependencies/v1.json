@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/tpm/dependencies/v1.json",
+  "title": "TPM cross-team dependency — v1",
+  "description": "STARTER.",
+  "type": "object",
+  "required": ["initiative", "depends_on"],
+  "properties": {
+    "initiative": { "type": "string", "description": "Initiative or program id.", "maxLength": 100 },
+    "depends_on": { "type": "array", "description": "Other initiatives / teams / deliverables blocking this.", "items": { "type": "object", "required": ["target"], "properties": { "target": { "type": "string" }, "kind": { "type": "string", "enum": ["initiative", "team", "deliverable", "approval"] }, "eta": { "type": "string", "format": "date" } } } },
+    "blocked_by": { "type": "array", "items": { "type": "string" } },
+    "owner": { "type": "string" },
+    "status": { "type": "string", "enum": ["green", "yellow", "red"] }
+  },
+  "additionalProperties": false
+}

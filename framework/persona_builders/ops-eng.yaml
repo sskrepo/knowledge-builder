@@ -1,0 +1,86 @@
+persona: ops_eng
+display_name: "Operations Engineer Knowledge Builder"
+schema_version: 1
+status: draft
+primary_axis: functional_area
+
+functional_areas: [refresh, provisioning, update, patching, db_infra_patching, dr]
+resources_relevant: [pod, poddb, exadata, block_volume, network]
+kinds_supported: [runbook, incident_history, postmortem, known_issue, decision]
+
+knowledge_bases:
+  # The proven Aira incident KB (already shipping per Phase 1)
+  - name: ops_incidents
+    kind: vector
+    extraction_schema: parsers/schemas/incidents/v1.json
+    sources:
+      - { kind: jira, jql: 'project IN (OPS, P2T)' }
+    retrieval_tools: [vector_search, get_incident_summary, graph_traverse]
+    kb_card:
+      summary: "Operational incidents with root cause, impact, resources affected, resolution."
+      use_when: "Question describes a symptom or asks about past incidents on a service/resource."
+      input_shape: "Question; resources / time_window / service filters."
+      output_shape: "Top-K cited incident summaries with linked services and tenants."
+      freshness: "Near-real-time via Jira webhooks."
+      expected_volume: "~50K tickets historical."
+
+  - name: ops_runbooks
+    kind: wiki
+    extraction_schema: parsers/schemas/ops-eng/runbooks/v1.json
+    sources:
+      - { kind: confluence, space: OPS-RUNBOOKS }
+      - { kind: git, repo: org/ops-runbooks, paths: ["**/*.md"] }
+    retrieval_tools: [search_wiki, read_wiki_page]
+    kb_card:
+      summary: "Operational runbooks per functional area / resource."
+      use_when: "Question is procedural — 'how do I run X' or 'how do I rollback Y'."
+      input_shape: "Question; functional_area + resources filters strongly recommended."
+      output_shape: "Cited runbook steps."
+
+  - name: ops_postmortems
+    kind: vector
+    extraction_schema: parsers/schemas/ops-eng/postmortems/v1.json
+    sources:
+      - { kind: confluence, space: OPS-PM }
+    retrieval_tools: [vector_search, search_wiki]
+    kb_card:
+      summary: "Postmortems with timeline, contributing factors, action items."
+      use_when: "Question is about systemic patterns or 'what did we learn from incident X'."
+      input_shape: "Question."
+      output_shape: "Top-K postmortems with timeline excerpts."
+
+  - name: ops_dependencies
+    kind: graph
+    sources: [derived]
+    retrieval_tools: [graph_traverse]
+    kb_card:
+      summary: "Service / resource dependency graph (derived from FA semantic + incidents)."
+      use_when: "Blast-radius questions — 'what depends on X' or 'what does X impact'."
+      input_shape: "URN start_entity; edge_types; depth."
+      output_shape: "Paths of nodes + edges."
+
+  - name: ops_fleet_state
+    kind: sql_passthrough
+    sources:
+      - { kind: udap, views: [pod_health, restart_counts, refresh_progress, fleet_inventory, patching_status] }
+    retrieval_tools: [query_fleet, text_to_sql]
+    kb_card:
+      summary: "Live fleet state (read-through to UDAP/Sentinel)."
+      use_when: "Question references the current state of fleet — counts, health, in-flight ops."
+      input_shape: "Filters or NL query (constrained to allowlisted views)."
+      output_shape: "Rows from the queried view."
+      freshness: "Live (sub-minute)."
+
+metadata_defaults:
+  persona_visibility: [ops_eng, ops_mgr, dev_mgr, aira]
+  owner: ops_eng
+  classification: internal
+
+eval:
+  gold_set: eval/gold_sets/ops-eng.jsonl
+  exit_criteria: { recall_at_5: 0.80, faithfulness: 0.85, p95_latency_ms: 800, max_tokens_per_query: 2000 }
+
+ingestion:
+  schedule: "*/15 * * * *"
+  max_concurrent_workers: 8
+  cost_alarm_tokens_per_day: 10000000

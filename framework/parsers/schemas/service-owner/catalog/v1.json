@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/service-owner/catalog/v1.json",
+  "title": "Service Owner — service catalog entry — v1",
+  "type": "object",
+  "required": ["service_id", "owner_team", "tier"],
+  "properties": {
+    "service_id": { "type": "string" },
+    "display_name": { "type": "string" },
+    "owner_team": { "type": "string" },
+    "oncall_team": { "type": "string" },
+    "tier": { "type": "string", "enum": ["tier-0", "tier-1", "tier-2", "tier-3"] },
+    "slos": { "type": "array", "items": { "type": "object", "properties": { "metric": { "type": "string" }, "target": { "type": "string" }, "window": { "type": "string" } } } },
+    "depends_on_services": { "type": "array", "items": { "type": "string" } },
+    "depends_on_resources": { "type": "array", "items": { "type": "string" } },
+    "runbook_links": { "type": "array", "items": { "type": "string", "format": "uri" } },
+    "repo_url": { "type": "string", "format": "uri" }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,153 @@
+# FAaaS domain ontology — owned by Architect, env-independent.
+# Per ADR-006, ADR-008, ADR-009. Loaded into orchestrator at startup.
+# Mirror copy lives in kb_shim.faaas table for runtime queries.
+
+version: 1
+last_reviewed: 2026-05-05
+
+# ---- Personas ---------------------------------------------------------------
+personas:
+  # PRODUCERS (own a Knowledge Builder)
+  - id: pm
+    display_name: "Product Manager"
+    role: producer
+    primary_axis: feature_or_release
+    knowledge_focus: [feature definition, release planning, competitive research]
+  - id: tpm
+    display_name: "Technical Program Manager"
+    role: producer
+    primary_axis: program
+    knowledge_focus: [weekly ops, ECARs, cross-team dependencies]
+  - id: architect
+    display_name: "Architect"
+    role: producer
+    primary_axis: functional_area
+    knowledge_focus: [system design, ADRs, integration patterns]
+  - id: eng_mgr
+    display_name: "Engineering Manager"
+    role: producer
+    primary_axis: functional_area
+    knowledge_focus: [engineering execution, decisions per workstream, runbooks]
+  - id: developer
+    display_name: "Developer"
+    role: producer
+    primary_axis: service_id
+    knowledge_focus: [code structure, OpenAPI specs, design decisions]
+  - id: ops_mgr
+    display_name: "Operations Manager"
+    role: producer
+    primary_axis: functional_area
+    knowledge_focus: [SLAs, escalation paths, customer-impact tracking]
+  - id: ops_eng
+    display_name: "Operations Engineer"
+    role: producer
+    primary_axis: functional_area
+    knowledge_focus: [runbooks, incident history, postmortems, fleet ops]
+  - id: service_owner
+    display_name: "Service Owner"
+    role: producer
+    primary_axis: service_id
+    knowledge_focus: [service catalog, ownership, SLOs, decisions per service]
+
+  # CONSUMERS (use-case agents)
+  - id: aira
+    display_name: "Aira (incident agent)"
+    role: consumer
+  - id: portal
+    display_name: "Internal portal"
+    role: consumer
+  - id: coding_assistant
+    display_name: "Coding assistant"
+    role: consumer
+
+# ---- Services ---------------------------------------------------------------
+services:
+  - id: adp
+    display_name: "ADP"
+    description: "Application Deployment Platform."
+    owner_persona: service_owner
+  - id: facp
+    display_name: "FACP"
+    description: "Fusion Apps Cloud Platform."
+    owner_persona: service_owner
+  - id: hcp
+    display_name: "HCP"
+    description: "Hosted Cloud Platform."
+    owner_persona: service_owner
+
+# ---- Resources (FAaaS resource ontology; per ADR-009) -----------------------
+resources:
+  - id: pod
+    display_name: "POD"
+    description: "Customer instance unit; isolation boundary for tenants."
+    contains: [poddb]
+    used_by_services: [adp, facp, hcp]
+    typical_functional_areas: [refresh, provisioning, patching, dr]
+
+  - id: poddb
+    display_name: "POD Database"
+    description: "Per-customer FA database within a POD."
+    contained_in: [pod]
+    runs_on: [exadata]
+    typical_functional_areas: [refresh, db_infra_patching, dr]
+
+  - id: exadata
+    display_name: "Exadata"
+    description: "Engineered DB platform hosting many PODDBs."
+    hosts: [poddb]
+    uses: [block_volume, network]
+    typical_functional_areas: [db_infra_patching, dr]
+
+  - id: block_volume
+    display_name: "Block Volume"
+    description: "Persistent block storage."
+    used_by: [exadata]
+
+  - id: network
+    display_name: "Network"
+    description: "Networking layer (VCN, subnets, ACLs)."
+    used_by: [exadata, pod]
+
+# ---- Functional areas (orthogonal axis to personas; per ADR-008) ------------
+functional_areas:
+  - id: refresh
+    display_name: "Refresh"
+    description: "Bringing a customer environment to a new state (e.g., copy prod to non-prod)."
+    typical_personas: [eng_mgr, ops_eng, ops_mgr, service_owner]
+  - id: provisioning
+    display_name: "Provisioning"
+    description: "Creating new customer instances and resources."
+    typical_personas: [eng_mgr, ops_eng, developer]
+  - id: update
+    display_name: "Update"
+    description: "Updating to new application versions."
+    typical_personas: [eng_mgr, ops_eng, ops_mgr]
+  - id: patching
+    display_name: "Patching"
+    description: "Applying patches to running instances."
+    typical_personas: [ops_eng, ops_mgr]
+  - id: db_infra_patching
+    display_name: "DB Infra Patching"
+    description: "Patching the database infrastructure (Exadata, etc.)."
+    typical_personas: [ops_eng]
+  - id: dr
+    display_name: "Disaster Recovery"
+    description: "DR planning, testing, and execution."
+    typical_personas: [ops_mgr, ops_eng, architect]
+
+# ---- Kinds of knowledge -----------------------------------------------------
+kinds_of_knowledge:
+  - { id: concept,           description: "Background/explanatory content." }
+  - { id: procedure,         description: "Step-by-step how-to." }
+  - { id: runbook,           description: "Operational response procedure." }
+  - { id: design,            description: "Design or architecture document." }
+  - { id: decision,          description: "Recorded decision or ADR." }
+  - { id: incident_history,  description: "Past incident records." }
+  - { id: postmortem,        description: "Postmortem analysis of an incident." }
+  - { id: known_issue,       description: "Catalogued known issues with resolutions." }
+  - { id: feature_brief,     description: "PM feature brief / PRD." }
+  - { id: release_plan,      description: "Release plan with scope and dates." }
+  - { id: weekly_summary,    description: "Weekly ops or program summary." }
+  - { id: ecar,              description: "Compliance / risk exception (ECAR)." }
+  - { id: sla,               description: "Service-level agreement document." }
+  - { id: catalog_entry,     description: "Service catalog entry with ownership and SLOs." }

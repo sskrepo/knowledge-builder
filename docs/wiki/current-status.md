@@ -11,7 +11,7 @@ status: current
 # Current Status
 
 ## Where we are
-**Phase 0 — Setup, autonomous run complete.** All Phase-0 documentation and configuration deliverables are drafted: 4 DECISIONs, 5 ADRs, 8 PM wiki pages, persona-builder + extraction-schema templates, an incident extraction schema (`v1`), a 5-question seed eval gold-set, and the Phase-0 kickoff brief. **No production code was written** — Phase 0 is docs/configs only by design.
+**Phase 0 — Setup, FULL design pass complete.** Beyond the initial Phase 0 deliverables, an Architect kickoff produced ADRs 006–011, three architect wiki pages (architecture / data-model / api-design), the full configuration plane (dev/staging/prod env yamls, adapter yamls including dual-mode Confluence/Jira, shim_faaas ontology, bootstrap-vault and check-config scripts), Adapter Protocol + dual-mode adapter stubs, and a complete Option-3 persona starter pack (8 persona builder configs + 22 extraction schemas + 8 gold sets, all `status: draft`). PDD also published as .docx; exec brief as .pptx.
 
 Two things gate Phase 1:
 1. **Your Gate-1 review** of ADRs + PM ingest (see dashboard)

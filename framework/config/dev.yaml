@@ -1,0 +1,89 @@
+# Knowledge Builder Framework — DEV environment config
+# Per ADR-010. Validate with: kb-cli check-config --env dev
+# Replace YOUR_* placeholders with real OCIDs/values; never commit secrets here.
+# All secrets live in OCI Vault; this file holds only references.
+
+env: dev
+region: us-ashburn-1
+
+# ---- Oracle 23ai Autonomous Database (converged store; per ADR-001/002) ------
+adb:
+  service_name: kbf_dev_high
+  wallet_path: /opt/kb/wallet/dev/                # download from OCI Console
+  admin_user: ADMIN
+  admin_password_secret: vault://kb/adb-admin-dev
+  schemas:
+    kb_incidents:
+      user: KB_INCIDENTS_RW
+      password_secret: vault://kb/kb-incidents-rw-dev
+    kb_wiki_meta:
+      user: KB_WIKI_RW
+      password_secret: vault://kb/kb-wiki-rw-dev
+    kb_code:
+      user: KB_CODE_RW
+      password_secret: vault://kb/kb-code-rw-dev
+    kb_fa_semantic:
+      user: KB_FA_RW
+      password_secret: vault://kb/kb-fa-rw-dev
+    kb_shim:
+      user: KB_SHIM_RW
+      password_secret: vault://kb/kb-shim-rw-dev
+
+# ---- OCI Vault (the secrets store) -------------------------------------------
+vault:
+  vault_ocid: ocid1.vault.oc1.iad.YOUR_VAULT_OCID
+  master_key_ocid: ocid1.key.oc1.iad.YOUR_KEY_OCID
+  compartment_ocid: ocid1.compartment.oc1..YOUR_COMPARTMENT
+
+# ---- OCI Object Storage (raw dumps, audit, eval artifacts) -------------------
+object_storage:
+  namespace: YOUR_TENANCY_NAMESPACE
+  bucket: kb-raw-dev
+  lifecycle_days: 90
+
+# ---- OCI Streaming (change-event fan-out for incremental ingest) -------------
+streaming:
+  stream_ocid: ocid1.stream.oc1.iad.YOUR_STREAM_OCID
+  bootstrap_servers: cell-1.streaming.us-ashburn-1.oci.oraclecloud.com:9092
+
+# ---- OCI Compute / Container Instances (where MCP server runs) ---------------
+compute:
+  mcp_server_endpoint: https://kb-dev.mycompany.internal
+  health_check_path: /healthz
+
+# ---- OCI Functions (ingestion workers) ---------------------------------------
+functions:
+  app_ocid: ocid1.fnapp.oc1.iad.YOUR_FN_APP_OCID
+  ingestion_function: kb-ingest-dev
+
+# ---- OpenAI (Oracle-certified; per DECISION-003) -----------------------------
+openai:
+  api_key_secret: vault://kb/openai-api-key
+  org_id_secret: vault://kb/openai-org-id
+  project_id_secret: vault://kb/openai-project-id
+  models:
+    parser: gpt-4o
+    synthesis: gpt-4o
+    eval_judge: gpt-4o
+    embedding: text-embedding-3-large           # pinned; bumping requires reindex
+  spend_cap_usd_per_month: 200
+  rate_tier: 2
+
+# ---- Observability -----------------------------------------------------------
+observability:
+  cost_telemetry_table: kb_shim.cost_log
+  log_level: INFO
+
+# ---- Eval --------------------------------------------------------------------
+eval:
+  baseline_storage: oci://kb-raw-dev/eval/baselines/
+  artifact_storage: oci://kb-raw-dev/eval/runs/
+  ci_token_cap_per_pr_usd: 5
+
+# ---- Optional per-env overrides for adapter configs --------------------------
+# Only override fields that differ from adapters/{kind}.yaml defaults
+# adapters_overrides:
+#   confluence:
+#     mode: native
+#   jira:
+#     mode: mcp

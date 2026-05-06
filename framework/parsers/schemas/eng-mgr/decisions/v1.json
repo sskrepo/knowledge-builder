@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/eng-mgr/decisions/v1.json",
+  "title": "Eng Manager — decision — v1",
+  "type": "object",
+  "required": ["decision_title", "context", "decision"],
+  "properties": {
+    "decision_title": { "type": "string", "maxLength": 200 },
+    "context": { "type": "string", "maxLength": 800 },
+    "decision": { "type": "string", "maxLength": 800 },
+    "functional_area": { "type": "string", "enum": ["refresh","provisioning","update","patching","db_infra_patching","dr"] },
+    "service": { "type": "string" },
+    "owner": { "type": "string" },
+    "rejected_alternatives": { "type": "array", "items": { "type": "string" } }
+  },
+  "additionalProperties": false
+}

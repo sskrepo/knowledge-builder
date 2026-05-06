@@ -1,0 +1,6 @@
+# Git adapter — single-mode (SSH). Used for git-backed wikis and code repos.
+adapter: git
+mode: ssh
+ssh_key_secret_default: vault://kb/git-readonly
+clone_cache_path: /var/lib/kb/git-cache
+clone_depth: 1                            # shallow by default; deep for archaeology

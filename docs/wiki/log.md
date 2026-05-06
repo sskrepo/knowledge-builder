@@ -19,3 +19,10 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 ## [2026-05-05] pm (acting via tpm) | Authored PDD-Knowledge-Builder-Framework.md consolidating all design discussions: 5-layer architecture, polyglot per persona (knowledge_bases, not corpora), skills-default, functional-area + resources dimensions, persona-builder contract, phase plan, v1 acceptance, open ADRs 006-009
 ## [2026-05-05] pm (acting via tpm) | Authored exec-brief.md with mermaid diagrams (12 sections; PPT-ready) for leadership review
 ## [2026-05-05] tpm | Updated wiki index to surface PDD + exec brief as primary entry points
+## [2026-05-05] pm (acting via tpm) | Generated PDD as .docx with 14 embedded mermaid diagrams; exec brief as .pptx with 9 embedded diagrams (Midnight Executive palette)
+## [2026-05-06] architect (acting via tpm) | Amended ADR-004 (corpora→knowledge_bases, polyglot principle, KB cards). Authored ADR-006 (two-shim arch), ADR-007 (persona context skill contract), ADR-008 (functional-area + resources dimensions), ADR-009 (resource ontology), ADR-010 (configuration plane), ADR-011 (dual-mode source adapters)
+## [2026-05-06] architect (acting via tpm) | Authored architecture.md, data-model.md, api-design.md mirroring spec §3, §6.1, §6.4 with all ADR amendments
+## [2026-05-06] architect (acting via tpm) | Wrote configuration plane: framework/config/{dev,staging,prod}.yaml + _schema.json + adapters/{confluence,jira,git,udap,openai}.yaml + shim_faaas.yaml + .env.example + bootstrap-vault.sh + check-config.py
+## [2026-05-06] architect (acting via tpm) | Wrote dual-mode adapter stubs (Confluence native+mcp, Jira native+mcp), single-mode adapters (git, udap), Adapter Protocol in _base.py
+## [2026-05-06] architect (acting via tpm) | Wrote 8 persona context skill stubs (BasePersonaSkill + per-persona files) per ADR-007
+## [2026-05-06] pm (acting via tpm) | Authored full Option-3 starter pack: 8 persona_builders/{persona}.yaml + 22 extraction schemas under parsers/schemas/{persona}/* + 8 gold sets under eval/gold_sets/* (status: draft; STARTER labels throughout)

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/ops-mgr/slas/v1.json",
+  "title": "Ops Manager — SLA — v1",
+  "type": "object",
+  "required": ["service", "metric", "target"],
+  "properties": {
+    "service": { "type": "string" },
+    "tenant_tier": { "type": "string", "enum": ["enterprise", "standard", "free"] },
+    "metric": { "type": "string", "description": "What's being measured (availability, latency, RTO, RPO)." },
+    "target": { "type": "string", "description": "The committed target value." },
+    "credit_terms": { "type": "string", "description": "What customer gets if breached." },
+    "exclusions": { "type": "array", "items": { "type": "string" } }
+  },
+  "additionalProperties": false
+}

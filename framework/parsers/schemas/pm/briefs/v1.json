@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/pm/briefs/v1.json",
+  "title": "PM feature brief / PRD — v1",
+  "description": "STARTER schema. PM team to refine before promoting to production.",
+  "type": "object",
+  "required": ["feature_name", "owner", "target_release", "summary"],
+  "properties": {
+    "feature_name": { "type": "string", "description": "Short canonical name (kebab-case preferred).", "maxLength": 100 },
+    "owner": { "type": "string", "description": "Team or individual that owns this feature." },
+    "target_release": { "type": "string", "description": "FA release id (e.g., '25.01' or 'TBD').", "maxLength": 20 },
+    "personas_impacted": { "type": "array", "description": "User personas affected by this feature.", "items": { "type": "string" } },
+    "summary": { "type": "string", "description": "One-paragraph summary of what the feature does and why.", "maxLength": 800 },
+    "scope": { "type": "object", "description": "What's in / out of scope.", "properties": { "in_scope": { "type": "array", "items": { "type": "string" } }, "out_of_scope": { "type": "array", "items": { "type": "string" } } } },
+    "acceptance_criteria": { "type": "array", "description": "Demoable criteria (Given/When/Then preferred).", "items": { "type": "string" } },
+    "dependencies": { "type": "array", "description": "External or other-feature dependencies.", "items": { "type": "string" } },
+    "related_design_docs": { "type": "array", "description": "URLs to design docs, ADRs, or wireframes.", "items": { "type": "string", "format": "uri" } }
+  },
+  "additionalProperties": false
+}

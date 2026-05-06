@@ -1,0 +1,8 @@
+# OpenAI provider config (per DECISION-003, ADR-001).
+adapter: openai
+mode: api
+chat_completions_path: /v1/chat/completions
+embeddings_path: /v1/embeddings
+default_timeout_seconds: 60
+retries: 3
+backoff_strategy: exponential

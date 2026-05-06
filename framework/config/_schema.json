@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/config/_schema.json",
+  "title": "Knowledge Builder Framework — Environment Config Schema",
+  "description": "Validates framework/config/{env}.yaml. See ADR-010.",
+  "type": "object",
+  "required": ["env", "region", "adb", "vault", "object_storage", "openai", "observability", "eval"],
+  "properties": {
+    "env": { "type": "string", "enum": ["dev", "staging", "prod"] },
+    "region": { "type": "string" },
+
+    "adb": {
+      "type": "object",
+      "required": ["service_name", "wallet_path", "admin_user", "admin_password_secret", "schemas"],
+      "properties": {
+        "service_name": { "type": "string" },
+        "wallet_path": { "type": "string" },
+        "admin_user": { "type": "string" },
+        "admin_password_secret": { "type": "string", "pattern": "^vault://" },
+        "schemas": {
+          "type": "object",
+          "patternProperties": {
+            "^kb_[a-z_]+$": {
+              "type": "object",
+              "required": ["user", "password_secret"],
+              "properties": {
+                "user": { "type": "string" },
+                "password_secret": { "type": "string", "pattern": "^vault://" }
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "vault": {
+      "type": "object",
+      "required": ["vault_ocid", "master_key_ocid", "compartment_ocid"],
+      "properties": {
+        "vault_ocid": { "type": "string", "pattern": "^ocid1\\.vault\\." },
+        "master_key_ocid": { "type": "string", "pattern": "^ocid1\\.key\\." },
+        "compartment_ocid": { "type": "string", "pattern": "^ocid1\\.compartment\\." }
+      }
+    },
+
+    "object_storage": {
+      "type": "object",
+      "required": ["namespace", "bucket"],
+      "properties": {
+        "namespace": { "type": "string" },
+        "bucket": { "type": "string" },
+        "lifecycle_days": { "type": "integer", "minimum": 1 }
+      }
+    },
+
+    "streaming": {
+      "type": "object",
+      "properties": {
+        "stream_ocid": { "type": "string", "pattern": "^ocid1\\.stream\\." },
+        "bootstrap_servers": { "type": "string" }
+      }
+    },
+
+    "compute": {
+      "type": "object",
+      "properties": {
+        "mcp_server_endpoint": { "type": "string", "format": "uri" },
+        "health_check_path": { "type": "string" }
+      }
+    },
+
+    "functions": {
+      "type": "object",
+      "properties": {
+        "app_ocid": { "type": "string", "pattern": "^ocid1\\.fnapp\\." },
+        "ingestion_function": { "type": "string" }
+      }
+    },
+
+    "openai": {
+      "type": "object",
+      "required": ["api_key_secret", "models"],
+      "properties": {
+        "api_key_secret": { "type": "string", "pattern": "^vault://" },
+        "org_id_secret": { "type": "string", "pattern": "^vault://" },
+        "project_id_secret": { "type": "string", "pattern": "^vault://" },
+        "models": {
+          "type": "object",
+          "required": ["parser", "synthesis", "embedding"],
+          "properties": {
+            "parser": { "type": "string" },
+            "synthesis": { "type": "string" },
+            "eval_judge": { "type": "string" },
+            "embedding": { "type": "string" }
+          }
+        },
+        "spend_cap_usd_per_month": { "type": "number", "minimum": 0 },
+        "rate_tier": { "type": "integer", "minimum": 1 }
+      }
+    },
+
+    "observability": {
+      "type": "object",
+      "required": ["log_level"],
+      "properties": {
+        "cost_telemetry_table": { "type": "string" },
+        "log_level": { "type": "string", "enum": ["DEBUG", "INFO", "WARN", "ERROR"] }
+      }
+    },
+
+    "eval": {
+      "type": "object",
+      "properties": {
+        "baseline_storage": { "type": "string" },
+        "artifact_storage": { "type": "string" },
+        "ci_token_cap_per_pr_usd": { "type": "number", "minimum": 0 }
+      }
+    },
+
+    "adapters_overrides": {
+      "type": "object",
+      "description": "Optional per-env overrides for adapter configs.",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

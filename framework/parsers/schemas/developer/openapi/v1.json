@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/developer/openapi/v1.json",
+  "title": "Developer — OpenAPI summary — v1",
+  "description": "STARTER. Mostly structural; LLM extracts a per-endpoint summary line.",
+  "type": "object",
+  "required": ["service", "endpoint", "method"],
+  "properties": {
+    "service": { "type": "string", "description": "Service id this endpoint belongs to." },
+    "endpoint": { "type": "string", "description": "Path (e.g. '/v1/customers/{id}')." },
+    "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
+    "summary_line": { "type": "string", "description": "One-line human summary.", "maxLength": 200 },
+    "auth_required": { "type": "boolean" },
+    "request_schema_ref": { "type": "string" },
+    "response_schema_ref": { "type": "string" }
+  },
+  "additionalProperties": false
+}

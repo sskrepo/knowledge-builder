@@ -1,0 +1,42 @@
+env: prod
+region: us-ashburn-1
+adb:
+  service_name: kbf_prod_high
+  wallet_path: /opt/kb/wallet/prod/
+  admin_user: ADMIN
+  admin_password_secret: vault://kb/adb-admin-prod
+  schemas:
+    kb_incidents: { user: KB_INCIDENTS_RW, password_secret: vault://kb/kb-incidents-rw-prod }
+    kb_wiki_meta: { user: KB_WIKI_RW, password_secret: vault://kb/kb-wiki-rw-prod }
+    kb_code: { user: KB_CODE_RW, password_secret: vault://kb/kb-code-rw-prod }
+    kb_fa_semantic: { user: KB_FA_RW, password_secret: vault://kb/kb-fa-rw-prod }
+    kb_shim: { user: KB_SHIM_RW, password_secret: vault://kb/kb-shim-rw-prod }
+vault:
+  vault_ocid: ocid1.vault.oc1.iad.YOUR_PROD_VAULT
+  master_key_ocid: ocid1.key.oc1.iad.YOUR_PROD_KEY
+  compartment_ocid: ocid1.compartment.oc1..YOUR_PROD_COMP
+object_storage:
+  namespace: YOUR_TENANCY_NAMESPACE
+  bucket: kb-raw-prod
+  lifecycle_days: 365
+streaming:
+  stream_ocid: ocid1.stream.oc1.iad.YOUR_PROD_STREAM
+  bootstrap_servers: cell-1.streaming.us-ashburn-1.oci.oraclecloud.com:9092
+compute:
+  mcp_server_endpoint: https://kb.mycompany.internal
+  health_check_path: /healthz
+functions:
+  app_ocid: ocid1.fnapp.oc1.iad.YOUR_PROD_FN
+  ingestion_function: kb-ingest-prod
+openai:
+  api_key_secret: vault://kb/openai-api-key
+  org_id_secret: vault://kb/openai-org-id
+  project_id_secret: vault://kb/openai-project-id
+  models: { parser: gpt-4o, synthesis: gpt-4o, eval_judge: gpt-4o, embedding: text-embedding-3-large }
+  spend_cap_usd_per_month: 2000
+  rate_tier: 4
+observability: { cost_telemetry_table: kb_shim.cost_log, log_level: INFO }
+eval:
+  baseline_storage: oci://kb-raw-prod/eval/baselines/
+  artifact_storage: oci://kb-raw-prod/eval/runs/
+  ci_token_cap_per_pr_usd: 20

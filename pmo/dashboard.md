@@ -17,9 +17,18 @@ status: current
 
 **TL;DR.** Phase 0 documentation/config layer is **drafted in full**: 4 DECISIONs, 5 ADRs, 8 PM wiki pages, persona-builder + extraction-schema templates, an incident extraction schema (v1), a 5-question seed eval gold-set, the Phase-0 kickoff brief, the pending-decisions surface for all phases, an initial git commit, **and a consolidated PDD + executive brief** capturing all architectural decisions including knowledge_bases (rename of corpora), the 5-layer architecture, polyglot per persona, skills-default, functional-area + resources dimensions. **No production code was written** — Phase 0 is docs/configs only by design.
 
-**📄 Two new documents to read** (start here):
-- **[PDD — Knowledge Builder Framework](../docs/wiki/pdd/PDD-Knowledge-Builder-Framework.md)** — comprehensive product definition (all decisions consolidated, with mermaid diagrams)
-- **[Executive Brief](../docs/wiki/exec-brief.md)** — 12-section summary for leadership; PPT-convertible
+**📄 Two stakeholder documents** (also as office files):
+- **[PDD — Knowledge Builder Framework](../docs/wiki/pdd/PDD-Knowledge-Builder-Framework.md)** ([.docx](../docs/wiki/pdd/PDD-Knowledge-Builder-Framework.docx))
+- **[Executive Brief](../docs/wiki/exec-brief.md)** ([.pptx](../docs/wiki/exec-brief.pptx))
+
+**🆕 Architect kickoff complete** (overnight 2026-05-05 → 2026-05-06):
+- ADRs 006–011 published in [docs/wiki/adr/](../docs/wiki/adr/)
+- ADR-004 amended (corpora → knowledge_bases, polyglot principle, KB cards)
+- [architecture.md](../docs/wiki/architecture.md), [data-model.md](../docs/wiki/data-model.md), [api-design.md](../docs/wiki/api-design.md) authored
+- Configuration plane built in [framework/config/](../framework/config/) — env yamls + adapter yamls (dual-mode Confluence/Jira) + shim_faaas + scripts
+- Adapter stubs in [framework/adapters/](../framework/adapters/) — Confluence native + MCP, Jira native + MCP, Git, UDAP
+- 8 persona context skill stubs in [framework/persona_skills/](../framework/persona_skills/)
+- **Full Option-3 starter pack**: 8 persona builder configs + 22 extraction schemas + 8 gold sets across all producer personas (PM, TPM, Architect, Eng Mgr, Developer, Ops Mgr, Ops Eng, Service Owner). All marked `status: draft` for persona teams to refine.
 
 **You are gating two things to unblock Phase 1:**
 1. **Gate 1 review** — read the ADRs + PM ingest. Reply `GATE-1-PHASE-0: approved` (or per-artifact: `ADR-001: approved`, etc.). See "🔴 Approval gates" below.

@@ -1,0 +1,33 @@
+# Confluence adapter — dual-mode per ADR-011. Flip mode: native | mcp.
+adapter: confluence
+mode: mcp                                 # native | mcp
+
+native:
+  base_url: https://confluence.mycompany.internal
+  auth:
+    type: bearer_token
+    token_secret: vault://kb/confluence-readonly
+  pagination: { page_size: 50 }
+  rate_limit: { requests_per_minute: 120 }
+  webhook:
+    receiver_path: /webhooks/confluence
+    shared_secret: vault://kb/confluence-webhook-secret
+
+mcp:
+  endpoint: https://confluence-mcp.mycompany.internal/mcp
+  auth:
+    type: bearer_token
+    token_secret: vault://kb/confluence-mcp-token
+  tool_map:                               # framework op -> upstream tool name
+    list_pages_in_space: confluence.list_pages
+    get_page_by_id: confluence.get_page
+    search: confluence.search
+    list_attachments: confluence.list_attachments
+  required_capabilities: [list_pages_in_space, get_page_by_id]
+  rate_limit: { requests_per_minute: 60 }
+  cache_ttl_seconds: 300
+  poll_interval_seconds: 300              # if MCP server doesn't expose webhooks
+
+content_filtering:
+  exclude_archived: true
+  max_page_size_kb: 500

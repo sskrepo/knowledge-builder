@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/pm/research/v1.json",
+  "title": "PM market research — v1",
+  "description": "STARTER. Competitive scans, market positioning notes.",
+  "type": "object",
+  "required": ["topic", "summary"],
+  "properties": {
+    "topic": { "type": "string", "description": "Research question or theme.", "maxLength": 200 },
+    "summary": { "type": "string", "description": "What we learned.", "maxLength": 1000 },
+    "competitors": { "type": "array", "items": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string" }, "url": { "type": "string", "format": "uri" }, "approach": { "type": "string", "maxLength": 300 } } } },
+    "gaps": { "type": "array", "description": "Unmet customer needs.", "items": { "type": "string" } },
+    "implications": { "type": "array", "description": "What this means for our roadmap.", "items": { "type": "string" } },
+    "sources": { "type": "array", "items": { "type": "string", "format": "uri" } },
+    "snapshot_date": { "type": "string", "format": "date" }
+  },
+  "additionalProperties": false
+}

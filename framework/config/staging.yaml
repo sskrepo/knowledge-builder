@@ -1,0 +1,43 @@
+# Staging mirrors prod topology; smaller resources for parity testing.
+env: staging
+region: us-ashburn-1
+adb:
+  service_name: kbf_staging_high
+  wallet_path: /opt/kb/wallet/staging/
+  admin_user: ADMIN
+  admin_password_secret: vault://kb/adb-admin-staging
+  schemas:
+    kb_incidents: { user: KB_INCIDENTS_RW, password_secret: vault://kb/kb-incidents-rw-staging }
+    kb_wiki_meta: { user: KB_WIKI_RW, password_secret: vault://kb/kb-wiki-rw-staging }
+    kb_code: { user: KB_CODE_RW, password_secret: vault://kb/kb-code-rw-staging }
+    kb_fa_semantic: { user: KB_FA_RW, password_secret: vault://kb/kb-fa-rw-staging }
+    kb_shim: { user: KB_SHIM_RW, password_secret: vault://kb/kb-shim-rw-staging }
+vault:
+  vault_ocid: ocid1.vault.oc1.iad.YOUR_STAGING_VAULT
+  master_key_ocid: ocid1.key.oc1.iad.YOUR_STAGING_KEY
+  compartment_ocid: ocid1.compartment.oc1..YOUR_STAGING_COMP
+object_storage:
+  namespace: YOUR_TENANCY_NAMESPACE
+  bucket: kb-raw-staging
+  lifecycle_days: 90
+streaming:
+  stream_ocid: ocid1.stream.oc1.iad.YOUR_STAGING_STREAM
+  bootstrap_servers: cell-1.streaming.us-ashburn-1.oci.oraclecloud.com:9092
+compute:
+  mcp_server_endpoint: https://kb-staging.mycompany.internal
+  health_check_path: /healthz
+functions:
+  app_ocid: ocid1.fnapp.oc1.iad.YOUR_STAGING_FN
+  ingestion_function: kb-ingest-staging
+openai:
+  api_key_secret: vault://kb/openai-api-key
+  org_id_secret: vault://kb/openai-org-id
+  project_id_secret: vault://kb/openai-project-id
+  models: { parser: gpt-4o, synthesis: gpt-4o, eval_judge: gpt-4o, embedding: text-embedding-3-large }
+  spend_cap_usd_per_month: 500
+  rate_tier: 3
+observability: { cost_telemetry_table: kb_shim.cost_log, log_level: INFO }
+eval:
+  baseline_storage: oci://kb-raw-staging/eval/baselines/
+  artifact_storage: oci://kb-raw-staging/eval/runs/
+  ci_token_cap_per_pr_usd: 10

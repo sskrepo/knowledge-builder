@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/tpm/ecars/v1.json",
+  "title": "TPM ECAR (Engineering Change Approval Request) — v1",
+  "description": "STARTER. Compliance/risk exceptions.",
+  "type": "object",
+  "required": ["ecar_id", "scope", "risk_level", "owner"],
+  "properties": {
+    "ecar_id": { "type": "string", "maxLength": 30 },
+    "scope": { "type": "string", "description": "What is excepted and where (service / tenant / region).", "maxLength": 500 },
+    "risk_level": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+    "mitigation": { "type": "string", "description": "Compensating controls.", "maxLength": 500 },
+    "owner": { "type": "string", "description": "Accountable individual or team." },
+    "approver": { "type": "string", "description": "Who approved the exception." },
+    "expires": { "type": "string", "format": "date" },
+    "tenants_affected": { "type": "array", "items": { "type": "string" } }
+  },
+  "additionalProperties": false
+}

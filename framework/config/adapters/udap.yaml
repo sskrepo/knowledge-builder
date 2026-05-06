@@ -1,0 +1,13 @@
+# UDAP / Sentinel adapter — read-through (no ingest) per ADR-001.
+adapter: udap
+mode: read_through
+connection:
+  jdbc_url_secret: vault://kb/udap-jdbc-url
+  user_secret: vault://kb/udap-user
+  password_secret: vault://kb/udap-password
+allowlisted_views_file: framework/retrievers/fleet_views.yaml
+text_to_sql:
+  guardrails:
+    max_rows: 1000
+    max_runtime_seconds: 30
+    forbidden_patterns: [DROP, DELETE, UPDATE, INSERT, ALTER, GRANT, REVOKE, TRUNCATE, MERGE]

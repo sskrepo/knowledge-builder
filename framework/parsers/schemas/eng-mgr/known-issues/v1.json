@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/eng-mgr/known-issues/v1.json",
+  "title": "Eng Manager — known issue — v1",
+  "type": "object",
+  "required": ["title", "symptoms"],
+  "properties": {
+    "title": { "type": "string", "maxLength": 200 },
+    "symptoms": { "type": "string", "description": "What the user sees.", "maxLength": 500 },
+    "root_cause": { "type": "string", "maxLength": 500 },
+    "workaround": { "type": "string", "maxLength": 500 },
+    "permanent_fix_status": { "type": "string", "enum": ["unplanned", "planned", "in-progress", "shipped"] },
+    "resources": { "type": "array", "items": { "type": "string" } }
+  },
+  "additionalProperties": false
+}

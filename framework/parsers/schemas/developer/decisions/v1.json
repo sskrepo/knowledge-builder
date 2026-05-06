@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/developer/decisions/v1.json",
+  "title": "Developer — code-level decision — v1",
+  "type": "object",
+  "required": ["title", "summary"],
+  "properties": {
+    "title": { "type": "string", "maxLength": 200 },
+    "summary": { "type": "string", "maxLength": 500 },
+    "service": { "type": "string" },
+    "files_affected": { "type": "array", "items": { "type": "string" } },
+    "rationale": { "type": "string", "maxLength": 500 }
+  },
+  "additionalProperties": false
+}

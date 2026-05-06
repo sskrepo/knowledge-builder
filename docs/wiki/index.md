@@ -5,11 +5,14 @@
 - [log](log.md)
 
 ## Framework — start here
-- 📄 **[PDD — Knowledge Builder Framework](pdd/PDD-Knowledge-Builder-Framework.md)** — comprehensive product definition (all decisions consolidated)
-- 📊 **[Executive Brief](exec-brief.md)** — 12-section summary for leadership audiences (mermaid diagrams; PPT-ready)
+- 📄 **[PDD — Knowledge Builder Framework](pdd/PDD-Knowledge-Builder-Framework.md)** — comprehensive product definition (also as .docx in same folder)
+- 📊 **[Executive Brief](exec-brief.md)** — 14-section deck for leadership (also as .pptx in same folder)
 - [project-overview](project-overview.md) — vision, personas, value loop, v1 scope
 - [personas](personas.md) — knowledge producers (PM/TPM/...) and use-case agents (Aira/portals)
 - [persona-knowledge-builder](persona-knowledge-builder.md) — per-persona builder agent contract
+- [architecture](architecture.md) — system shape, 5-layer model, module map
+- [data-model](data-model.md) — ContentItem / Chunk / Edge + multi-axis fields
+- [api-design](api-design.md) — MCP retrieval tool surface
 
 ## Modules (one per data type, spec §4)
 - [module-incidents](module-incidents.md) — operational incidents (Phase 1, proven path)
@@ -23,8 +26,36 @@
 - [ADR-001 — Tech-stack baseline](adr/ADR-001-tech-stack-baseline.md)
 - [ADR-002 — Storage shape per data type](adr/ADR-002-storage-shape.md)
 - [ADR-003 — Core interfaces (§6)](adr/ADR-003-core-interfaces.md)
-- [ADR-004 — Persona-builder config schema](adr/ADR-004-persona-builder-config.md)
+- [ADR-004 — Persona-builder config schema (v2 amended)](adr/ADR-004-persona-builder-config.md)
 - [ADR-005 — Eval harness](adr/ADR-005-eval-harness.md)
+- [ADR-006 — Two-shim layered architecture](adr/ADR-006-two-shim-architecture.md)
+- [ADR-007 — Persona context skill contract](adr/ADR-007-persona-context-skill.md)
+- [ADR-008 — Functional-area + resources dimensions](adr/ADR-008-functional-area-and-resources.md)
+- [ADR-009 — Resource ontology](adr/ADR-009-resource-ontology.md)
+- [ADR-010 — Configuration plane](adr/ADR-010-configuration-plane.md)
+- [ADR-011 — Dual-mode source adapters (REST + MCP)](adr/ADR-011-dual-mode-source-adapters.md)
+
+## Persona starter packs (in `framework/persona_builders/`)
+All 8 producer personas have starter configs + extraction schemas + gold sets — labeled `status: draft`. Persona teams refine and promote to `status: production` per ADR-004.
+
+| Persona | Config | Gold set |
+|---|---|---|
+| PM | [pm.yaml](../../framework/persona_builders/pm.yaml) | [pm.jsonl](../../eval/gold_sets/pm.jsonl) |
+| TPM | [tpm.yaml](../../framework/persona_builders/tpm.yaml) | [tpm.jsonl](../../eval/gold_sets/tpm.jsonl) |
+| Architect | [architect.yaml](../../framework/persona_builders/architect.yaml) | [architect.jsonl](../../eval/gold_sets/architect.jsonl) |
+| Eng Manager | [eng-mgr.yaml](../../framework/persona_builders/eng-mgr.yaml) | [eng-mgr.jsonl](../../eval/gold_sets/eng-mgr.jsonl) |
+| Developer | [developer.yaml](../../framework/persona_builders/developer.yaml) | [developer.jsonl](../../eval/gold_sets/developer.jsonl) |
+| Ops Manager | [ops-mgr.yaml](../../framework/persona_builders/ops-mgr.yaml) | [ops-mgr.jsonl](../../eval/gold_sets/ops-mgr.jsonl) |
+| Ops Engineer | [ops-eng.yaml](../../framework/persona_builders/ops-eng.yaml) | [ops-eng.jsonl](../../eval/gold_sets/ops-eng.jsonl) |
+| Service Owner | [service-owner.yaml](../../framework/persona_builders/service-owner.yaml) | [service-owner.jsonl](../../eval/gold_sets/service-owner.jsonl) |
+
+## Configuration plane (in `framework/config/`)
+- [_schema.json](../../framework/config/_schema.json) — JSON-Schema validating env files
+- [dev.yaml](../../framework/config/dev.yaml) / [staging.yaml](../../framework/config/staging.yaml) / [prod.yaml](../../framework/config/prod.yaml) — env configs
+- adapters: [confluence.yaml](../../framework/config/adapters/confluence.yaml) (dual-mode) · [jira.yaml](../../framework/config/adapters/jira.yaml) (dual-mode) · [git](../../framework/config/adapters/git.yaml) · [udap](../../framework/config/adapters/udap.yaml) · [openai](../../framework/config/adapters/openai.yaml)
+- [shim_faaas.yaml](../../framework/config/shim_faaas.yaml) — FAaaS domain ontology
+- [bootstrap-vault.sh](../../framework/scripts/bootstrap-vault.sh) — Vault setup walker
+- [check-config.py](../../framework/scripts/check-config.py) — pre-deploy validation
 
 ## Compiled by Dev Manager
 - `engineering/` — conventions, eval harness wiring, cost telemetry (Phase 0 → Phase 1)

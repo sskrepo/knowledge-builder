@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/pm/release-plans/v1.json",
+  "title": "PM release plan — v1",
+  "description": "STARTER. PM team to refine.",
+  "type": "object",
+  "required": ["release_id", "target_date", "scope_items"],
+  "properties": {
+    "release_id": { "type": "string", "description": "Release identifier (e.g. '25.01').", "maxLength": 20 },
+    "target_date": { "type": "string", "format": "date", "description": "Target ship date." },
+    "status": { "type": "string", "enum": ["planning", "in-progress", "shipped", "deferred"] },
+    "scope_items": { "type": "array", "description": "Top-level scope items (features, programs).", "items": { "type": "string" } },
+    "gating_risks": { "type": "array", "description": "Risks that could delay or descope.", "items": { "type": "string" } },
+    "owners": { "type": "array", "description": "Per-scope owners.", "items": { "type": "object", "properties": { "scope_item": { "type": "string" }, "owner": { "type": "string" } } } },
+    "freeze_dates": { "type": "object", "description": "Code/feature/release freeze dates.", "properties": { "feature_freeze": { "type": "string", "format": "date" }, "code_freeze": { "type": "string", "format": "date" } } }
+  },
+  "additionalProperties": false
+}

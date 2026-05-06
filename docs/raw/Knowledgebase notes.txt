@@ -1,0 +1,117 @@
+Assume you are the architect and you are asked to solve below problem.
+
+I need to build knowledge base for my Org in my company. 
+
+We develop cloud platform for a SaaS application called Fusion Applications.
+Basically you can expect all usual org structure and personas like 
+
+1. product managers
+2. Program managers(TPM)
+3. Architects
+4. Dev managers
+5. Developers
+6. Executive leadership
+7. Devops engineers
+
+
+We developed this platform for last four years and it scaled from running 0 customer application instances to 20K+ instances now.
+
+We are now adopting AI and realized all the above personas are going to adopt it.
+
+We have below sources of knowledge evolved over time:
+
+1. Confluence -> Product definition documents, TPM project tracking wikis, All dev design documents, operational weekly reports, ECAR documents, Compliance documents etc
+2. Jira -> Development project Jiras and also all incident management tickets
+3. Code -> entire code base (APIs, Workflows, API spec)
+4. Fleet data -> Unified data store(app instances, their metadata, operations data etc)
+
+Now due to AI Adoption by all personas listed above, we realized we need a knowledge base centrally
+so that everyone need not ingest their knowledge/context on their own, at the same time, we are able to retrieve knowledge efficiently for AI use cases
+Remember this knowledge base is with sole purpose of LLM consumption
+
+
+There are different layers:
+
+1. Raw data sources
+2. Target knowledge base structures we can store knowledge in
+3. Orchestration framework, that ingest knowledge and retrieves efficiently based on use case context
+
+(1) we know raw data sources
+
+we are trying to figure out (2) and (3)
+
+We came across https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f#file-llm-wiki-md.
+
+I sounds good for few 100 pages of knowledge, but I am not sure if we can use it for all types of knowledge(like fleet data etc)
+What are my options ?
+
+Dimensions to associate/navigate through the knowledge base:
+1. PERSONAS(PM / TPM / ARCHITECT / ENG MANAGER / DEVELOPER / OPS MANAGER / OPS ENGINEER, SERVICE OWNER)
+2. SERVICES(ADP / FACP / HCP)
+3. RESOURCES(POD, PODDB, EXADATA, BLOCK VOLUME Etc comes from Spec)
+4. FUNCTIONAL AREAS(REFRESH / PROVISIONING / UPDATE / PATCHING / DB INFRA PATCHING etc), MAY BE THIS IS A PERSONA ?
+
+
+
+
+Here is what I was thinking .. on how overall arch/flow of this system going to look, you tell me your "architect" opinion/review 
+
+
+Knowledge extraction Layer:
+
+1. For a given data source type, what are the right data structures to store extracted knowledge(This is where discussed so far, and we looked into tech stack to achieve it)
+2. All knowledge extraction will be driven through LLM
+	- Because we want LLM to maintain it going forward
+	- It is for LLM consumption, so use Markdown file format
+	- Data sources like fleet data, where there is only semantics to extract, not worthy to process through LLM, will remain a relational Schema and accessed using NL/SQL
+3. What knowledge we extract from a given data source depends on what PERSONA is extracting it.
+So we will have PERSONA based Knowledge builders driven through LLMs to extract and maintain knowledge
+4. There will be always context/semantics for each knowledge base, so that any agent knows how/what for to use the knowledgebase
+
+
+Context retrieval Layer:
+
+1. There will be a shim layer of baseline context in the form of LLM wikis about that FAaaS service is and what FAaaS team is
+	- This context is supposed to be enough for LLM to categorize any incoming question/action to be seggregated into which PERSONA/PERSONAS to reach out to
+	- This usually covers below dimensions:
+		1. PERSONAS(PM / TPM / ARCHITECT / ENG MANAGER / DEVELOPER / OPS MANAGER / OPS ENGINEER, SERVICE OWNER, SECURITY NINJA)
+		2. SERVICES(ADP / FACP / HCP)
+		3. RESOURCES(POD, PODDB, EXADATA, BLOCK VOLUME Etc comes from Spec)
+		4. FUNCTIONAL AREAS(REFRESH / PROVISIONING / UPDATE / PATCHING / DB INFRA PATCHING etc), MAY BE THIS IS A PERSONA ?
+
+
+2. For every PERSONA, we will have a agent to go to as next hop with reasoning from LLM of why that decision was made
+
+3. LLM asks to invoke corresponding PERSONA agent or agents
+
+4. Each agent will have context of what it needs to extract as context packet based on what LLM asks it
+	-Each agent will have details of every knowledge base and context on what that knowledge can be queried for
+	-Each agent will have PERSONA specific context building skill/prompts to get most relevant context
+	-Each agent will have other agents as tools,so that they can engage other agents as needed
+
+
+
+So if you layer the whole thing from bottom to top
+
+Knowledge bases -> Shim layer of semantics of each knowledge base -> PERSONA agents -> Shim layer of FAaaS service/team/resources -> Orchestrator agent
+
+Technically, everywhere I said "agent" can be replaced with "Skill"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

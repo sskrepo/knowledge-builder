@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/service-owner/decisions/v1.json",
+  "title": "Service Owner — decision — v1",
+  "type": "object",
+  "required": ["title", "service_id", "decision"],
+  "properties": {
+    "title": { "type": "string", "maxLength": 200 },
+    "service_id": { "type": "string" },
+    "context": { "type": "string", "maxLength": 600 },
+    "decision": { "type": "string", "maxLength": 600 },
+    "owner": { "type": "string" }
+  },
+  "additionalProperties": false
+}

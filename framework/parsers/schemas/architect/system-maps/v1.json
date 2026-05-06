@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/architect/system-maps/v1.json",
+  "title": "Architect — system map / integration topology — v1",
+  "type": "object",
+  "required": ["map_name", "nodes"],
+  "properties": {
+    "map_name": { "type": "string", "maxLength": 200 },
+    "summary": { "type": "string", "maxLength": 500 },
+    "nodes": { "type": "array", "description": "Logical components in the map.", "items": { "type": "object", "required": ["id", "kind"], "properties": { "id": { "type": "string" }, "kind": { "type": "string", "enum": ["service", "resource", "external"] }, "description": { "type": "string" } } } },
+    "edges": { "type": "array", "items": { "type": "object", "required": ["src", "dst", "rel"], "properties": { "src": { "type": "string" }, "dst": { "type": "string" }, "rel": { "type": "string" } } } }
+  },
+  "additionalProperties": false
+}

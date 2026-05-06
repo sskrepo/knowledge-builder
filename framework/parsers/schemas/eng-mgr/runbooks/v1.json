@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/eng-mgr/runbooks/v1.json",
+  "title": "Eng Manager — runbook — v1",
+  "type": "object",
+  "required": ["runbook_title", "trigger", "steps"],
+  "properties": {
+    "runbook_title": { "type": "string", "maxLength": 200 },
+    "trigger": { "type": "string", "description": "When to run this runbook.", "maxLength": 300 },
+    "steps": { "type": "array", "items": { "type": "string" } },
+    "rollback": { "type": "string", "description": "How to undo if needed.", "maxLength": 500 },
+    "functional_area": { "type": "string" },
+    "resources": { "type": "array", "items": { "type": "string" } },
+    "escalation": { "type": "string", "description": "Who to escalate to if blocked." }
+  },
+  "additionalProperties": false
+}

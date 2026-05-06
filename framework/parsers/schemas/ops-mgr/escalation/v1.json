@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/ops-mgr/escalation/v1.json",
+  "title": "Ops Manager — escalation path — v1",
+  "type": "object",
+  "required": ["scope", "ladder"],
+  "properties": {
+    "scope": { "type": "string", "description": "Service / functional_area / severity that this path covers." },
+    "ladder": { "type": "array", "description": "Ordered escalation contacts.", "items": { "type": "object", "properties": { "level": { "type": "integer" }, "contact": { "type": "string" }, "trigger": { "type": "string" }, "sla_minutes": { "type": "integer" } } } },
+    "exec_threshold": { "type": "string", "description": "When to involve executives." }
+  },
+  "additionalProperties": false
+}

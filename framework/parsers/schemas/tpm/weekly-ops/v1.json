@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/tpm/weekly-ops/v1.json",
+  "title": "TPM weekly ops summary — v1",
+  "description": "STARTER. TPM team to refine.",
+  "type": "object",
+  "required": ["week_id", "top_incidents", "blockers"],
+  "properties": {
+    "week_id": { "type": "string", "description": "ISO week id (e.g. '2026-W17').", "maxLength": 12 },
+    "summary": { "type": "string", "description": "Headline narrative.", "maxLength": 800 },
+    "top_incidents": { "type": "array", "items": { "type": "object", "properties": { "incident_id": { "type": "string" }, "service": { "type": "string" }, "severity": { "type": "string", "enum": ["sev1","sev2","sev3","sev4","near-miss"] }, "summary": { "type": "string" } } } },
+    "blockers": { "type": "array", "description": "Cross-team blockers needing exec attention.", "items": { "type": "string" } },
+    "exec_asks": { "type": "array", "description": "Specific asks for executives.", "items": { "type": "string" } },
+    "services_touched": { "type": "array", "items": { "type": "string" } },
+    "metrics": { "type": "object", "description": "Operational metrics for the week (counts, MTTRs).", "additionalProperties": { "type": "number" } }
+  },
+  "additionalProperties": false
+}
