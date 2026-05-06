@@ -13,7 +13,31 @@ status: current
 **Current phase:** Phase 0 — Setup
 **Updated:** 2026-05-04 by tpm (autonomous Phase 0 run)
 
-## 🌅 Morning briefing — 2026-05-05
+## 🌅 Morning briefing — 2026-05-06 (Phase 1 implementation complete)
+
+**Phase 1 code is done.** ~4150 LOC across 84 Python files. Two final commits landed:
+- ADRs 012/013 + ADR-005/007 amendments (per AIRA comparison)
+- Phase 1 implementation pass: adapters, parsers, vector store, retrievers, orchestrator, persona skills, ingestion, eval harness, FastAPI MCP server, kb-cli, CI gate, unit tests, dev-guide, runbook, 22 backlog stories
+
+**Honest status:** code is structurally complete and import-clean. Integration verification requires real provisioning. External-touchpoint markers in every file flag what needs ADB / OpenAI / live Jira / AIRA gold-set queries to run.
+
+**What you can do today (no provisioning needed):**
+1. Read `docs/wiki/engineering/dev-guide.md` for first-run instructions
+2. Read `docs/wiki/persona-onboarding-pm-tpm.md` and share with PM/TPM team leads in parallel
+3. Review the 22 stories in `pmo/stories/STORY-001..022.md`
+4. Run `pytest framework/tests/unit/` (no external deps; verifies chunker, ids, urns, recall metrics, ADR-013 filter strictness)
+
+**What unlocks Phase 1 exit gate (80% recall on 25-question gold set):**
+1. Provision Oracle 23ai ADB (dev tier) + populate Vault + run `kb-cli migrate --schema kb_incidents --env dev`
+2. OpenAI API key in Vault (Oracle-certified)
+3. Confluence + Jira tokens in Vault
+4. AIRA team shares ~50 query/citation pairs from their eval harness → bootstrap `eval/gold_sets/incidents.jsonl` to 25 entries
+5. Run `kb-cli ingest` against a Jira sample → verify end-to-end works
+6. Run `kb-cli eval` → if recall ≥ 80% and faithfulness ≥ 0.85, Phase 1 exits
+
+---
+
+## 🌅 Earlier briefing — 2026-05-05
 
 **TL;DR.** Phase 0 documentation/config layer is **drafted in full**: 4 DECISIONs, 5 ADRs, 8 PM wiki pages, persona-builder + extraction-schema templates, an incident extraction schema (v1), a 5-question seed eval gold-set, the Phase-0 kickoff brief, the pending-decisions surface for all phases, an initial git commit, **and a consolidated PDD + executive brief** capturing all architectural decisions including knowledge_bases (rename of corpora), the 5-layer architecture, polyglot per persona, skills-default, functional-area + resources dimensions. **No production code was written** — Phase 0 is docs/configs only by design.
 
