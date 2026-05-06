@@ -1,0 +1,43 @@
+# LLM provider config — per ADR-014
+# Provider switch: oci_genai (default; AIRA-aligned) | openai_direct (local-dev fallback)
+provider: oci_genai
+
+# === OCI Generative AI Inference (PRIMARY PATH) ============================
+# REPLACE the endpoint with your tenancy's regional GenAI Inference URL.
+# Common endpoints:
+#   https://inference.generativeai.us-ashburn-1.oci.oraclecloud.com
+#   https://inference.generativeai.us-chicago-1.oci.oraclecloud.com
+#   https://inference.generativeai.eu-frankfurt-1.oci.oraclecloud.com
+#   https://inference.generativeai.uk-london-1.oci.oraclecloud.com
+#   https://inference.generativeai.ap-mumbai-1.oci.oraclecloud.com
+#   https://inference.generativeai.ap-tokyo-1.oci.oraclecloud.com
+#   https://inference.generativeai.ap-sydney-1.oci.oraclecloud.com
+oci_genai:
+  endpoint: https://inference.generativeai.us-ashburn-1.oci.oraclecloud.com
+  # compartment OCID — null means "use vault.compartment_ocid from env config"
+  compartment_ocid: null
+  # auth: instance_principal | resource_principal | config_file
+  auth: instance_principal
+  config_profile: DEFAULT       # only used when auth: config_file
+  models:
+    chat: openai.gpt-4o
+    synthesis: openai.gpt-4o
+    eval_judge: openai.gpt-4o
+    embedding: openai.text-embedding-3-large
+  retries: 3
+  timeout_s: 60
+  rate_limit:
+    requests_per_minute: 600    # tier-dependent; lower for non-prod tenancies
+
+# === Direct OpenAI (FALLBACK; local dev only) ==============================
+openai_direct:
+  api_key_secret: vault://kb/openai-api-key
+  org_id_secret: vault://kb/openai-org-id
+  project_id_secret: vault://kb/openai-project-id
+  models:
+    chat: gpt-4o
+    synthesis: gpt-4o
+    eval_judge: gpt-4o
+    embedding: text-embedding-3-large
+  default_timeout_seconds: 60
+  retries: 3

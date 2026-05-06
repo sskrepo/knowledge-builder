@@ -1,162 +1,85 @@
-"""LLMClient — thin shim over OpenAI for the framework.
+"""LLMClient façade — picks oci_genai (default) or openai_direct based on config.
 
-Per ADR-001 (DECISION-003 OpenAI provider) and ADR-012 (in-DB embedding for bulk
-ingest, app-side for query-time only).
-
-Design notes:
-- Centralized cost telemetry: every call logs to kb_shim.cost_log via the
-  on_cost_event callback.
-- Two methods used in v1: chat() for parser/synthesizer/eval-judge; embed() for
-  query-time embedding only (bulk ingestion uses DB-side DBMS_VECTOR per ADR-012).
-- Provider-agnostic at the interface level: a future swap to OCI Generative AI
-  or Anthropic is a __init__ kwarg change.
+Per ADR-014. Callers import `LLMClient` from this module; the actual concrete
+class (OciGenAiLLMClient or DirectOpenAILLMClient) is selected at construction
+time from `framework/config/adapters/llm.yaml` (or env-overlay).
 """
 from __future__ import annotations
 
-import json
 import logging
 import os
-import time
-from dataclasses import dataclass
-from typing import Callable, Iterable
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from .llm_openai import CostEvent, DirectOpenAILLMClient, _price  # re-export
+from .llm_oci import OciGenAiLLMClient
 
 log = logging.getLogger(__name__)
 
 
-@dataclass
-class CostEvent:
-    """Written to kb_shim.cost_log per call. See ADR-005."""
-    operation: str          # "chat" | "embed"
-    model: str
-    tokens_in: int
-    tokens_out: int
-    dollars: float
-    latency_ms: int
-    request_id: str | None = None
+def LLMClient(*args, **kwargs) -> Any:
+    """Factory: returns the concrete LLM client for the configured provider.
 
-
-# Pricing table — keep in sync with eval/prices.yaml
-PRICES_USD_PER_1M_TOKENS = {
-    "gpt-4o": {"in": 2.50, "out": 10.00},
-    "text-embedding-3-large": {"in": 0.13, "out": 0.0},
-}
-
-
-def _price(model: str, tokens_in: int, tokens_out: int) -> float:
-    p = PRICES_USD_PER_1M_TOKENS.get(model)
-    if not p:
-        return 0.0
-    return (tokens_in / 1_000_000) * p["in"] + (tokens_out / 1_000_000) * p["out"]
-
-
-class LLMClient:
-    """Thin OpenAI client with cost telemetry.
-
-    Initialised once per process; reused across calls. Use embed() only for
-    query-time embedding (bulk ingestion goes through DBMS_VECTOR per ADR-012).
+    Honors:
+      1. Explicit `provider=` kwarg
+      2. Env var KBF_LLM_PROVIDER (`oci_genai` | `openai_direct`)
+      3. framework/config/adapters/llm.yaml::provider
+      4. Default: oci_genai
     """
+    provider = kwargs.pop("provider", None) or os.environ.get("KBF_LLM_PROVIDER")
+    cfg = _load_llm_config()
+    if not provider:
+        provider = cfg.get("provider", "oci_genai")
 
-    def __init__(
-        self,
-        api_key: str | None = None,
-        org_id: str | None = None,
-        project_id: str | None = None,
-        on_cost_event: Callable[[CostEvent], None] | None = None,
-    ):
-        # Lazy import so unit tests can stub without OpenAI installed.
-        try:
-            from openai import OpenAI  # type: ignore
-        except ImportError:
-            log.warning("openai package not installed; LLMClient is stub-mode")
-            self._client = None
-        else:
-            self._client = OpenAI(
-                api_key=api_key or os.environ.get("OPENAI_API_KEY"),
-                organization=org_id or os.environ.get("OPENAI_ORG_ID"),
-                project=project_id or os.environ.get("OPENAI_PROJECT_ID"),
-            )
-        self.on_cost_event = on_cost_event or self._log_cost
-
-    @staticmethod
-    def _log_cost(ev: CostEvent) -> None:
-        log.info(
-            "cost op=%s model=%s tin=%d tout=%d $=%.5f lat=%dms",
-            ev.operation, ev.model, ev.tokens_in, ev.tokens_out, ev.dollars, ev.latency_ms,
+    if provider == "oci_genai":
+        oci_cfg = cfg.get("oci_genai", {})
+        return OciGenAiLLMClient(
+            endpoint=kwargs.pop("endpoint", oci_cfg.get("endpoint", "")),
+            compartment_ocid=kwargs.pop("compartment_ocid",
+                                        _resolve_compartment(oci_cfg.get("compartment_ocid"))),
+            auth=kwargs.pop("auth", oci_cfg.get("auth", "instance_principal")),
+            config_profile=kwargs.pop("config_profile", oci_cfg.get("config_profile", "DEFAULT")),
+            models=kwargs.pop("models", oci_cfg.get("models")),
+            timeout_s=kwargs.pop("timeout_s", oci_cfg.get("timeout_s", 60)),
+            **kwargs,
         )
+    if provider == "openai_direct":
+        return DirectOpenAILLMClient(*args, **kwargs)
 
-    # ------------------------------------------------------------------
-    # chat() — used by parser, synthesizer, intent classifier, eval judge
-    # ------------------------------------------------------------------
-    def chat(
-        self,
-        model: str,
-        messages: list[dict],
-        *,
-        temperature: float = 0.0,
-        response_format: dict | None = None,
-        max_tokens: int | None = None,
-        timeout_s: int = 60,
-    ) -> dict:
-        """Returns {"text": str, "tokens_in": int, "tokens_out": int}."""
-        if self._client is None:
-            return {"text": '{"_stub": true}', "tokens_in": 0, "tokens_out": 0}
+    raise ValueError(f"unknown LLM provider: {provider}")
 
-        t0 = time.time()
-        kwargs: dict = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "timeout": timeout_s,
-        }
-        if response_format is not None:
-            kwargs["response_format"] = response_format
-        if max_tokens is not None:
-            kwargs["max_tokens"] = max_tokens
 
-        resp = self._client.chat.completions.create(**kwargs)
-        latency_ms = int((time.time() - t0) * 1000)
+def _load_llm_config() -> dict:
+    """Read framework/config/adapters/llm.yaml; return empty dict if absent."""
+    here = Path(__file__).resolve()
+    repo = here.parents[2]  # core/ → framework/ → repo/
+    path = repo / "framework" / "config" / "adapters" / "llm.yaml"
+    if not path.exists():
+        return {}
+    try:
+        with open(path) as f:
+            return yaml.safe_load(f) or {}
+    except Exception as e:
+        log.warning("failed to load %s: %s", path, e)
+        return {}
 
-        text = resp.choices[0].message.content or ""
-        tin = getattr(resp.usage, "prompt_tokens", 0)
-        tout = getattr(resp.usage, "completion_tokens", 0)
 
-        ev = CostEvent("chat", model, tin, tout, _price(model, tin, tout), latency_ms,
-                       request_id=getattr(resp, "id", None))
-        self.on_cost_event(ev)
+def _resolve_compartment(value) -> str:
+    """Resolve a literal OCID, an env-overlay reference, or a vault reference."""
+    if not value:
+        # Fall back to env config compartment OCID
+        return os.environ.get("KBF_COMPARTMENT_OCID", "")
+    if isinstance(value, str) and value.startswith("vault://"):
+        from .vault import VaultClient
+        return VaultClient().resolve(value)
+    if isinstance(value, str) and value.startswith("${"):
+        # Simple ${vault.compartment_ocid} interpolation from env config
+        # (Phase 1: best-effort; fuller templating in Phase 2)
+        return os.environ.get("KBF_COMPARTMENT_OCID", "")
+    return str(value)
 
-        return {"text": text, "tokens_in": tin, "tokens_out": tout, "request_id": ev.request_id}
 
-    # ------------------------------------------------------------------
-    # embed() — query-time only; bulk ingestion uses DBMS_VECTOR (ADR-012)
-    # ------------------------------------------------------------------
-    def embed(
-        self,
-        model: str,
-        input: list[str],
-        *,
-        timeout_s: int = 60,
-    ) -> list[list[float]]:
-        """Returns a list of vectors, one per input string."""
-        if self._client is None:
-            # Stub mode for tests
-            return [[0.0] * 3072 for _ in input]
-
-        t0 = time.time()
-        resp = self._client.embeddings.create(
-            model=model, input=input, timeout=timeout_s,
-        )
-        latency_ms = int((time.time() - t0) * 1000)
-
-        vectors = [d.embedding for d in resp.data]
-        # validate dim — fail loud if model returns wrong size
-        for v in vectors:
-            if len(v) != 3072:
-                raise ValueError(
-                    f"unexpected embedding dim {len(v)} from model {model}; expected 3072"
-                )
-
-        tin = getattr(resp.usage, "total_tokens", 0)
-        ev = CostEvent("embed", model, tin, 0, _price(model, tin, 0), latency_ms)
-        self.on_cost_event(ev)
-
-        return vectors
+# Re-export for convenience and backward compat
+__all__ = ["LLMClient", "CostEvent", "_price", "OciGenAiLLMClient", "DirectOpenAILLMClient"]

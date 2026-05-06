@@ -40,3 +40,14 @@ eval:
   baseline_storage: oci://kb-raw-prod/eval/baselines/
   artifact_storage: oci://kb-raw-prod/eval/runs/
   ci_token_cap_per_pr_usd: 20
+
+# ---- OCI Generative AI Inference (LLM provider per ADR-014) -------------
+oci_genai:
+  endpoint: https://inference.generativeai.us-ashburn-1.oci.oraclecloud.com
+  # compartment defaults to vault.compartment_ocid above
+  auth: instance_principal
+  models:
+    chat: openai.gpt-4o
+    synthesis: openai.gpt-4o
+    eval_judge: openai.gpt-4o
+    embedding: openai.text-embedding-3-large

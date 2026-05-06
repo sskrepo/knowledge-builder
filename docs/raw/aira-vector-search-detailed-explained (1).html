@@ -1,0 +1,621 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AIRA Vector Search Detailed Explanation</title>
+  <style>
+    :root {
+      --ink: #1f2933;
+      --muted: #52616f;
+      --line: #d8dee8;
+      --paper: #ffffff;
+      --soft: #f5f7fa;
+      --soft-2: #edf2f7;
+      --accent: #0f766e;
+      --accent-dark: #115e59;
+      --warn: #9a3412;
+      --code-bg: #111827;
+      --code-ink: #e5e7eb;
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--soft);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      line-height: 1.58;
+    }
+    .page { max-width: 1180px; margin: 0 auto; padding: 40px 24px 64px; }
+    header { border-bottom: 1px solid var(--line); padding-bottom: 24px; margin-bottom: 28px; }
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--accent-dark);
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+    h1 { margin: 0; color: #102a43; font-size: 36px; line-height: 1.15; letter-spacing: 0; }
+    .subtitle { max-width: 940px; margin: 14px 0 0; color: var(--muted); font-size: 17px; }
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin: 28px 0;
+    }
+    .summary-card, section, nav {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    .summary-card { padding: 16px; }
+    .summary-card h2 {
+      margin: 0 0 8px;
+      font-size: 14px;
+      color: var(--accent-dark);
+      text-transform: uppercase;
+      letter-spacing: .06em;
+    }
+    .summary-card p { margin: 0; color: var(--muted); font-size: 14px; }
+    main { display: grid; grid-template-columns: 270px minmax(0, 1fr); gap: 28px; align-items: start; }
+    nav { position: sticky; top: 16px; padding: 14px; max-height: calc(100vh - 32px); overflow: auto; }
+    nav h2 { margin: 0 0 10px; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+    nav a { display: block; padding: 7px 6px; color: var(--ink); text-decoration: none; border-radius: 6px; font-size: 14px; }
+    nav a:hover { background: var(--soft-2); color: var(--accent-dark); }
+    section { padding: 24px; margin-bottom: 18px; }
+    h2 { margin: 0 0 12px; color: #102a43; font-size: 24px; letter-spacing: 0; }
+    h3 { margin: 22px 0 8px; color: #243b53; font-size: 18px; letter-spacing: 0; }
+    p { margin: 0 0 14px; }
+    ul, ol { margin: 0 0 16px 22px; padding: 0; }
+    li { margin: 5px 0; }
+    code {
+      background: var(--soft-2);
+      border-radius: 4px;
+      padding: 1px 5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: .92em;
+    }
+    pre {
+      margin: 12px 0 18px;
+      padding: 16px;
+      overflow-x: auto;
+      background: var(--code-bg);
+      color: var(--code-ink);
+      border-radius: 8px;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    pre code { background: transparent; color: inherit; padding: 0; border-radius: 0; font-size: inherit; }
+    table { width: 100%; border-collapse: collapse; margin: 14px 0 18px; font-size: 14px; }
+    th, td { border: 1px solid var(--line); padding: 10px 12px; text-align: left; vertical-align: top; }
+    th { background: var(--soft-2); color: #243b53; }
+    .callout {
+      border-left: 4px solid var(--accent);
+      background: #ecfdf5;
+      padding: 14px 16px;
+      margin: 16px 0;
+      border-radius: 0 8px 8px 0;
+    }
+    .warning { border-left-color: var(--warn); background: #fff7ed; }
+    .simple {
+      background: #eef8ff;
+      border-left-color: #0369a1;
+    }
+    @media (max-width: 980px) {
+      .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      main { grid-template-columns: 1fr; }
+      nav { position: static; max-height: none; }
+    }
+    @media (max-width: 620px) {
+      .page { padding: 28px 16px 48px; }
+      .summary-grid { grid-template-columns: 1fr; }
+      h1 { font-size: 30px; }
+      section { padding: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      <p class="eyebrow">AIRA Vector Search</p>
+      <h1>Detailed Explanation of How AIRA Stores and Retrieves KB Data</h1>
+      <p class="subtitle">
+        A DB-verified, plain-English walkthrough of AIRA's current knowledge-base storage, vector generation, retrieval flow, schema, and limitations.
+      </p>
+    </header>
+
+    <div class="summary-grid">
+      <div class="summary-card">
+        <h2>Storage</h2>
+        <p>Readable KB records live in service-specific dataset tables.</p>
+      </div>
+      <div class="summary-card">
+        <h2>Embedding</h2>
+        <p>The DB converts chunk text into <code>CHUNK_EMBEDDING</code>.</p>
+      </div>
+      <div class="summary-card">
+        <h2>Search</h2>
+        <p><code>KB_VECTOR_SEARCH</code> compares the query vector with stored vectors.</p>
+      </div>
+      <div class="summary-card">
+        <h2>Answer</h2>
+        <p>GenAI reads retrieved chunks and writes RCA/resolution.</p>
+      </div>
+    </div>
+
+    <main>
+      <nav>
+        <h2>Contents</h2>
+        <a href="#simple">Description</a>
+        <a href="#concepts">Core Concepts</a>
+        <a href="#flow">End-to-End Flow</a>
+        <a href="#stored">What AIRA Stores</a>
+        <a href="#chunking">Chunking Logic</a>
+        <a href="#mapping">Table Mapping</a>
+        <a href="#dataset-schema">Dataset Schema</a>
+        <a href="#vector-schema">Vector Schema</a>
+        <a href="#insert">Insert Flow</a>
+        <a href="#generation">Vector Generation</a>
+        <a href="#retrieval">Retrieval</a>
+        <a href="#query-vector">Query Vector Details</a>
+        <a href="#function">KB_VECTOR_SEARCH</a>
+        <a href="#function-source">Actual Function</a>
+        <a href="#java-filtering">Java Filtering</a>
+        <a href="#final-answer">Final Answer</a>
+        <a href="#missing">What Is Missing</a>
+        <a href="#limitations">Limitations</a>
+        <a href="#future">Future Improvement</a>
+        <a href="#tags">Tag Matching</a>
+        <a href="#example">Example</a>
+        <a href="#summary">Final Summary</a>
+      </nav>
+
+      <article>
+        <section id="simple">
+          <h2>Description</h2>
+          <p>AIRA keeps a knowledge base of past resolved Jira tickets. Each entry says what error happened, what component was involved, what the root cause was, how it was resolved, and which ticket it came from.</p>
+          <p>When a new issue arrives, AIRA searches these historical entries, retrieves the most relevant chunks, and gives those chunks to GenAI so it can produce a likely root cause, resolution, and similar ticket reference.</p>
+        </section>
+
+        <section id="concepts">
+          <h2>Core Concepts</h2>
+          <table>
+            <thead><tr><th>Concept</th><th>Simple meaning</th><th>AIRA example</th></tr></thead>
+            <tbody>
+              <tr><td>Dataset table</td><td>Stores readable historical KB records.</td><td><code>ADP_DATASETS</code></td></tr>
+              <tr><td>Vector table</td><td>Stores searchable numeric embeddings.</td><td><code>ADP_DATASETS_VECTOR</code></td></tr>
+              <tr><td>Chunk</td><td>One KB text unit to search and send to the LLM.</td><td><code>CHUNK_TEXT</code></td></tr>
+              <tr><td>Embedding</td><td>Numeric fingerprint of text meaning.</td><td><code>CHUNK_EMBEDDING</code></td></tr>
+              <tr><td>Score</td><td>How similar an old chunk is to the new query.</td><td><code>1 / (1 + VECTOR_DISTANCE(...))</code></td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="flow">
+          <h2>End-to-End Flow</h2>
+          <pre><code>1. A past Jira ticket is resolved.
+2. DataPipelineJob reads that ticket.
+3. GenAI extracts a clean KB record.
+4. A validation agent checks duplicate/validity.
+5. AIRA inserts the record into &lt;SERVICE&gt;_DATASETS.
+6. AIRA calls BATCH_INSERT_DATASETS_VECTORS.
+7. The DB creates an embedding in &lt;SERVICE&gt;_DATASETS_VECTOR.
+8. A user asks AIRA about a new error.
+9. AIRA calls KB_VECTOR_SEARCH.
+10. The DB returns similar historical chunks.
+11. Java filters and dedupes the chunks.
+12. GenAI reads the chunks and generates RCA/resolution.</code></pre>
+        </section>
+
+        <section id="stored">
+          <h2>What AIRA Stores</h2>
+          <p>The main KB payload is stored in <code>CHUNK_TEXT</code> as JSON.</p>
+          <pre><code>{
+  "TicketId": "ADP-246527",
+  "Component": "Source - adp-gi-domu-chain-patching",
+  "Error Message": "NullPointerException: Pod DB state was null during resource validation",
+  "Root Cause": "Pod db status was NULL; rotate pod db workflow set the pod db to NULL state.",
+  "Resolution": "Updated pod db state to ACTIVE/None."
+}</code></pre>
+          <p>AIRA also stores row metadata such as <code>DATASET_ID</code>, <code>CHUNK_INDEX</code>, <code>COMPONENT</code>, <code>JIRA_CREATION_DATE</code>, <code>STACK</code>, <code>ASSIGNEE</code>, and agent validation fields.</p>
+        </section>
+
+        <section id="chunking">
+          <h2>Chunking Logic</h2>
+          <p>Before AIRA inserts a KB record into the dataset table, Java converts the record to JSON and splits it into chunks.</p>
+          <pre><code>String jsonText = JsonUtil.extractJson(recordDetails.dataPipelineRecord().toString());
+List&lt;String&gt; chunks = chunkContent(jsonText);</code></pre>
+          <p>The chunking helper is <code>TextProcessingUtil.chunkContent(...)</code>. Its current maximum chunk size is:</p>
+          <pre><code>MAX_CHUNK_SIZE = 2000 characters</code></pre>
+          <p>The helper tries to split on sentence boundaries first. It uses this pattern:</p>
+          <pre><code>(?&lt;=\.)\s+</code></pre>
+          <p>That means it prefers to split after a period followed by spaces, so it avoids cutting normal sentences in the middle when possible.</p>
+          <h3>Example: Small KB Record</h3>
+          <p>If the full JSON is less than 2000 characters, AIRA stores one row:</p>
+          <pre><code>DATASET_ID   CHUNK_INDEX   CHUNK_TEXT
+ADP-100      0             { whole KB JSON }</code></pre>
+          <h3>Example: Large KB Record</h3>
+          <p>If the JSON is larger than 2000 characters, AIRA creates multiple rows for the same ticket:</p>
+          <pre><code>DATASET_ID   CHUNK_INDEX   CHUNK_TEXT
+ADP-100      0             first part of KB JSON
+ADP-100      1             second part of KB JSON
+ADP-100      2             third part of KB JSON</code></pre>
+          <h3>If One Sentence Is Too Long</h3>
+          <p>If one sentence itself is longer than 2000 characters, AIRA splits that long sentence into 2000-character pieces.</p>
+          <pre><code>one 4500-character sentence
+-> chunk 0: chars 0-1999
+-> chunk 1: chars 2000-3999
+-> chunk 2: chars 4000-4499</code></pre>
+          <div class="callout simple">
+            Simple way to remember it: one ticket can become many chunk rows. <code>DATASET_ID</code> is the ticket id, and <code>CHUNK_INDEX</code> is the chunk number for that ticket.
+          </div>
+        </section>
+
+        <section id="mapping">
+          <h2>Table Mapping</h2>
+          <table>
+            <thead><tr><th>Project key</th><th>Dataset table</th><th>Vector table</th></tr></thead>
+            <tbody>
+              <tr><td>ADP</td><td><code>ADP_DATASETS</code></td><td><code>ADP_DATASETS_VECTOR</code></td></tr>
+              <tr><td>FAAAS</td><td><code>FAAAS_DATASETS</code></td><td><code>FAAAS_DATASETS_VECTOR</code></td></tr>
+              <tr><td>FAAASINT</td><td><code>FAAASINT_DATASETS</code></td><td><code>FAAASINT_DATASETS_VECTOR</code></td></tr>
+              <tr><td>FAAASP2T / FAAASRCA</td><td><code>FAAASP2T_DATASETS</code></td><td><code>FAAASP2T_DATASETS_VECTOR</code></td></tr>
+              <tr><td>FAAASPROV</td><td><code>FAAASPROV_DATASETS</code></td><td><code>FAAASPROV_DATASETS_VECTOR</code></td></tr>
+              <tr><td>SFAAS</td><td><code>SFAAS_DATASETS</code></td><td><code>SFAAS_DATASETS_VECTOR</code></td></tr>
+              <tr><td>FAAASPATCH / FAAASUPG / FAAAStools</td><td><code>HCP_DATASETS</code></td><td><code>HCP_DATASETS_VECTOR</code></td></tr>
+              <tr><td>FAAASHCP</td><td><code>FAAASHCP_DATASETS</code></td><td><code>FAAASHCP_DATASETS_VECTOR</code></td></tr>
+              <tr><td>ADBMIGRATION</td><td><code>ADBSMIG_DATASETS</code></td><td><code>ADBSMIG_DATASETS_VECTOR</code></td></tr>
+              <tr><td>FAAASOPS</td><td><code>FAAASOPS_DATASETS</code></td><td><code>FAAASOPS_DATASETS_VECTOR</code></td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="dataset-schema">
+          <h2>Dataset Schema</h2>
+          <pre><code>ID                         NUMBER          NOT NULL
+DATASET_ID                 VARCHAR2(512)
+CHUNK_INDEX                NUMBER
+CHUNK_TEXT                 CLOB            NOT NULL
+COMPONENT                  VARCHAR2(100)
+TIME_CREATED               TIMESTAMP(6)    NOT NULL
+IS_AGENT_CREATED           VARCHAR2(10)
+IS_HUMAN_VALIDATED         VARCHAR2(10)
+AGENT_COMMENT              VARCHAR2(2000)
+ADDEDBY                    VARCHAR2(2000)
+MODIFIEDBY                 VARCHAR2(2000)
+JIRA_CREATION_DATE         TIMESTAMP(6)
+STACK                      VARCHAR2(20/80)
+AIRA_WORK_REQUEST_ID       VARCHAR2(512)
+AIRA_WORK_REQUEST_STATUS   VARCHAR2(100)
+ASSIGNEE                   VARCHAR2(512)</code></pre>
+          <div class="callout warning">There is no <code>PROPERTIES</code> column today, so AIRA does not yet store structured failure context or tags in the DB.</div>
+        </section>
+
+        <section id="vector-schema">
+          <h2>Vector Schema</h2>
+          <pre><code>DOCID                NUMBER          NOT NULL
+DATASET_ID           VARCHAR2(512)   NOT NULL
+CHUNK_INDEX          NUMBER          NOT NULL
+BODY                 CLOB            NOT NULL
+CHUNK_EMBEDDING      VECTOR
+COMPONENT            VARCHAR2(100)
+TIME_CREATED         TIMESTAMP(6)    NOT NULL
+IS_AGENT_CREATED     VARCHAR2(10)    NOT NULL
+IS_HUMAN_VALIDATED   VARCHAR2(10)    NOT NULL
+JIRA_CREATION_DATE   TIMESTAMP(6)
+STACK                VARCHAR2(20/100)
+ASSIGNEE             VARCHAR2(512)</code></pre>
+          <p>The vector table contains the searchable text plus its numeric embedding.</p>
+        </section>
+
+        <section id="insert">
+          <h2>Insert Flow</h2>
+          <p><code>VectorDbHelper.addDataset(...)</code> inserts KB records with a <code>MERGE</code> so the same ticket/chunk is not inserted twice.</p>
+          <pre><code>MERGE INTO &lt;dataset_table&gt; dataset
+USING (SELECT ? AS dataSet_id, ? AS chunk_index FROM dual) src
+ON (dataset.dataSet_id = src.dataSet_id AND dataset.chunk_index = src.chunk_index)
+WHEN NOT MATCHED THEN
+INSERT (
+  dataSet_id, chunk_index, chunk_text, component,
+  is_agent_created, is_human_validated, agent_comment,
+  jira_creation_date, stack, assignee
+)
+VALUES (...)</code></pre>
+          <p>After the insert, Java calls:</p>
+          <pre><code>CALL BATCH_INSERT_DATASETS_VECTORS(&lt;dataset_table&gt;, &lt;dataset_table&gt;_VECTOR)</code></pre>
+        </section>
+
+        <section id="generation">
+          <h2>Vector Generation</h2>
+          <p><code>BATCH_INSERT_DATASETS_VECTORS</code> copies missing dataset rows into the vector table and generates <code>CHUNK_EMBEDDING</code> from <code>CHUNK_TEXT</code>.</p>
+          <pre><code>DBMS_VECTOR.UTL_TO_EMBEDDING(
+  chunk_text,
+  JSON('{
+    "provider": "OCIGenAI",
+    "credential_name": "OCI_VECTOR_CRED",
+    "url": "https://inference.generativeai.eu-frankfurt-1.oci.oraclecloud.com/20231130/actions/embedText",
+    "model": "openai.text-embedding-3-large"
+  }')
+)</code></pre>
+          <p>The procedure skips vector rows that already exist for the same <code>DATASET_ID</code> and <code>CHUNK_INDEX</code>.</p>
+        </section>
+
+        <section id="retrieval">
+          <h2>Retrieval</h2>
+          <p>Java calls the DB function with a raw query shaped like:</p>
+          <pre><code>&lt;projectKey&gt;:- &lt;stack&gt;:- &lt;user query&gt;</code></pre>
+          <p>Example:</p>
+          <pre><code>FAAASP2T:- prod:- NullPointerException: Pod DB state was null during resource validation</code></pre>
+          <p>The function returns:</p>
+          <pre><code>DOCID
+BODY
+SCORE</code></pre>
+        </section>
+
+        <section id="query-vector">
+          <h2>Query Vector Details</h2>
+          <p>When AIRA receives a new query, <code>KB_VECTOR_SEARCH</code> creates a vector for that query inside the database.</p>
+          <pre><code>query_vec := DBMS_VECTOR.UTL_TO_EMBEDDING(p_query, JSON(...));</code></pre>
+          <p>Today the function embeds the full raw query string, including project and stack:</p>
+          <pre><code>FAAASP2T:- prod:- NullPointerException: Pod DB state was null during resource validation</code></pre>
+          <p>That query vector is then compared against every <code>CHUNK_EMBEDDING</code> row in the selected vector table.</p>
+          <pre><code>VECTOR_DISTANCE(CHUNK_EMBEDDING, query_vec)</code></pre>
+          <p>The DB turns distance into a score:</p>
+          <pre><code>1 / (1 + VECTOR_DISTANCE(CHUNK_EMBEDDING, query_vec))</code></pre>
+          <table>
+            <thead><tr><th>Distance</th><th>Meaning</th><th>Score effect</th></tr></thead>
+            <tbody>
+              <tr><td>Small</td><td>Query and chunk are similar</td><td>Higher score</td></tr>
+              <tr><td>Large</td><td>Query and chunk are less similar</td><td>Lower score</td></tr>
+            </tbody>
+          </table>
+          <div class="callout simple">
+            Simple way to remember it: the query gets one vector, every stored chunk already has a vector, and the DB compares the query vector with chunk vectors to rank the best matches.
+          </div>
+        </section>
+
+        <section id="function">
+          <h2>KB_VECTOR_SEARCH</h2>
+          <p>The function parses project and stack from the raw query, chooses a vector table, embeds the full raw query, and compares it with <code>CHUNK_EMBEDDING</code>.</p>
+          <pre><code>1 / (1 + VECTOR_DISTANCE(CHUNK_EMBEDDING, query_vec))</code></pre>
+          <p>For <code>prod</code> or <code>demo</code>, rows with <code>STACK</code> prod/demo keep full score; other stacks get a 0.90 multiplier. Stack is a preference, not a hard filter.</p>
+        </section>
+
+        <section id="function-source">
+          <h2>Actual DB Function</h2>
+          <p>This is the live database function shape used today. Read it in four parts: parse the query, choose the vector table, create the query vector, then run vector-distance SQL.</p>
+          <h3>What It Does In Simple Steps</h3>
+          <ol>
+            <li>Reads <code>p_query</code>, expecting text like <code>FAAASP2T:- prod:- error text</code>.</li>
+            <li>Extracts <code>project_name</code> and <code>stack_name</code>.</li>
+            <li>Chooses one vector table, such as <code>FAAASP2T_DATASETS_VECTOR</code>.</li>
+            <li>Creates <code>query_vec</code> using <code>DBMS_VECTOR.UTL_TO_EMBEDDING</code>.</li>
+            <li>Compares <code>query_vec</code> against every row's <code>CHUNK_EMBEDDING</code>.</li>
+            <li>Returns the best matching rows as <code>DOCID</code>, <code>BODY</code>, and <code>SCORE</code>.</li>
+          </ol>
+          <div class="callout warning">
+            Current behavior to note: <code>top_k</code> is passed into the function but the SQL currently uses hard-coded <code>15</code>. Also, <code>DOCID</code> is returned as only <code>DATASET_ID</code>, so Java deduplication can collapse multiple chunks from the same ticket.
+          </div>
+          <pre><code>CREATE OR REPLACE FUNCTION kb_vector_search (
+    p_query IN VARCHAR2,
+    top_k   IN NUMBER
+) RETURN SYS_REFCURSOR IS
+    v_results     SYS_REFCURSOR;
+    query_vec     VECTOR;
+    project_name  VARCHAR2(128);
+    table_name    VARCHAR2(200);
+    v_sql_stmt    VARCHAR2(4000);
+    sep_pos       NUMBER;
+    first_sep     NUMBER;
+    second_sep    NUMBER;
+    stack_name    VARCHAR2(50);
+    v_age_expr    VARCHAR2(500);
+BEGIN
+    first_sep  := INSTR(p_query, ':-');
+    second_sep := INSTR(p_query, ':-', first_sep + 1);
+
+    IF first_sep = 0 THEN
+        project_name := 'ADP';
+        stack_name   := 'preprod';
+    ELSE
+        project_name := UPPER(TRIM(SUBSTR(p_query, 1, first_sep - 1)));
+
+        IF second_sep = 0 THEN
+            stack_name := 'preprod';
+        ELSE
+            stack_name := LOWER(TRIM(SUBSTR(p_query, first_sep + 2, second_sep - first_sep - 2)));
+            IF stack_name IS NULL OR stack_name = '' THEN
+                stack_name := 'preprod';
+            END IF;
+        END IF;
+    END IF;
+
+    IF project_name IN ('FAAASPATCH', 'FAAASTOOLS', 'FAAASUPG') THEN
+        table_name := 'HCP_DATASETS_VECTOR';
+    ELSIF project_name IN ('FAAAS') THEN
+        table_name := 'FAAAS_DATASETS_VECTOR';
+    ELSIF project_name IN ('FAAASINT') THEN
+        table_name := 'FAAASINT_DATASETS_VECTOR';
+    ELSIF project_name IN ('FAAASP2T') THEN
+        table_name := 'FAAASP2T_DATASETS_VECTOR';
+    ELSIF project_name IN ('SFAAS') THEN
+        table_name := 'SFAAS_DATASETS_VECTOR';
+    ELSIF project_name IN ('FAAASPROV') THEN
+        table_name := 'FAAASPROV_DATASETS_VECTOR';
+    ELSIF project_name IN ('ADBMIGRATION') THEN
+        table_name := 'ADBSMIG_DATASETS_VECTOR';
+    ELSIF project_name IN ('FAAASHCP') THEN
+        table_name := 'FAAASHCP_DATASETS_VECTOR';
+    ELSIF project_name IN ('FAAASOPS') THEN
+        table_name := 'FAAASOPS_DATASETS_VECTOR';
+    ELSE
+        table_name := 'ADP_DATASETS_VECTOR';
+    END IF;
+
+    query_vec := DBMS_VECTOR.UTL_TO_EMBEDDING(
+        p_query,
+        JSON('{
+            "provider": "OCIGenAI",
+            "credential_name": "OCI_VECTOR_CRED",
+            "url": "https://inference.generativeai.eu-frankfurt-1.oci.oraclecloud.com/20231130/actions/embedText",
+            "model": "openai.text-embedding-3-large"
+        }')
+    );
+
+    v_age_expr := 'GREATEST(SYSDATE - COALESCE(CAST(JIRA_CREATION_DATE AS DATE), CAST(TIME_CREATED AS DATE)), 0)';
+
+    IF stack_name IN ('prod', 'demo') THEN
+        v_sql_stmt :=
+        'SELECT DATASET_ID AS DOCID,
+                BODY,
+                TRUNC(1 / (1 + VECTOR_DISTANCE(CHUNK_EMBEDDING, :b1)), 3) AS RAW_SCORE,
+                TRUNC(
+                    (1 / (1 + VECTOR_DISTANCE(CHUNK_EMBEDDING, :b1))) *
+                    CASE
+                        WHEN STACK IN (''prod'', ''demo'') THEN 1.00
+                        ELSE 0.90
+                    END
+                , 3) AS SCORE
+         FROM ' || table_name || '
+         ORDER BY SCORE DESC,
+                  NVL(' || v_age_expr || ', 3650) ASC
+         FETCH FIRST :b3 ROWS ONLY';
+
+        OPEN v_results FOR v_sql_stmt
+        USING query_vec, query_vec, 15;
+    ELSE
+        v_sql_stmt :=
+        'SELECT DATASET_ID AS DOCID, BODY, ' ||
+        'TRUNC(1 / (1 + VECTOR_DISTANCE(CHUNK_EMBEDDING, :b1)), 3) AS SCORE ' ||
+        'FROM ' || table_name || ' ' ||
+        'WHERE DATASET_ID IN ( ' ||
+        ' SELECT DATASET_ID ' ||
+        ' FROM ' || table_name || ' ' ||
+        ' ORDER BY TRUNC(1 / (1 + VECTOR_DISTANCE(CHUNK_EMBEDDING, :b1)), 3) DESC, ' ||
+        ' NVL(' || v_age_expr || ', 3650) ASC' ||
+        ' FETCH FIRST :b2 ROWS ONLY ' ||
+        ') ' ||
+        'ORDER BY TRUNC(1 / (1 + VECTOR_DISTANCE(CHUNK_EMBEDDING, :b1)), 3) DESC, ' ||
+        'NVL(' || v_age_expr || ', 3650) ASC, ' ||
+        '1 / (1 + VECTOR_DISTANCE(CHUNK_EMBEDDING, :b1)) DESC';
+
+        OPEN v_results FOR v_sql_stmt
+        USING query_vec, query_vec, 15, query_vec, query_vec;
+    END IF;
+
+    RETURN v_results;
+END;</code></pre>
+          <h3>Suggested Fixes Later</h3>
+          <pre><code>1. Use top_k instead of hard-coded 15.
+2. Return DATASET_ID || ':' || CHUNK_INDEX AS DOCID if Java should keep multiple chunks per ticket.
+3. Embed only the actual question text, not the full project/stack prefix.
+4. Add component, failureContext, and tag matching after PROPERTIES is added.</code></pre>
+        </section>
+
+        <section id="java-filtering">
+          <h2>Java Filtering</h2>
+          <p><code>ContextBuilderNode</code> applies these rules after DB retrieval:</p>
+          <pre><code>minimum score = 0.50
+sort = score descending
+dedupe = docId
+max context size = 50,000 characters</code></pre>
+          <p>Each chunk is formatted and sent to GenAI as part of the knowledge-base context.</p>
+        </section>
+
+        <section id="final-answer">
+          <h2>Final Answer</h2>
+          <p>GenAI receives the retrieved KB chunks and the user query. It writes output using these sections:</p>
+          <pre><code>Root_Cause:
+Resolution:
+Similar ticket for reference:</code></pre>
+          <p>Java parses those into <code>probableRootCause</code>, <code>probableResolution</code>, and <code>similarTicketReference</code>.</p>
+        </section>
+
+        <section id="missing">
+          <h2>What Is Missing Today</h2>
+          <p>AIRA does not currently store or use these structured fields in DB vector retrieval:</p>
+          <pre><code>failureContext
+failureType
+errorFamily
+resourceType
+operationArea
+failureStage</code></pre>
+          <p>Today the system mostly relies on vector similarity plus light stack preference.</p>
+        </section>
+
+        <section id="limitations">
+          <h2>Current Limitations</h2>
+          <ul>
+            <li>No <code>PROPERTIES</code> column exists today.</li>
+            <li>No structured failure context or tag matching exists in DB retrieval.</li>
+            <li>No component filter exists in <code>KB_VECTOR_SEARCH</code>.</li>
+            <li>Stack is a boost/penalty, not a hard filter.</li>
+            <li><code>top_k</code> is accepted by the function, but live SQL currently uses hard-coded <code>15</code>.</li>
+            <li>The query embedding includes the service/stack prefix along with the actual error text.</li>
+          </ul>
+        </section>
+
+        <section id="future">
+          <h2>Recommended Future Improvement</h2>
+          <p>Add a JSON property bag to each base dataset table:</p>
+          <pre><code>ALTER TABLE &lt;SERVICE&gt;_DATASETS ADD (
+  PROPERTIES CLOB CHECK (PROPERTIES IS JSON)
+);</code></pre>
+          <p>Recommended shape:</p>
+          <pre><code>{
+  "failureContext": "rotate pod db / resource validation",
+  "tags": {
+    "failureType": "null-state",
+    "errorFamily": "null-pointer",
+    "resourceType": "pod-db",
+    "operationArea": "workflow",
+    "failureStage": "resource-validation"
+  }
+}</code></pre>
+          <div class="callout simple">In simple terms, <code>PROPERTIES</code> gives AIRA structured clues about where and why the failure happened.</div>
+        </section>
+
+        <section id="tags">
+          <h2>Tag Matching</h2>
+          <p>Tags should be secondary support, not the primary match. Hard gates should be same service/table, same or compatible component, same or compatible failure context, and similar error message.</p>
+          <table>
+            <thead><tr><th>Tag</th><th>Suggested weight</th></tr></thead>
+            <tbody>
+              <tr><td><code>errorFamily</code></td><td>0.30</td></tr>
+              <tr><td><code>failureType</code></td><td>0.25</td></tr>
+              <tr><td><code>resourceType</code></td><td>0.20</td></tr>
+              <tr><td><code>operationArea</code></td><td>0.15</td></tr>
+              <tr><td><code>failureStage</code></td><td>0.10</td></tr>
+            </tbody>
+          </table>
+          <p>Tags help choose between close matches, but they should not make an unrelated ticket look relevant.</p>
+        </section>
+
+        <section id="example">
+          <h2>Simple Example</h2>
+          <pre><code>Incoming query:
+FAAASP2T:- prod:- NullPointerException: Pod DB state was null during resource validation
+
+Today:
+1. DB chooses FAAASP2T_DATASETS_VECTOR.
+2. DB embeds the raw query.
+3. DB compares it with CHUNK_EMBEDDING values.
+4. DB returns top similar BODY chunks.
+5. Java keeps chunks with score >= 0.50.
+6. GenAI reads those chunks and writes RCA/resolution.</code></pre>
+        </section>
+
+        <section id="summary">
+          <h2>Final Summary</h2>
+          <p>Today AIRA's KB retrieval is service-specific table selection, vector similarity, light stack preference, Java score filtering, and GenAI answer generation.</p>
+          <div class="callout warning">
+            It is not yet component-aware, failure-context-aware, tag-aware, or strictly stack-filtered. The next improvement should be adding <code>PROPERTIES</code> and using it in <code>KB_VECTOR_SEARCH</code> as compatibility filtering and scoring support.
+          </div>
+        </section>
+      </article>
+    </main>
+  </div>
+</body>
+</html>

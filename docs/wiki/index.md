@@ -38,6 +38,7 @@
 - [ADR-011 — Dual-mode source adapters (REST + MCP)](adr/ADR-011-dual-mode-source-adapters.md)
 - [ADR-012 — In-DB embedding via DBMS_VECTOR](adr/ADR-012-in-db-embedding.md)
 - [ADR-013 — Filter strictness contract (hard / soft-with-multiplier)](adr/ADR-013-filter-strictness.md)
+- [ADR-014 — LLM access via OCI Generative AI Inference (AIRA pattern)](adr/ADR-014-llm-via-oci-genai.md)
 
 ## Engineering
 - [dev-guide](engineering/dev-guide.md) — Phase 1 setup + first end-to-end run
