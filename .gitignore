@@ -42,3 +42,6 @@ eval/baselines/
 # OCI wallets / credentials (paranoid catch-all)
 *wallet*.zip
 *.pem
+
+# MS Office lock/temp files
+~$*
