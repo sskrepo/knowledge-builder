@@ -13,6 +13,7 @@
 - [architecture](architecture.md) — system shape, 5-layer model, module map
 - [data-model](data-model.md) — ContentItem / Chunk / Edge + multi-axis fields
 - [api-design](api-design.md) — MCP retrieval tool surface
+- 🔍 **[AIRA — Comparison & Analysis](aira-comparison.md)** — extraction + retrieval comparison vs the framework; what to borrow, what to avoid, the migration story
 
 ## Modules (one per data type, spec §4)
 - [module-incidents](module-incidents.md) — operational incidents (Phase 1, proven path)
