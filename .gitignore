@@ -43,5 +43,11 @@ eval/baselines/
 *wallet*.zip
 *.pem
 
+# Local secrets file for laptop dev — must NEVER be committed
+framework/.secrets.local.yaml
+framework/.secrets.yaml
+.kbf/
+secrets/
+
 # MS Office lock/temp files
 ~$*

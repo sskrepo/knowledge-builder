@@ -112,3 +112,70 @@ curl -X POST localhost:8080/answer \
 - Architect: PR review on ADR drift
 - Dev Manager: story sequencing, code review gatekeeper
 - TPM: dashboard / dependency / phase-readiness
+
+---
+
+## Running on a laptop (no OCI Vault yet)
+
+For local dev before/while OCI Vault is provisioned, the framework supports a **local secrets file** backend.
+
+### One-time setup
+
+```bash
+# 1. Create ~/.kbf/secrets.yaml from the template
+./framework/scripts/setup-local-dev.sh
+
+# 2. Add to your shell profile (~/.zshrc / ~/.bashrc)
+export KBF_ENV=dev
+export KBF_SECRETS_BACKEND=local                 # use local file (not OCI Vault)
+export KBF_SECRETS_FILE=$HOME/.kbf/secrets.yaml
+
+# 3. Pick LLM provider for laptop:
+#    Easiest: direct OpenAI (just need an OpenAI key)
+export KBF_LLM_PROVIDER=openai_direct
+
+#    Alternative: OCI GenAI (requires OCI auth via config_file)
+# export KBF_LLM_PROVIDER=oci_genai
+# export OCI_AUTH_METHOD=config_file
+# export OCI_CONFIG_PROFILE=DEFAULT
+
+# 4. Edit secrets (mode 0600, never committed)
+$EDITOR ~/.kbf/secrets.yaml
+```
+
+### Required secrets for laptop run
+
+Minimum to ingest from Jira and answer one query:
+
+| Slug | What it is | When you need it |
+|---|---|---|
+| `adb-admin-dev` | Autonomous DB admin password | Once your ADB is provisioned |
+| `kb-incidents-rw-dev` | Schema RW password | Same |
+| `openai-api-key` | OpenAI API key | If `KBF_LLM_PROVIDER=openai_direct` |
+| `jira-readonly` | Jira personal access token | Always |
+| `confluence-readonly` | Confluence PAT | Optional (only if pulling design-doc supplements) |
+
+The remaining slugs in the template can be empty for Phase 1 laptop work.
+
+### Verify
+
+```bash
+python3 framework/scripts/check-config.py --env dev
+# → "all green" or lists what's missing
+```
+
+### Notes
+
+- `~/.kbf/secrets.yaml` is created with `chmod 600` and lives outside the repo. The repo's `.gitignore` also blocks `.secrets.local.yaml`, `.kbf/`, and `secrets/` to prevent accidental commits.
+- The same `vault://kb/<slug>` references in `framework/config/dev.yaml` and the adapter configs work unchanged — only the resolution backend differs.
+- When you migrate to OCI Vault later: set `KBF_SECRETS_BACKEND=vault` and run `framework/scripts/bootstrap-vault.sh` to populate the same slug names. No code or config changes.
+
+### Going from laptop dev → real Vault (one-line switch)
+
+```bash
+unset KBF_SECRETS_BACKEND       # back to default (vault)
+./framework/scripts/bootstrap-vault.sh dev    # walks you through populating each slug
+```
+
+The framework rereads creds via `VaultClient` on next process start. Same code, same configs.
+
