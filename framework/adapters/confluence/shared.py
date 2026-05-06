@@ -1,14 +1,23 @@
-"""Shared helpers for Confluence adapters (auth, raw_item normalization)."""
+"""Shared helpers for Confluence adapters."""
 from __future__ import annotations
+
+import logging
 from .._base import RawItem
+from ...core.vault import VaultClient
+
+log = logging.getLogger(__name__)
+_vault: VaultClient | None = None
+
+def _get_vault() -> VaultClient:
+    global _vault
+    if _vault is None:
+        _vault = VaultClient()
+    return _vault
 
 def resolve_token(secret_ref: str) -> str:
-    """Resolve a vault://kb/... reference via OCI Vault. STUB."""
-    # TODO Phase 1: use core.vault_client.resolve(secret_ref); 60s cache
-    return "<resolved-at-runtime>"
+    return _get_vault().resolve(secret_ref)
 
 def to_raw_item(payload: dict, metadata: dict, source_id: str) -> RawItem:
-    """Canonical RawItem builder. Both native and MCP must call this."""
     return RawItem(
         kind="confluence_page",
         source="confluence",
