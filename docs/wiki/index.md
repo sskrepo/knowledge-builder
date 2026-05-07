@@ -14,6 +14,7 @@
 - [data-model](data-model.md) — ContentItem / Chunk / Edge + multi-axis fields
 - [api-design](api-design.md) — MCP retrieval tool surface
 - 🔍 **[AIRA — Comparison & Analysis](aira-comparison.md)** — extraction + retrieval comparison vs the framework; what to borrow, what to avoid, the migration story
+- 🛠️ **[Agentic Code Access — Read & Write Story](code-access-story.md)** — how agents (Aira, future coding assistants) read & modify code; spec §8.2 hybrid path; DECISION-005 framing
 - 📋 **Persona onboarding workbooks** in [`onboarding/`](onboarding/) — for sharing with persona team leads in parallel with engineering:
   - [PM & TPM](onboarding/pm-tpm.md) — extraction schemas, sources, gold sets
   - [Ops Engineer / AIRA](onboarding/ops-eng.md) — Phase-1-exit-gate persona; includes AIRA migration story
