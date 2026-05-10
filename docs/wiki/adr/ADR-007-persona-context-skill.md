@@ -214,3 +214,46 @@ Persona skill passes filters straight through to retriever calls without reinter
 - [ADR-006 — Two-shim layered architecture](ADR-006-two-shim-architecture.md)
 - [ADR-013 — Filter strictness](ADR-013-filter-strictness.md)
 - [aira-comparison.md §2.2](../aira-comparison.md)
+
+### Amendment 4 — Example-artifact-as-input for synthesis schema induction (2026-05-09; V2)
+
+When a persona team provides an example deliverable (PPT, DOCX, email mock) during skill-by-demonstration onboarding, the synthesis schema is induced from the artifact rather than declared by hand. The synthesizer's `SynthesisSchema` accepts an `example_artifact` field:
+
+```python
+@dataclass
+class SynthesisSchema:
+    name: str
+    sections: list[SynthesisSection]
+    example_artifact: Path | None = None     # NEW: PPT/DOCX template for induction
+    template_engine: str = "jinja"            # NEW: how to render
+```
+
+`framework/skill_builder/analyze_artifact.py` parses the example artifact, infers field assignments per section, and emits both the SynthesisSchema and the renderer template. The example artifact also becomes the first eval-gold output entry.
+
+### Amendment 5 — Persona context skill dispatches Tier 1 vs Tier 2 (2026-05-09; V2)
+
+The persona context skill becomes the per-persona dispatcher:
+
+```python
+class BasePersonaSkill:
+    def __call__(self, query, intent_signal, budget):
+        # Tier 1 — try persona's workflow skills (shim_workflows.cards_for(self.persona))
+        wf = self._match_workflow_skill(query, intent_signal)
+        if wf and wf.confidence >= self.tier1_threshold:
+            return self._invoke_workflow(wf, query, intent_signal, budget)
+        # Tier 2 — fall back to KB retrieval (shim_kb.cards_visible_to(self.persona))
+        return self._retrieve_from_kbs(query, intent_signal, budget)
+```
+
+The persona skill returns either a workflow artifact reference OR a ContextPacket. Orchestrator handles both shapes: artifact reference is surfaced directly; ContextPacket goes through the synthesizer.
+
+### Amendment 6 — ACL-driven shim_kb access (2026-05-09; V2)
+
+Persona context skills' Tier-2 retrieval scope is **read-scope (ACL-driven)**, not authoring-scope:
+
+- `shim_kb.cards_visible_to(persona)` — returns ALL KB cards whose `metadata_defaults.persona_visibility` includes this persona. Used at retrieval time.
+- `shim_kb.cards_owned_by(persona)` — returns ONLY KBs where the persona-builder's `persona:` matches. Used by skill builder during authoring (e.g., to suggest reuse).
+
+Important consequence: A TPM workflow skill can read from ops_eng's incident KB if TPM is in its `persona_visibility` list. The whole point of a polyglot KB is cross-persona read access subject to ACL.
+
+Workflow skill promote-time validation (per ADR-017) verifies the workflow's owning persona is in each linked KB's `persona_visibility`.

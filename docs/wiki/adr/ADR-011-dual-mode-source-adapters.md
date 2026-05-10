@@ -128,3 +128,40 @@ class RawItem:
 - [PDD §9](../pdd/PDD-Knowledge-Builder-Framework.md)
 - [ADR-003 — Core interfaces](ADR-003-core-interfaces.md)
 - [ADR-010 — Configuration plane](ADR-010-configuration-plane.md)
+
+## Amendment 1 — Adapter.discover() for procedural source resolution (2026-05-09; V2)
+
+Workflow skills (per ADR-016) often need **procedural source discovery** — multi-step lookups like "for each project space, find the latest weekly-status page." The Adapter Protocol gains a `discover()` method:
+
+```python
+@runtime_checkable
+class Adapter(Protocol):
+    name: str
+    kind: str
+    mode: str
+    def healthcheck(self) -> HealthReport: ...
+    def list(self, q: SourceQuery) -> Iterable[RawItemRef]: ...
+    def fetch(self, ref: RawItemRef) -> RawItem: ...
+    def stream_changes(self, since: datetime) -> Iterable[ChangeEvent]: ...
+    def discover(self, recipe: list[dict]) -> Iterable[RawItemRef]: ...    # NEW
+```
+
+The `recipe` is a list of step dicts:
+
+```yaml
+sources:
+  procedural:
+    description: "For each project, find latest weekly-status page"
+    steps:
+      - { op: list_spaces,   kind: confluence, pattern: "PROJECT-*" }
+      - { op: for_each,      var: space }
+      - { op: list_pages,    space: "{space}",
+                             labels: [weekly-status, exec-summary],
+                             modified_within_days: 7,
+                             sort: "updated_at desc",
+                             limit: 1 }
+```
+
+Each adapter implements the operations its source supports (Confluence: list_spaces, list_pages, search; Jira: list_projects, search by JQL; Git: list_repos, list_paths). Operations are validated at workflow-skill promote-time.
+
+`discover()` returns a flat iterable of RawItemRefs; the workflow runtime then fetches each via the same `fetch()` API used by extraction.

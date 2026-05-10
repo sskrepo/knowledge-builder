@@ -1,96 +1,114 @@
 ---
-title: Phases
-source: docs/raw/knowledge-builder-framework-spec.md (§7) + DECISION-001/002/003/004
-compiled_at: 2026-05-04T00:00:00Z
+title: Phases (V2)
+source: docs/raw/knowledge-builder-framework-spec.md (§7) + DECISION-001/002/003/004 + PDD V2
+compiled_at: 2026-05-09T00:00:00Z
 created: 2026-05-03
+updated: 2026-05-09
 owner: tpm
-tags: [meta, roadmap]
+tags: [meta, roadmap, v2]
 status: current
 ---
 
-# Phases
+# Phases (V2)
 
-| # | Name | Status | Scope summary | Stories |
-|---|------|--------|---------------|---------|
-| 0 | Setup | 🟡 active | Tech-stack baseline (Oracle 23ai + OpenAI + LangGraph), §6 interfaces, persona-builder contract, eval harness skeleton, no production code | (Phase 0 is documentation/config — no stories yet; backlog for Phase 1 starts post-Gate-1) |
-| 1 | Skeleton + incident KB | ⏳ planned | `core/` interfaces + Confluence/Jira adapters + LLM parser w/ incident schema + Vector store + `vector_search` & `get_incident_summary` MCP tools + minimal Context Builder | TBD by PM after Gate 1 |
-| 2 | Fleet + code wiki | ⏳ planned | Read-through fleet adapter + `query_fleet` & `text_to_sql` + Som-style code wiki on commit + `read_code_page` & `find_symbol` | TBD |
-| 3 | PM/TPM wiki + Context Builder maturity | ⏳ planned | Git-backed wiki store + frontmatter + Confluence→wiki ingestion (per-persona schema plug-in) + shim index + intent classification + parallel tool calls. Resolves spec §8.1 + §8.3 | TBD |
-| 4 | Permissions, FA semantic graph, polish | ⏳ planned | `persona_visibility` enforced at retrieval + FA graph store (Dave's POC) + Jira roadmap approach + cost dashboards + eval CI hardening | TBD |
+| # | Name | Status | Scope summary | New in V2 |
+|---|------|--------|---------------|-----------|
+| 0 | Setup | ✅ done | Tech-stack baseline, §6 interfaces, persona-builder contract, eval harness skeleton, dev mode + scaffolds | (V1 deliverable; V2 adds skill_builder/, workflow_runtime/, renderers/, deliverers/ scaffolds) |
+| 1 | Skeleton + incident KB | ⏳ planned | core/ + Confluence/Jira adapters + LLM parser + Vector store + Context Builder; match Aira on incident gold set | Unchanged from V1 |
+| 2 | Fleet + code wiki + skill-builder Phase A | ⏳ planned | Fleet read-through, Som code wiki, MCP tools; **NEW**: skill_builder synthesizes extraction skills | **NEW**: Track D — skill_builder Phase A |
+| 3 | PM/TPM persona builders + workflow runtime | ⏳ planned | First non-incident personas in production; **NEW**: workflow runtime + first 3 workflow skills | **NEW**: workflow_runtime, renderers, deliverers, shim_workflows, tiered routing (Tier 1/2/3), 3 production workflow skills |
+| 4 | Permissions + FA semantic graph + skill suggestion + polish | ⏳ planned | persona_visibility enforced; FA graph; **NEW**: skill suggestion loop | **NEW**: skill_suggester nightly clustering + weekly digest |
 
-## Phase 0 — Setup
+## Phase 0 — Setup ✅
 
-**Goal:** Tech-stack baseline + interface contract + eval harness skeleton + Phase 1 backlog. **No production code.**
+**Goal:** Tech-stack baseline + interface contract + eval harness skeleton + Phase 1 backlog. **No production code.** ✅ Closed.
 
-**Exit criteria:**
-- ✅ Tech stack decided — DECISION-001/002/003 + ADR-001
-- ✅ Storage shape decided — ADR-002
-- ✅ Core interfaces specified — ADR-003
-- ✅ Persona-builder contract decided — ADR-004 + DECISION-004
-- ✅ Eval harness defined — ADR-005
-- ⏳ Gate 1 approved by user (see dashboard)
-- ⏳ External provisioning (Oracle ADB, OpenAI key, OCI Vault) delivered — see [pending-decisions/PHASE-0.md](pending-decisions/PHASE-0.md)
-- ⏳ Phase 1 backlog drafted
+## Phase 1 — Skeleton + incident KB
 
-**Deliverables (Phase 0):**
-- ADRs in `docs/wiki/adr/` (✅ 5 drafted)
-- DECISIONs in `pmo/decisions/` (✅ 4 filed)
-- PM wiki: project-overview, personas, 6 module pages (✅)
-- Persona-builder + extraction-schema templates (✅)
-- Incident extraction schema v1 (✅)
-- Eval gold-set seed (✅)
-- Phase 0 Kickoff Brief (✅)
-- Pending-decisions surface for all phases (✅)
-- Phase 1 backlog (⏳ awaiting Gate 1)
+**Goal:** Match or beat Aira's incident KB on a 25-question persona gold set.
 
-## Phase 1 — Skeleton + incident KB (preview)
-
-**Goal:** Match or beat Aira's current incident KB on a 25-question persona gold set.
-
-**Exit criteria (subset of spec §12 acceptance):**
+**Exit criteria (subset of spec §12):**
 - New incident ingest → retrievable in <5 min
-- `vector_search` top-5 with citations <500ms p95
+- `vector_search` top-5 with citations <500 ms p95
 - ≥80% recall on the persona gold set
-- Re-ingesting same Jira ticket = zero rows changed (idempotent)
+- Re-ingesting same Jira ticket = zero rows changed (idempotency)
 - Eval CI runs on every PR; merge blocked on regression
 - All ContentItems carry `persona_visibility` and `classification`
 - Cost report: tokens/ingest, tokens/retrieve, daily totals
 
-**Deliverables:**
-- `framework/core/interfaces.py`, `framework/core/content.py` (per ADR-003)
-- Confluence + Jira adapters (read-only)
-- LLM parser using `incidents/v1.json`
-- IncidentVectorStore + edges (per ADR-002)
-- MCP tools: `vector_search`, `get_incident_summary`
-- Minimal Context Builder (fixed routing for incident queries)
-- Eval harness Python implementation + CI wiring (per ADR-005)
+**Calendar:** 8 weeks (4 FTE).
 
-## Phase 2 — Fleet + code wiki (preview)
+## Phase 2 — Fleet + code wiki + skill-builder Phase A
 
-**Goal:** Mixed-source queries work (e.g., "show fleet state for tenants impacted by incident X").
+**Goal:** Mixed-source queries work; persona teams can author **extraction skills** via skill-builder (no workflow skills yet).
 
 **Exit criteria:**
-- Context Builder answers mixed queries with citations
-- Fleet adapter is read-through (no ingestion)
-- Code wiki regenerates on commit; `find_symbol` returns cited results
+- Context Builder answers cross-source queries with citations (e.g., "fleet state for tenants impacted by INC-X")
+- Fleet adapter is read-through (no ingestion); `query_fleet` + `text_to_sql` MCP tools live
+- Code wiki regenerates on commit; `find_symbol` + `read_code_page` tools live
+- DECISION-005 filed (code-access write-path substrate)
+- **NEW**: `kb-cli skill-builder` synthesizes extraction skills end-to-end from intent + samples; one persona team uses it without YAML editing
 
-## Phase 3 — PM/TPM wiki + Context Builder maturity (preview)
+**Calendar:** 8 weeks (5 FTE).
 
-**Goal:** Multi-source queries return cited, faithful answers within budget. Resolves spec §8.1 (LLM-wiki storage) and §8.3 (per-persona extraction schemas).
+**Tracks:**
+- Track A — Ingest: Fleet, code wiki
+- Track B — Retrieve: query_fleet, text_to_sql, find_symbol, read_code_page
+- Track C — Eval/Ops: cross-source eval queries
+- Track D — Skill Builder Phase A (NEW): `analyze_artifact`, `synthesize_schema`, `synthesize_builder`, `reuse_detector`
+
+## Phase 3 — PM/TPM persona builders + workflow runtime
+
+**Goal:** First non-incident personas in production; **first 3 workflow skills shipping**; tiered routing live.
 
 **Exit criteria:**
-- PM and TPM Knowledge Builder configs ship in `framework/persona_builders/`
-- Each persona's gold set lives at `eval/gold_sets/{persona}.jsonl`; recall@5 ≥ 80%
-- `kb-cli validate / dry-run / eval / promote` fully implemented
-- Wiki content survives a re-ingest with zero changed rows when source unchanged
-- Cross-source query latency p95 <2s
+- TPM and PM persona builders graduated to `status: production`
+- Each has gold set passing thresholds (recall@5 ≥ 0.80, faithfulness ≥ 0.85)
+- **NEW**: `workflow_runtime` executes `on_request` workflow skills with PPT/DOCX rendering and OCI Object Storage delivery
+- **NEW**: 3 workflow skills in production:
+  - `tpm.weekly_exec_review` (schedule + on_request, pptx)
+  - `ops_eng.incident_summary` (on_request, structured response)
+  - `pm.release_brief` (on_request, docx)
+- **NEW**: Tiered routing live in persona context skills (Tier 1 workflow match, Tier 2 KB retrieval)
+- **NEW**: Skill builder Phase B — synthesizes workflow skills from example artifacts
+- Multi-source query latency p95 <2 s
 
-## Phase 4 — Permissions, FA semantic graph, polish (preview)
+**Calendar:** 12 weeks (6 FTE).
 
-**Goal:** v2-ready ops posture.
+**Tracks:**
+- Track A — Wiki: WikiMetadataStore + git-backed wiki bodies + Confluence ingestion (via skill builder)
+- Track B — Workflow Runtime (NEW): executor, trigger_dispatcher, renderers, deliverers, shim_workflows
+- Track C — Skill Builder Phase B (NEW): synthesize_workflow, analyze_artifact PPT/DOCX modes, skill builder UX polish
+- Track D — Persona Builds (NEW): TPM/PM/ops_eng author 3 workflow skills via skill-builder; eval them; promote
+
+## Phase 4 — Permissions + FA semantic graph + skill suggestion + polish
+
+**Goal:** v2-ready ops posture; **skill suggestion loop active**.
 
 **Exit criteria:**
-- `persona_visibility` enforced at the retrieval layer (not just placeholder metadata)
-- FA semantic graph store integrates Dave's POC; `vector → graph_traverse` round-trip <1s p95
-- Jira roadmap aggregation decided (DECISION-009 or similar)
-- Ops: cost dashboards, retrieval latency SLOs, eval CI hardened
+- `persona_visibility` enforced at retrieval (filtered at SQL level)
+- FA semantic graph integrates Dave's POC; `vector → graph_traverse` round-trip <1 s p95
+- **NEW**: skill_suggester nightly clustering produces persona-team weekly digest
+- **NEW**: At least 1 skill authored from a Tier-4 suggestion (closed-loop validation)
+- **NEW**: 8+ workflow skills in production across personas
+- Cost dashboards live; eval CI hardened
+
+**Calendar:** 8 weeks (5 FTE).
+
+**Tracks:**
+- Track A — Permissions: persona_visibility SQL-level enforcement, consumer manifest, audit log retention
+- Track B — Graph: FA semantic graph store, resource ontology bootstrap, graph traversal MCP tool
+- Track C — Skill Suggestion Loop (NEW): skill_suggester nightly job, weekly digest, kb-cli skill-builder --resume
+- Track D — Ops: cost dashboards, latency SLOs, eval CI hardening
+
+## Resource asks
+
+| Phase | FTE peak | Calendar | Persona-team commitment |
+|---|---|---|---|
+| 0 | 1 | done | 0 |
+| 1 | 4 | 8 weeks | 0 |
+| 2 | 5 | 8 weeks | 0 (skill-builder uses sample data first) |
+| 3 | 6 | 12 weeks | TPM (~20%), PM (~20%), ops_eng (~10%) |
+| 4 | 5 | 8 weeks | All personas (~5% each, async via digest) |
+
+Total to Phase-4 exit: ~9 months with 5–6 FTE peak in Phase 3.

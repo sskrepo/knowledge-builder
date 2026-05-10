@@ -109,3 +109,45 @@ Split the shim into two layers, each owned by a different concern.
 - [ADR-004 (v2) — Persona-builder config](ADR-004-persona-builder-config.md)
 - [ADR-007 — Persona context skill contract](ADR-007-persona-context-skill.md)
 - Spec §6.5, §6.6
+
+---
+
+## Amendment 2 — Three-shim architecture (2026-05-09; V2)
+
+V2 splits per-persona routing into two layers: shim_workflows (authoring-scoped) for Tier-1 workflow-skill matching, and shim_kb (ACL-scoped per ADR-007 amend 6) for Tier-2 KB retrieval. The original two-shim model becomes:
+
+| Shim | Scope | Used by | Purpose |
+|---|---|---|---|
+| `shim_faaas` | global / domain ontology | orchestrator's intent classifier | Pick persona(s) for a query |
+| `shim_workflows` | per-persona (authoring) | persona context skill — Tier 1 | Match user request to a workflow skill |
+| `shim_kb` | per-persona (ACL-driven read) | persona context skill — Tier 2 | Find KBs whose data fits the query |
+
+**Two new modules added:**
+- `framework/orchestrator/shim_workflows.py` — aggregates `skill_card` blocks from `framework/workflow_skills/{persona}/*.yaml`; persona-scoped views via `cards_for(persona)`
+- `framework/orchestrator/shim_kb.py` (amended) — adds `cards_visible_to(persona)` and `cards_owned_by(persona)` distinguishing read scope from authoring scope
+
+The orchestrator's classifier prompt now embeds shim_faaas (~3-5 KB) only; persona context skills internally embed their persona-filtered shim_workflows + shim_kb (~1-3 KB each).
+
+## Amendment 3 — Tiered routing with confidence thresholds (2026-05-09; V2)
+
+V2 introduces explicit four-tier routing with graceful degradation:
+
+| Tier | Mechanism | Default confidence threshold |
+|---|---|---|
+| 1 | Workflow skill match (shim_workflows) | 0.85 |
+| 2 | KB retrieval (shim_kb) | 0.6 |
+| 3 | Multi-persona fanout | 0.4 |
+| 4 | Honest "no answer" + skill suggestion (per ADR-018) | <0.3 |
+
+Thresholds are configurable in `framework/config/{env}.yaml`:
+
+```yaml
+orchestrator:
+  routing_thresholds:
+    workflow_skill_match: 0.85
+    persona_skill_match:  0.60
+    multi_persona_fanout: 0.40
+    no_answer_floor:      0.30
+```
+
+Skills are an **optimization layer over retrieval**, not a precondition. The framework always answers if it has the knowledge. Workflow skills are added as patterns crystallize (see ADR-018 skill suggestion loop).
