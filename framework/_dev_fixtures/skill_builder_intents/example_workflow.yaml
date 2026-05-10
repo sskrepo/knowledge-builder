@@ -1,0 +1,36 @@
+# Example intent file for `kb-cli skill-builder --intent-file ...`
+# This is what a persona team would describe when they want a new skill.
+
+persona: tpm
+task_description: "Produce a weekly project status PPT for exec review every Friday"
+
+sources:
+  - kind: confluence
+    space_pattern: "PROJECT-*"
+    labels: [weekly-status, exec-summary]
+
+example_outcome:
+  kind: structured
+  fields:
+    week_id: "2026-W17"
+    rag_status: "amber"
+    top_milestones:
+      - "customer-events v2 design freeze achieved"
+      - "auth-service refactor merged"
+    blockers:
+      - "PODDB refresh automation behind by 1 sprint"
+    exec_asks:
+      - "headcount approval for platform-auth-team"
+    services_touched: ["customer-events", "auth-service"]
+
+trigger:
+  on_request: true
+  on_schedule: "0 16 * * 5"
+  inputs:
+    - { name: project, type: string, description: "Project key or 'all'" }
+
+output_format: pptx
+
+delivery:
+  kind: filesystem
+  path: "~/.kbf/outputs/weekly-exec-review-{project}.pptx"

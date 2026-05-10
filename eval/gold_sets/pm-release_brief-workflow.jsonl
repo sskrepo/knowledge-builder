@@ -1,0 +1,1 @@
+{"id": "wf-001", "question": "release brief for 25.01", "expected_skill": "release_brief", "expected_inputs": {"release_id": "25.01"}, "expected_output_includes": ["scope_items", "gating_risks", "target_date"], "min_intent_match_score": 0.85, "min_field_accuracy": 0.85}

@@ -1,0 +1,8 @@
+title: "Release Brief"
+sections:
+  Status:        { source_field: status }
+  Target_Date:   { source_field: target_date }
+  Scope_Items:   { source_field: scope_items }
+  Gating_Risks:  { source_field: gating_risks }
+  Owners:        { source_field: owners }
+  Freeze_Dates:  { source_field: freeze_dates }

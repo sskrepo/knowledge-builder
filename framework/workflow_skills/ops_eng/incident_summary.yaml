@@ -1,0 +1,43 @@
+workflow_skill: incident_summary
+persona: ops_eng
+status: draft
+
+trigger:
+  on_request:
+    enabled: true
+    inputs:
+      - { name: incident_id, type: string, description: "Jira incident ID, e.g. INC-EXAMPLE-001" }
+    output_format: markdown
+    response_mode: artifact_url
+
+skill_card:
+  summary: "Produce a structured incident summary (RCA, resolution, similar tickets) for an Ops Engineer or Aira."
+  use_when: |
+    User asks for a summary of a specific incident, asks about root cause / resolution
+    for an INC ID, or wants similar past incidents.
+  example_invocations:
+    - "summarize INC-EXAMPLE-001"
+    - "what's the root cause for INC-2026-001234"
+    - "incident summary for INC-XYZ"
+  do_not_use_for: |
+    Listing recent incidents (use vector_search). Live operational data (use query_fleet).
+
+requires_extractions:
+  - kb: ops_eng.ops_incidents
+    required_fields: [incident_id, severity, root_cause_summary, resolution_summary,
+                      service, service_owner, resources_affected, impact]
+
+synthesis:
+  output_format: markdown
+  title: "Incident Summary — {incident_id}"
+  slide_mapping: synthesis/mappings/incident_summary.yaml
+
+delivery:
+  kind: filesystem
+  path: "~/.kbf/outputs/incident-summary-{incident_id}.md"
+
+eval:
+  gold_set: eval/gold_sets/ops_eng-incident_summary-workflow.jsonl
+  exit_criteria:
+    field_accuracy: 0.85
+    delivery_success_rate: 0.99

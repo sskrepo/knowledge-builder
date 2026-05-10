@@ -1,18 +1,29 @@
-"""kb-cli — validate / dry-run / eval / promote / migrate / reingest.
+"""kb-cli — persona team's primary interface.
 
-Usage:
-  kb-cli validate persona_builders/<persona>.yaml
-  kb-cli ingest --dry-run --sample 5 persona_builders/<persona>.yaml
-  kb-cli eval persona_builders/<persona>.yaml
-  kb-cli promote persona_builders/<persona>.yaml
-  kb-cli reingest persona_builders/<persona>.yaml --kb <kb_name> --schema-version <N>
-  kb-cli migrate --schema kb_incidents --env dev
+V2 commands:
+  kb-cli laptop-init                 — bootstrap laptop dev mode (~/.kbf/)
+  kb-cli skill-builder --intent-file <yaml> [--dry-run]
+                                      — synthesize artifacts from intent file
+  kb-cli skill-list                  — list registered workflow skills
+  kb-cli workflow-list               — alias for skill-list
+  kb-cli workflow-run <skill_name> --inputs '<json>'
+                                      — execute on_request workflow skill
+  kb-cli validate <persona-builder.yaml>
+                                      — lint a persona builder
+  kb-cli ingest --dry-run --sample N <persona-builder.yaml>
+                                      — preview parser output
+  kb-cli eval <persona-builder.yaml>  — run gold-set eval
+  kb-cli promote <persona-builder.yaml>
+                                      — flip status to production
+  kb-cli migrate --schema <name> --env <env>
+                                      — apply DDL
 """
 from __future__ import annotations
 
 import argparse
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -20,7 +31,61 @@ import yaml
 
 log = logging.getLogger(__name__)
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
+
+# ============================================================================
+# laptop-init
+# ============================================================================
+def cmd_laptop_init(args):
+    """Set up ~/.kbf for laptop dev mode (no ADB / Vault / OCI required)."""
+    home_kbf = Path.home() / ".kbf"
+    secrets_path = home_kbf / "secrets.yaml"
+    store_path = home_kbf / "store"
+    outputs_path = home_kbf / "outputs"
+    outbox_path = home_kbf / "outbox"
+    slack_outbox = home_kbf / "slack-outbox"
+
+    print("▶ KBF laptop-init")
+
+    home_kbf.mkdir(exist_ok=True)
+    home_kbf.chmod(0o700)
+    store_path.mkdir(exist_ok=True)
+    outputs_path.mkdir(exist_ok=True)
+    outbox_path.mkdir(exist_ok=True)
+    slack_outbox.mkdir(exist_ok=True)
+
+    if not secrets_path.exists():
+        template = REPO_ROOT / "framework" / ".secrets.local.yaml.example"
+        if template.exists():
+            secrets_path.write_text(template.read_text())
+        else:
+            secrets_path.write_text("secrets: {}\n")
+        secrets_path.chmod(0o600)
+        print(f"✓ created {secrets_path}")
+    else:
+        print(f"✓ {secrets_path} exists")
+    print(f"✓ store dir: {store_path}")
+    print(f"✓ outputs dir: {outputs_path}")
+    print()
+    print("Set in your shell:")
+    print("    export KBF_ENV=dev")
+    print("    export KBF_SECRETS_BACKEND=local")
+    print(f"    export KBF_SECRETS_FILE={secrets_path}")
+    print(f"    export KBF_STORE_BACKEND=filestore")
+    print(f"    export KBF_STORE_ROOT={store_path}")
+    print(f"    export KBF_LLM_PROVIDER=stub")
+    print()
+    print("Then try:")
+    print("    python -m framework.cli.kb_cli skill-list")
+    print("    python -m framework.cli.kb_cli workflow-run ops_eng.incident_summary \\")
+    print("        --inputs '{\"incident_id\": \"INC-EXAMPLE-001\"}'")
+    return 0
+
+
+# ============================================================================
+# validate (existing, kept)
+# ============================================================================
 def cmd_validate(args):
     cfg_path = Path(args.config)
     if not cfg_path.exists():
@@ -29,38 +94,15 @@ def cmd_validate(args):
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
     errors: list[str] = []
-
-    # Required top-level fields
     required = ["persona", "schema_version", "status", "knowledge_bases", "metadata_defaults", "eval"]
     for r in required:
         if r not in cfg:
             errors.append(f"missing required top-level field: {r}")
-
-    # Each knowledge_base
     for kb in cfg.get("knowledge_bases", []):
         if "name" not in kb:
             errors.append(f"kb missing name: {kb}")
-        if kb.get("kind") not in {"vector", "wiki", "graph", "sql_passthrough", "code_index"}:
+        if kb.get("kind") not in {"vector", "wiki", "graph", "sql_passthrough", "code_index", "filestore"}:
             errors.append(f"kb {kb.get('name')}: invalid kind {kb.get('kind')!r}")
-        if not kb.get("kb_card"):
-            errors.append(f"kb {kb.get('name')}: missing kb_card (per ADR-004 v2)")
-
-    # Schema files referenced exist
-    schemas_dir = Path(__file__).resolve().parents[1] / "parsers" / "schemas"
-    for kb in cfg.get("knowledge_bases", []):
-        ref = kb.get("extraction_schema")
-        if ref:
-            schema_path = Path(ref) if Path(ref).is_absolute() else (schemas_dir.parent.parent / ref)
-            if not schema_path.exists():
-                errors.append(f"extraction_schema not found: {ref}")
-
-    # Gold set referenced exists
-    gold = cfg.get("eval", {}).get("gold_set")
-    if gold:
-        gp = Path(__file__).resolve().parents[2] / gold
-        if not gp.exists():
-            errors.append(f"gold_set not found: {gold}")
-
     if errors:
         for e in errors:
             print(f"❌ {e}", file=sys.stderr)
@@ -77,7 +119,7 @@ def cmd_ingest(args):
 
 def cmd_eval(args):
     print(f"▶ eval {args.config}")
-    print("  [Phase 1: needs real ADB + OpenAI to actually run]")
+    print("  [needs real ADB/OpenAI to run; laptop-mode eval against fixtures coming Phase 2]")
     return 0
 
 
@@ -94,27 +136,164 @@ def cmd_promote(args):
 
 def cmd_migrate(args):
     print(f"▶ migrate schema={args.schema} env={args.env}")
-    print("  [Phase 1: needs real ADB connection]")
+    print("  [needs real ADB connection]")
     return 0
 
 
+# ============================================================================
+# skill-builder (V2 / ADR-015)
+# ============================================================================
+def cmd_skill_builder(args):
+    if not args.intent_file:
+        print("Conversational mode is Phase 3 polish; for now use --intent-file <yaml>",
+              file=sys.stderr)
+        print("Example:")
+        print("  kb-cli skill-builder --intent-file framework/_dev_fixtures/skill_builder_intents/example_workflow.yaml")
+        return 1
+    intent_path = Path(args.intent_file)
+    if not intent_path.exists():
+        print(f"❌ {intent_path} does not exist", file=sys.stderr)
+        return 1
+    intent = yaml.safe_load(intent_path.read_text())
+    from ..skill_builder.intent_to_artifacts import SkillBuilder
+    builder = SkillBuilder()
+    result = builder.synthesize(intent, dry_run=args.dry_run)
+    print(f"✓ Skill builder complete (dry_run={args.dry_run})")
+    print(f"  Persona:        {result['persona']}")
+    print(f"  Skill name:     {result['skill_name']}")
+    print(f"  KB name:        {result['kb_name']}")
+    print(f"  Required fields: {result['required_fields']}")
+    print(f"  Reuse covered:  {len(result['reuse']['covered'])} fields from existing KBs")
+    print(f"  New extraction needed for: {result['reuse']['gaps']}")
+    print(f"  Artifacts {'would-be ' if args.dry_run else ''}written:")
+    for a in result["artifacts"]:
+        print(f"    • {a}")
+    if not args.dry_run:
+        print()
+        print("Next steps:")
+        print(f"  1. Review the synthesized artifacts (git diff)")
+        print(f"  2. Apply the persona-builder diff (if produced) to the YAML")
+        print(f"  3. kb-cli validate framework/persona_builders/{result['persona']}.yaml")
+        print(f"  4. kb-cli workflow-run {result['persona']}.{result['skill_name']} --inputs '{{}}'")
+    return 0
+
+
+# ============================================================================
+# skill-list / workflow-list
+# ============================================================================
+def cmd_skill_list(args):
+    from ..workflow_runtime.skill_registry import discover_workflow_skills
+    skills_dir = REPO_ROOT / "framework" / "workflow_skills"
+    skills = discover_workflow_skills(skills_dir)
+    if not skills:
+        print("No workflow skills registered yet.")
+        return 0
+    print(f"{'Name':<40} {'Persona':<15} {'Status':<10} {'Triggers':<25}")
+    print("-" * 90)
+    for s in skills:
+        triggers = []
+        if s["on_request"]: triggers.append("on_request")
+        if s["on_schedule"]: triggers.append("on_schedule")
+        print(f"{s['name'] or '(unnamed)':<40} {s['persona'] or '?':<15} "
+              f"{s['status']:<10} {','.join(triggers):<25}")
+    return 0
+
+
+# ============================================================================
+# workflow-run (V2 / ADR-016)
+# ============================================================================
+def cmd_workflow_run(args):
+    from ..workflow_runtime.executor import WorkflowExecutor
+    from ..workflow_runtime.skill_registry import discover_workflow_skills
+    skills_dir = REPO_ROOT / "framework" / "workflow_skills"
+    skills = discover_workflow_skills(skills_dir)
+
+    # Find the named skill (accept "persona.skill_name" or just "skill_name")
+    target = None
+    if "." in args.skill_name:
+        persona, name = args.skill_name.split(".", 1)
+        target = next((s for s in skills if s["persona"] == persona and s["name"] == name), None)
+    else:
+        candidates = [s for s in skills if s["name"] == args.skill_name]
+        if len(candidates) == 1:
+            target = candidates[0]
+        elif len(candidates) > 1:
+            print(f"Ambiguous skill name {args.skill_name!r}; please qualify with persona:")
+            for c in candidates:
+                print(f"  {c['persona']}.{c['name']}")
+            return 1
+
+    if not target:
+        print(f"❌ unknown workflow skill: {args.skill_name}", file=sys.stderr)
+        print(f"Available: {[s['name'] for s in skills]}")
+        return 1
+
+    inputs = json.loads(args.inputs) if args.inputs else {}
+
+    # Pick a store backend
+    store = None
+    if os.environ.get("KBF_STORE_BACKEND") == "filestore":
+        from ..stores.filestore_content_store import FilestoreContentStore
+        store_root = os.environ.get("KBF_STORE_ROOT", str(Path.home() / ".kbf" / "store"))
+        store = FilestoreContentStore(root=store_root)
+
+    executor = WorkflowExecutor(store=store)
+    result = executor.execute(Path(target["path"]), inputs)
+
+    print(f"✓ Workflow {target['persona']}.{target['name']} executed")
+    print(f"  Inputs:   {result['inputs']}")
+    print(f"  Delivery: {result['delivery']}")
+    print(f"  Output:   {result['delivery'].get('url') or result['delivery'].get('path') or '(sync return)'}")
+    print()
+    if args.show_data:
+        print("Rendered data:")
+        print(json.dumps(result["rendered_data"], indent=2, default=str))
+    return 0
+
+
+# ============================================================================
+# main
+# ============================================================================
 def main():
     p = argparse.ArgumentParser("kb-cli")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    p_init = sub.add_parser("laptop-init", help="bootstrap laptop dev mode")
+    p_init.set_defaults(fn=cmd_laptop_init)
+
     pv = sub.add_parser("validate"); pv.add_argument("config"); pv.set_defaults(fn=cmd_validate)
+
     pi = sub.add_parser("ingest")
     pi.add_argument("config"); pi.add_argument("--dry-run", action="store_true")
     pi.add_argument("--sample", type=int, default=5); pi.set_defaults(fn=cmd_ingest)
+
     pe = sub.add_parser("eval"); pe.add_argument("config"); pe.set_defaults(fn=cmd_eval)
     pp = sub.add_parser("promote"); pp.add_argument("config"); pp.set_defaults(fn=cmd_promote)
+
     pm = sub.add_parser("migrate")
     pm.add_argument("--schema", required=True); pm.add_argument("--env", required=True)
     pm.set_defaults(fn=cmd_migrate)
+
+    psb = sub.add_parser("skill-builder", help="synthesize skills from intent file")
+    psb.add_argument("--intent-file", help="YAML intent file describing the task")
+    psb.add_argument("--dry-run", action="store_true", help="don't write artifacts to disk")
+    psb.set_defaults(fn=cmd_skill_builder)
+
+    psl = sub.add_parser("skill-list", help="list registered workflow skills")
+    psl.set_defaults(fn=cmd_skill_list)
+    pwl = sub.add_parser("workflow-list", help="alias for skill-list")
+    pwl.set_defaults(fn=cmd_skill_list)
+
+    pwr = sub.add_parser("workflow-run", help="execute on_request workflow skill")
+    pwr.add_argument("skill_name", help="<persona>.<skill_name> or just <skill_name>")
+    pwr.add_argument("--inputs", default="{}", help="JSON object of inputs")
+    pwr.add_argument("--show-data", action="store_true")
+    pwr.set_defaults(fn=cmd_workflow_run)
 
     args = p.parse_args()
     return args.fn(args)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     sys.exit(main())

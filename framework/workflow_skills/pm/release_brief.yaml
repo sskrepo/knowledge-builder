@@ -1,0 +1,42 @@
+workflow_skill: release_brief
+persona: pm
+status: draft
+
+trigger:
+  on_request:
+    enabled: true
+    inputs:
+      - { name: release_id, type: string, description: "FA release ID, e.g. 25.01" }
+    output_format: docx
+    response_mode: artifact_url
+
+skill_card:
+  summary: "Produce a release brief DOCX for a given FA release — scope, risks, owners, freeze dates."
+  use_when: |
+    User asks for a release brief, release status, scope summary for a release ID,
+    or wants the gating risks for a release.
+  example_invocations:
+    - "release brief for 25.01"
+    - "what's the scope of 25.07"
+    - "gating risks for FA 26.01"
+  do_not_use_for: |
+    Per-feature deep-dive (use search_wiki for feature briefs).
+
+requires_extractions:
+  - kb: pm.pm_release_plans
+    required_fields: [release_id, target_date, status, scope_items, gating_risks, owners, freeze_dates]
+
+synthesis:
+  output_format: docx
+  title: "Release Brief — {release_id}"
+  slide_mapping: synthesis/mappings/release_brief.yaml
+
+delivery:
+  kind: filesystem
+  path: "~/.kbf/outputs/release-brief-{release_id}.docx"
+
+eval:
+  gold_set: eval/gold_sets/pm-release_brief-workflow.jsonl
+  exit_criteria:
+    field_accuracy: 0.85
+    delivery_success_rate: 0.99

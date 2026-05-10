@@ -1,3 +1,16 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
 Assume you are the architect and you are asked to solve below problem.
 
 I need to build knowledge base for my Org in my company. 
@@ -23,7 +36,7 @@ We have below sources of knowledge evolved over time:
 1. Confluence -> Product definition documents, TPM project tracking wikis, All dev design documents, operational weekly reports, ECAR documents, Compliance documents etc
 2. Jira -> Development project Jiras and also all incident management tickets
 3. Code -> entire code base (APIs, Workflows, API spec)
-4. Fleet data -> Unified data store(app instances, their metadata, operations data etc)
+4. Fleet data -> Unified data store(app instances, their metadata, operations data, metrics, alarms etc)
 
 Now due to AI Adoption by all personas listed above, we realized we need a knowledge base centrally
 so that everyone need not ingest their knowledge/context on their own, at the same time, we are able to retrieve knowledge efficiently for AI use cases
@@ -45,12 +58,6 @@ We came across https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f
 I sounds good for few 100 pages of knowledge, but I am not sure if we can use it for all types of knowledge(like fleet data etc)
 What are my options ?
 
-Dimensions to associate/navigate through the knowledge base:
-1. PERSONAS(PM / TPM / ARCHITECT / ENG MANAGER / DEVELOPER / OPS MANAGER / OPS ENGINEER, SERVICE OWNER)
-2. SERVICES(ADP / FACP / HCP)
-3. RESOURCES(POD, PODDB, EXADATA, BLOCK VOLUME Etc comes from Spec)
-4. FUNCTIONAL AREAS(REFRESH / PROVISIONING / UPDATE / PATCHING / DB INFRA PATCHING etc), MAY BE THIS IS A PERSONA ?
-
 
 
 
@@ -59,10 +66,9 @@ Here is what I was thinking .. on how overall arch/flow of this system going to 
 
 Knowledge extraction Layer:
 
-1. For a given data source type, what are the right data structures to store extracted knowledge(This is where discussed so far, and we looked into tech stack to achieve it)
-2. All knowledge extraction will be driven through LLM
+1. For a given data source type, what are the right data structures to store extracted knowledge
 	- Because we want LLM to maintain it going forward
-	- It is for LLM consumption, so use Markdown file format
+	- It is for LLM consumption, so use Markdown file format, if possible
 	- Data sources like fleet data, where there is only semantics to extract, not worthy to process through LLM, will remain a relational Schema and accessed using NL/SQL
 3. What knowledge we extract from a given data source depends on what PERSONA is extracting it.
 So we will have PERSONA based Knowledge builders driven through LLMs to extract and maintain knowledge
@@ -102,7 +108,107 @@ Technically, everywhere I said "agent" can be replaced with "Skill"
 
 
 
+Is knowledge builder for a given persona a skill or an agent ?
 
+
+
+
+Great question — it's neither, technically. Let me draw the distinction clearly because I've been using overlapping vocabulary.
+
+Three different things — don't confuse them
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  PERSONA KNOWLEDGE BUILDER  (write-side, ingestion)                         │
+│  - A YAML config + the framework's pipeline that processes it               │
+│  - Runs on schedule (cron) + on webhook events                              │
+│  - For each new/updated source item:                                        │
+│       adapter.fetch(item) → llm_parser.parse(item, schema) → store.upsert() │
+│  - LLM is used in a BOUNDED way (one call per item, schema-constrained)     │
+│  - No autonomous loop, no decision-making about what to do next             │
+│  - It's a SCHEDULED INGESTION JOB                                           │
+│                                                                             │
+│  Lives in: framework/persona_builders/{persona}.yaml + framework/ingestion/ │
+└─────────────────────────────────────────────────────────────────────────────┘
+                          ↓ writes ContentItems
+                          ↓
+                  ┌───────────────────┐
+                  │ Knowledge bases   │
+                  │  (vector / wiki / │
+                  │   graph / sql)    │
+                  └───────────────────┘
+                          ↑ reads
+                          ↑
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  PERSONA CONTEXT SKILL  (read-side, retrieval)                              │
+│  - Called by the orchestrator on every consumer query                       │
+│  - Given (query + intent_signal + budget), returns a ContextPacket          │
+│  - SKILL — bounded function, predictable cost/latency, fixed I/O (ADR-007)  │
+│                                                                             │
+│  Lives in: framework/persona_skills/{persona}.py                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+                          ↓ feeds passages
+                          ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  ORCHESTRATOR (and Aira)  ← these are AGENTS                                │
+│  - Autonomous loops with own decision-making                                │
+│  - Orchestrator: classifies intent, picks skills, merges, synthesizes       │
+│  - Aira: multi-step incident investigation                                  │
+│  - AGENT — variable cost/latency, runs until it decides it's done           │
+│                                                                             │
+│  Lives in: framework/orchestrator/ (and Aira's own codebase, externally)    │
+└─────────────────────────────────────────────────────────────────────────────┘
+Side-by-side
+Knowledge Builder	Persona Context Skill	Orchestrator/Aira
+What is it?	Ingestion pipeline	Function called per query	Autonomous reasoner
+When does it run?	Schedule (cron) + webhook events	Every consumer query	Every consumer query (or self-driven for Aira)
+Lifetime	Long-running worker process	Microseconds–seconds per call	Until task complete
+LLM usage	Bounded (1 parse call per ContentItem, schema-constrained)	Bounded (1 routing call to pick KBs)	Multiple calls in a loop
+Decision-making	None autonomous (rules + LLM extraction)	Pick which KBs to query	Pick what to do next
+Type label	Scheduled job / pipeline	Skill (per ADR-007)	Agent
+Where in repo	framework/persona_builders/*.yaml driven by framework/ingestion/pipeline.py	framework/persona_skills/{persona}.py	framework/orchestrator/
+Why a Knowledge Builder is NOT an agent
+Even though it uses LLM calls (in the parser), it doesn't make autonomous decisions:
+
+It doesn't decide which sources to ingest — the YAML config tells it
+It doesn't decide what fields to extract — the JSON Schema tells the LLM
+It doesn't loop or retry creatively — failure → log + retry on schedule
+It doesn't call other agents
+It's just: "for each new item from these sources, parse it with this schema, write it to this store." That's a pipeline.
+
+Why it's NOT a skill either
+A skill is called synchronously by an orchestrator on demand. The Knowledge Builder isn't called by anything in the read path — it runs on its own clock, populating the stores so the read path has data to retrieve.
+
+What about the persona-knowledge-builder name?
+Yes — the name is slightly overloaded. Looking at our docs (docs/wiki/persona-knowledge-builder.md), what we call a "Knowledge Builder" is really:
+
+The YAML config (declarative spec of what to ingest)
+The JSON Schema (declarative spec of what to extract)
+The gold set (declarative spec of how to evaluate)
+The framework's runtime then executes that spec via the ingestion pipeline. So "Knowledge Builder" is closer to "build spec" or "ingestion blueprint" than to a runtime entity.
+
+If we wanted to rename for clarity:
+
+Today: "PM Knowledge Builder" → ambiguous (config? agent? skill?)
+Clearer: "PM Ingestion Spec" + the framework runs it as a job
+I'd keep the current name though — the user community is already used to "Knowledge Builder" and renaming now would cost more than it gains. Just remember it's a specification, not a running agent.
+How this maps to your TPM example
+When you said "can I take existing code, edit a little of TPM knowledge base 'what to extract' part, and start creating knowledge base for TPM?" — the literal mechanics:
+
+You edit:
+  framework/persona_builders/tpm.yaml             ← what sources, what KBs
+  framework/parsers/schemas/tpm/*/v1.json         ← what to extract
+Then run (once Phase 1 lands):
+  $ kb-cli validate framework/persona_builders/tpm.yaml      ← lint
+  $ kb-cli ingest --dry-run --sample 5 ...                   ← preview parse on 5 items
+  $ kb-cli eval framework/persona_builders/tpm.yaml          ← run TPM gold set
+  $ kb-cli promote framework/persona_builders/tpm.yaml       ← flip to production
+That's it. The framework's ingestion pipeline reads tpm.yaml, fan-outs to
+configured sources, parses with the schema, writes to the configured stores.
+No new code. No new agent. No skill change. Just the existing pipeline
+applied to new config.
+The TPM persona context skill (framework/persona_skills/tpm.py) is a separate thing — a 50-line file that's already stubbed; it gets activated automatically once tpm.yaml flips to status: production and its KBs have data.
+
+Short answer
+The Persona Knowledge Builder for TPM = a YAML config + JSON schemas + gold set. The framework's ingestion pipeline executes it as a scheduled job. It's not a skill, not an agent — it's an ingestion specification.
 
 
 

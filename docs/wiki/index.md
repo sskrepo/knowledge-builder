@@ -5,7 +5,8 @@
 - [log](log.md)
 
 ## Framework — start here
-- 📄 **[PDD — Knowledge Builder Framework](pdd/PDD-Knowledge-Builder-Framework.md)** — comprehensive product definition (also as .docx in same folder)
+- 📄 **[PDD V2 — Knowledge Builder Framework](pdd/PDD-Knowledge-Builder-Framework-v2.md)** — current; two-flow model, three-shim arch, four-tier routing, workflow skills, skill-by-demonstration
+- 📄 [PDD V1 — Knowledge Builder Framework](pdd/PDD-Knowledge-Builder-Framework.md) — superseded by V2 (also as .docx in same folder)
 - 📊 **[Executive Brief](exec-brief.md)** — 14-section deck for leadership (also as .pptx in same folder)
 - [project-overview](project-overview.md) — vision, personas, value loop, v1 scope
 - [personas](personas.md) — knowledge producers (PM/TPM/...) and use-case agents (Aira/portals)
@@ -44,6 +45,7 @@
 - [ADR-014 — LLM access via OCI Generative AI Inference (AIRA pattern)](adr/ADR-014-llm-via-oci-genai.md)
 
 ## Engineering
+- 🚀 **[laptop-quickstart](engineering/laptop-quickstart.md)** — V2; run framework end-to-end on laptop with no provisioning (no ADB, no Vault, no OpenAI required)
 - [dev-guide](engineering/dev-guide.md) — Phase 1 setup + first end-to-end run
 - [runbook](engineering/runbook.md) — operations playbook
 

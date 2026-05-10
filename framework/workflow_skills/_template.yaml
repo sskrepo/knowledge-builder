@@ -1,0 +1,46 @@
+# Workflow skill template — copy to {persona}/{skill_name}.yaml and edit.
+# Or use `kb-cli skill-builder --intent-file <yaml>` to synthesize.
+# Per ADR-016.
+
+workflow_skill: REPLACE_ME
+persona: REPLACE_ME                     # PM | TPM | architect | eng_mgr | dev | ops_mgr | ops_eng | service_owner
+status: draft                            # draft | production
+
+trigger:
+  on_request:
+    enabled: true
+    inputs:
+      - { name: example_input, type: string, description: "Describe what the user provides" }
+    output_format: markdown               # markdown | pptx | docx | email | slack
+    response_mode: artifact_url
+  # on_schedule:
+  #   cron: "0 16 * * 5"
+  #   delivery: { kind: filesystem, path: "~/.kbf/outputs/{skill_name}.md" }
+
+skill_card:
+  summary: "What this skill produces (one line)"
+  use_when: "When the user asks ..."
+  example_invocations:
+    - "..."
+  do_not_use_for: "..."
+
+requires_extractions:
+  - kb: REPLACE_PERSONA.REPLACE_KB
+    required_fields:
+      - field_a
+      - field_b
+
+synthesis:
+  output_format: markdown
+  title: "Skill output title"
+  slide_mapping: synthesis/mappings/REPLACE_ME.yaml
+
+delivery:
+  kind: filesystem
+  path: "~/.kbf/outputs/REPLACE_ME-{example_input}.md"
+
+eval:
+  gold_set: eval/gold_sets/REPLACE_PERSONA-REPLACE_ME-workflow.jsonl
+  exit_criteria:
+    field_accuracy: 0.85
+    delivery_success_rate: 0.99

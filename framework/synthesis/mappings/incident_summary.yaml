@@ -1,0 +1,9 @@
+title: "Incident Summary"
+sections:
+  Root_Cause: { source_field: root_cause_summary }
+  Resolution: { source_field: resolution_summary }
+  Severity:   { source_field: severity }
+  Service:    { source_field: service }
+  Service_Owner: { source_field: service_owner }
+  Resources_Affected: { source_field: resources_affected }
+  Impact: { source_field: impact }

@@ -1,0 +1,19 @@
+{
+  "id": "fixture-inc-005",
+  "source": "jira",
+  "source_id": "INC-EXAMPLE-005",
+  "title": "Example incident 005 — auth-service NPE on token verify",
+  "incident_id": "INC-EXAMPLE-005",
+  "severity": "sev2",
+  "service": "auth-service",
+  "service_owner": "platform-auth-team",
+  "root_cause_summary": "Pod DB state was null during token cache eviction; cache refresh raced with state rotation.",
+  "resolution_summary": "Reset pod_db.state from NULL → ACTIVE; updated cache.get to handle null tokens gracefully (PR-12345).",
+  "impact": {"blast_radius": "tenants on prod-auth in EMEA region", "duration_minutes": 22, "severity": "sev2"},
+  "resources_affected": ["pod", "poddb"],
+  "ora_codes": [],
+  "tenant_ids": ["tenant-23", "tenant-99"],
+  "stack": "prod",
+  "created_at": "2026-04-15T13:22:00Z",
+  "updated_at": "2026-04-15T15:01:00Z"
+}

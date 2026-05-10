@@ -1,10 +1,17 @@
-"""Base persona context skill — implements ADR-007 contract."""
+"""Base persona context skill — implements ADR-007 contract.
+
+V2 (per ADR-007 amend 5 + 6):
+- Tier 1: try this persona's authored workflow skills first (shim_workflows.cards_for(persona))
+- Tier 2: fall back to KB retrieval over ACL-visible KBs (shim_kb.cards_visible_to(persona))
+- Returns ContextPacket OR a workflow-artifact reference, depending on which tier fired.
+"""
 from __future__ import annotations
 
 import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 from ..core.llm import LLMClient
 from ..orchestrator.budget import Budget
@@ -45,20 +52,37 @@ class BasePersonaSkill:
     persona: str = ""
     PROMPT_FRAGMENT: str = ""
 
+    # Confidence thresholds (per ADR-006 amend 3)
+    tier1_threshold: float = 0.85
+    tier2_threshold: float = 0.6
+
     def __init__(
         self,
         llm: LLMClient,
         shim_kb: ShimKb,
         retrievers: dict,
+        shim_workflows=None,                  # ADR-006 amend 2 / ADR-016
+        workflow_executor=None,
         model: str = "gpt-4o",
     ):
         self.llm = llm
         self.shim_kb = shim_kb
         self.retrievers = retrievers
+        self.shim_workflows = shim_workflows
+        self.workflow_executor = workflow_executor
         self.model = model
 
     def __call__(self, query: str, intent_signal: IntentSignal, budget: Budget):
-        # 1. Build prompt with shim_kb_filtered for this persona
+        # ADR-007 amend 5: Tier 1 — try persona's workflow skills first
+        if self.shim_workflows and self.workflow_executor:
+            wf_match = self._match_workflow_skill(query, intent_signal)
+            if wf_match and wf_match.get("confidence", 0) >= self.tier1_threshold:
+                log.info("Tier 1: invoking workflow skill %s (confidence=%.2f)",
+                         wf_match["skill"], wf_match["confidence"])
+                return self._invoke_workflow(wf_match, query, intent_signal, budget)
+
+        # ADR-007 amend 6: Tier 2 — KB retrieval over ACL-visible KBs (cards_visible_to)
+        # 1. Build prompt with shim_kb_filtered for this persona (read scope, not authoring)
         kb_block = self.shim_kb.render_for_persona_prompt(self.persona)
         system = f"""You are the {self.persona} retrieval skill.
 
@@ -174,6 +198,82 @@ Rules:
             cost={"tool_calls": tool_calls},
             confidence=intent_signal.confidence,
             notes=plan.get("reasoning"),
+        )
+
+    # =====================================================================
+    # ADR-007 amend 5: Tier 1 — workflow skill match
+    # =====================================================================
+    def _match_workflow_skill(self, query: str, intent_signal: IntentSignal) -> dict | None:
+        """LLM-classifies whether the query matches a persona-authored workflow skill.
+
+        Returns: {"skill": <name>, "skill_card": ..., "inputs": {...}, "confidence": float}
+                 or None if no card present.
+        """
+        cards = self.shim_workflows.cards_for(self.persona)
+        on_request_cards = [c for c in cards if c.get("on_request")]
+        if not on_request_cards:
+            return None
+
+        cards_block = self.shim_workflows.render_for_persona_prompt(self.persona)
+        system = f"""You decide whether a user query matches one of the {self.persona}
+persona's workflow skills.
+
+{cards_block}
+
+Output JSON ONLY:
+{{
+  "skill": "<exact skill name from above, or null if no match>",
+  "inputs": {{...}},
+  "confidence": 0.0-1.0,
+  "reasoning": "<one line>"
+}}
+
+Rules:
+- Match the user's intent against each card's `use_when` and `example_invocations`.
+- Extract input values from the query (e.g., "for INC-12345" → {{"incident_id": "INC-12345"}}).
+- If no skill cleanly matches, return skill=null with confidence=0.
+"""
+        try:
+            response = self.llm.chat(
+                model=self.model,
+                messages=[{"role": "system", "content": system},
+                          {"role": "user", "content": f"Query: {query}"}],
+                temperature=0.0,
+                response_format={"type": "json_object"},
+                max_tokens=300,
+            )
+            d = json.loads(response["text"])
+            if d.get("skill"):
+                return {
+                    "skill": d["skill"],
+                    "inputs": d.get("inputs", {}),
+                    "confidence": float(d.get("confidence", 0.0)),
+                    "reasoning": d.get("reasoning"),
+                }
+        except Exception as e:
+            log.warning("workflow-skill match failed: %s", e)
+        return None
+
+    def _invoke_workflow(self, match: dict, query: str, intent: IntentSignal, budget: Budget):
+        """Invoke the matched workflow skill via the workflow_executor."""
+        cards = self.shim_workflows.cards_for(self.persona)
+        target = next((c for c in cards if c.get("name") == match["skill"]), None)
+        if not target:
+            log.warning("matched skill %s not found in cards", match["skill"])
+            return None
+        result = self.workflow_executor.execute(Path(target["_path"]), match["inputs"])
+        # Wrap result in a workflow-artifact response shape
+        from ..orchestrator.context_builder import ContextPacket
+        return ContextPacket(
+            persona=self.persona,
+            passages=[],                                    # no passages; this is an artifact
+            citations=[],
+            used_kbs=[],
+            used_tools=[f"workflow:{match['skill']}"],
+            cost={"workflow_artifact": True},
+            confidence=match["confidence"],
+            notes=f"Tier 1: invoked workflow skill {match['skill']}; "
+                  f"artifact at {result.get('delivery', {}).get('url') or result.get('delivery', {}).get('path')}",
         )
 
     def _merge_filters(self, intent_filters: list[IntentFilter],

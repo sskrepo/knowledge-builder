@@ -1,0 +1,24 @@
+{
+  "id": "fixture-rel-25.01",
+  "source": "confluence",
+  "source_id": "25.01",
+  "title": "FA Release 25.01",
+  "release_id": "25.01",
+  "target_date": "2026-06-15",
+  "status": "in-progress",
+  "scope_items": [
+    "customer-events Kafka topic v2",
+    "auth-service token cache hardening",
+    "PODDB refresh automation"
+  ],
+  "gating_risks": [
+    "Kafka throughput cap not yet validated under prod load",
+    "auth-service tests still failing on cross-region failover"
+  ],
+  "owners": [
+    {"scope_item": "customer-events Kafka topic v2", "owner": "platform-events-team"},
+    {"scope_item": "auth-service token cache hardening", "owner": "platform-auth-team"},
+    {"scope_item": "PODDB refresh automation", "owner": "ops-eng-team"}
+  ],
+  "freeze_dates": {"feature_freeze": "2026-05-25", "code_freeze": "2026-06-08"}
+}

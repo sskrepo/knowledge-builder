@@ -1,0 +1,2 @@
+{"id": "wf-001", "question": "summarize INC-EXAMPLE-001", "expected_skill": "incident_summary", "expected_inputs": {"incident_id": "INC-EXAMPLE-001"}, "expected_output_includes": ["root_cause_summary", "resolution_summary", "severity"], "min_intent_match_score": 0.85, "min_field_accuracy": 0.85}
+{"id": "wf-002", "question": "what is the root cause for INC-EXAMPLE-002", "expected_skill": "incident_summary", "expected_inputs": {"incident_id": "INC-EXAMPLE-002"}, "expected_output_includes": ["auth-service"], "min_intent_match_score": 0.85, "min_field_accuracy": 0.85}

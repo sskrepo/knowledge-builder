@@ -13,7 +13,51 @@ status: current
 **Current phase:** Phase 0 — Setup
 **Updated:** 2026-05-04 by tpm (autonomous Phase 0 run)
 
-## 🌅 Morning briefing — 2026-05-06 (Phase 1 implementation complete)
+## 🌅 Morning briefing — 2026-05-10 (V2 design + skeleton landed)
+
+**V2 framework design landed.** Big shift: persona teams now author skills via natural-language **intent + example outcome** (not YAML editing). Two flows separated: **Knowledge Builder flow** (authoring) + **Consumption flow** (runtime). Three-shim architecture (faaas + workflows + kb). Four-tier routing with graceful degradation. Workflow skills as first-class persona-owned outputs (PPT/DOCX/markdown/email/slack).
+
+**What's runnable on your laptop right now (no ADB / OpenAI / Vault required):**
+
+```bash
+$ python -m framework.cli.kb_cli laptop-init
+$ python -m framework.cli.kb_cli skill-list
+$ python -m framework.cli.kb_cli workflow-run ops_eng.incident_summary \
+    --inputs '{"incident_id": "INC-EXAMPLE-001"}'
+$ open ~/.kbf/outputs/incident-summary-INC-EXAMPLE-001.md
+```
+
+You'll get a real Markdown summary produced from fixture data. Same flow for `pm.release_brief` (DOCX). Skill builder (`kb-cli skill-builder --intent-file ...`) takes a YAML intent file and synthesizes all the artifacts.
+
+**Read order** when you wake:
+1. [`docs/wiki/engineering/laptop-quickstart.md`](../docs/wiki/engineering/laptop-quickstart.md) — try it
+2. [`docs/wiki/pdd/PDD-Knowledge-Builder-Framework-v2.md`](../docs/wiki/pdd/PDD-Knowledge-Builder-Framework-v2.md) — full V2 design
+3. [`pmo/AUTONOMOUS-RUN-2026-05-09.md`](AUTONOMOUS-RUN-2026-05-09.md) — log of every assumption I made overnight
+4. [`pmo/phases.md`](phases.md) — V2 phase plan
+
+**Shipped this run:**
+- PDD V2 (~700 lines)
+- 4 new ADRs (015 skill-by-demo · 016 workflow skills · 017 ext-workflow linking · 018 skill suggestion loop)
+- 6 amendments to existing ADRs (006 three-shim + tiered routing · 007 artifact-as-input + Tier 1/2 dispatch + ACL read scope · 011 Adapter.discover())
+- New code: `framework/skill_builder/`, `framework/workflow_runtime/`, `framework/renderers/` (5 renderers), `framework/deliverers/` (5 deliverers), `framework/orchestrator/shim_workflows.py`, `framework/stores/filestore_content_store.py`, updated `persona_skills/_base.py` for Tier 1/2 dispatch
+- 2 starter workflow skills committed: `ops_eng.incident_summary`, `pm.release_brief`
+- Fixture data: 5 fake incidents + 1 fake release for laptop demo
+- Updated `kb-cli` with `laptop-init`, `skill-builder`, `skill-list`, `workflow-run` subcommands
+- Phase plan V2 (Phase 1 unchanged; Phase 2 adds skill-builder Phase A; Phase 3 adds workflow runtime + first 3 production workflow skills; Phase 4 adds skill suggestion loop)
+
+**Honest gaps for tomorrow:**
+- Conversational skill-builder is non-interactive only (intent-file mode). Conversational chat is Phase 3 polish.
+- LLM is in `stub` mode by default on laptop. Provide OCI GenAI URL or OpenAI key for real synthesis quality.
+- Filestore content store uses lexical Jaccard overlap, not vector similarity. ADB + real embeddings come with provisioning.
+- Adapters are not yet running against real Confluence/Jira (fixture data only). Phase 1 wires real adapters.
+
+**Permissions friction acknowledged:** the `.claude/settings.local.json` hook keeps narrowing the allowlist back to per-command patterns, causing you to see prompts. There's no way to fix that from inside the session. For future autonomous runs, launch with `claude --dangerously-skip-permissions` or modify the global hook config.
+
+**For tomorrow's ops/PM demo:** the two starter skills work today. Show them rendering a real artifact from fixture data. Then iterate on the synthesis mappings (`framework/synthesis/mappings/{skill}.yaml`) to taste, or use `kb-cli skill-builder --intent-file` to create a custom skill from your team's actual example outcomes.
+
+---
+
+## 🌅 Earlier briefing — 2026-05-06 (Phase 1 implementation complete)
 
 **Phase 1 code is done.** ~4150 LOC across 84 Python files. Two final commits landed:
 - ADRs 012/013 + ADR-005/007 amendments (per AIRA comparison)
