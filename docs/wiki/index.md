@@ -46,6 +46,7 @@
 
 ## Engineering
 - 🚀 **[laptop-quickstart](engineering/laptop-quickstart.md)** — V2; run framework end-to-end on laptop with no provisioning (no ADB, no Vault, no OpenAI required)
+- 🎯 **[workshop-ops-guide](engineering/workshop-ops-guide.md)** — how to run the application + stand up the NL gold-set feeder for persona workshops
 - [dev-guide](engineering/dev-guide.md) — Phase 1 setup + first end-to-end run
 - [runbook](engineering/runbook.md) — operations playbook
 

@@ -17,6 +17,8 @@ V2 commands:
                                       — flip status to production
   kb-cli migrate --schema <name> --env <env>
                                       — apply DDL
+  kb-cli gold-feed --persona <persona> [--skill <skill>]
+                                      — interactive gold-set feeder (workshop mode)
 """
 from __future__ import annotations
 
@@ -346,6 +348,47 @@ def cmd_workflow_run(args):
 
 
 # ============================================================================
+# gold-feed — interactive gold-set feeder (workshop mode)
+# ============================================================================
+def cmd_gold_feed(args):
+    """Run the interactive GoldSetFeeder loop.
+
+    Prompts workshop participants for query/citation pairs and appends them to
+    framework/eval/gold_sets/{persona}.jsonl.
+    """
+    from ..eval.gold_set_feeder import GoldSetFeeder, count_entries
+
+    persona = args.persona.strip()
+    skill = getattr(args, "skill", "") or ""
+
+    existing = count_entries(persona)
+    if existing:
+        print(f"  ({existing} entries already in gold set for '{persona}')")
+
+    feeder = GoldSetFeeder(persona=persona, skill_name=skill)
+    turn = feeder.start()
+    print(f"\n{turn.message}\n")
+
+    while not turn.done:
+        if turn.options:
+            print(f"  Suggestions: {turn.options}")
+        try:
+            user_input = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nSession interrupted.")
+            return 0
+        if not user_input:
+            continue
+        if user_input.lower() in ("quit", "exit", "q"):
+            print("Session cancelled.")
+            return 0
+        turn = feeder.respond(user_input)
+        print(f"\n{turn.message}\n")
+
+    return 0
+
+
+# ============================================================================
 # main
 # ============================================================================
 def main():
@@ -391,6 +434,11 @@ def main():
     pcwb.add_argument("--repo-path", default=".", help="path to the Python repo root (default: .)")
     pcwb.add_argument("--store-root", default=None, help="filestore root (default: $KBF_STORE_ROOT or ~/.kbf/store)")
     pcwb.set_defaults(fn=cmd_code_wiki_build)
+
+    pgf = sub.add_parser("gold-feed", help="interactive gold-set feeder (workshop mode)")
+    pgf.add_argument("--persona", required=True, help="persona id (e.g. ops_eng)")
+    pgf.add_argument("--skill", default="", help="skill / KB name (e.g. incident_summary)")
+    pgf.set_defaults(fn=cmd_gold_feed)
 
     args = p.parse_args()
     return args.fn(args)
