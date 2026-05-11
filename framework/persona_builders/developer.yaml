@@ -1,59 +1,102 @@
 persona: developer
-display_name: "Developer Knowledge Builder"
+display_name: Developer Knowledge Builder
 schema_version: 1
 status: draft
 primary_axis: service_id
-
 functional_areas: []
-resources_relevant: [pod, poddb]
-kinds_supported: [concept, decision, design]
-
+resources_relevant:
+- pod
+- poddb
+kinds_supported:
+- concept
+- decision
+- design
 knowledge_bases:
-  - name: dev_code_wiki
-    kind: code_index
-    sources:
-      - { kind: git, repo: org/fa-code, paths: ["**/*.py","**/*.java","**/*.go"] }
-    retrieval_tools: [read_code_page, find_symbol]
-    kb_card:
-      summary: "Som-style structural code wiki: per-module summaries + symbol index."
-      use_when: "Question is 'where is X implemented' or 'what does function Y do'."
-      input_shape: "Symbol name, file path, or natural-language about-code question."
-      output_shape: "Code page or symbol records with line citations."
-      freshness: "Regenerated on every commit."
-
-  - name: dev_openapi
-    kind: wiki
-    extraction_schema: parsers/schemas/developer/openapi/v1.json
-    sources:
-      - { kind: git, repo: org/fa-code, paths: ["**/openapi*.yaml","**/openapi*.yml"] }
-    retrieval_tools: [search_wiki, read_wiki_page]
-    kb_card:
-      summary: "OpenAPI specs indexed by endpoint and schema."
-      use_when: "Question is about an HTTP endpoint, request/response shape, or auth."
-      input_shape: "Endpoint path or natural-language API question."
-      output_shape: "OpenAPI excerpt with operation + schema."
-
-  - name: dev_decisions
-    kind: vector
-    extraction_schema: parsers/schemas/developer/decisions/v1.json
-    sources:
-      - { kind: confluence, space: ENG, include_labels: [code-decision, refactor] }
-      - { kind: git, repo: org/fa-code, paths: ["**/DECISIONS.md","**/CHANGELOG.md"] }
-    retrieval_tools: [vector_search]
-    kb_card:
-      summary: "Developer-level decisions and rationale (refactors, lib choices)."
-      use_when: "Question is 'why does the code work this way'."
-      input_shape: "Question."
-      output_shape: "Top-K cited decision passages."
-
+- name: dev_code_wiki
+  kind: code_index
+  sources:
+  - kind: git
+    repo: org/fa-code
+    paths:
+    - '**/*.py'
+    - '**/*.java'
+    - '**/*.go'
+  retrieval_tools:
+  - read_code_page
+  - find_symbol
+  kb_card:
+    summary: 'Som-style structural code wiki: per-module summaries + symbol index.'
+    use_when: Question is 'where is X implemented' or 'what does function Y do'.
+    input_shape: Symbol name, file path, or natural-language about-code question.
+    output_shape: Code page or symbol records with line citations.
+    freshness: Regenerated on every commit.
+- name: dev_openapi
+  kind: wiki
+  extraction_schema: parsers/schemas/developer/openapi/v1.json
+  sources:
+  - kind: git
+    repo: org/fa-code
+    paths:
+    - '**/openapi*.yaml'
+    - '**/openapi*.yml'
+  retrieval_tools:
+  - search_wiki
+  - read_wiki_page
+  kb_card:
+    summary: OpenAPI specs indexed by endpoint and schema.
+    use_when: Question is about an HTTP endpoint, request/response shape, or auth.
+    input_shape: Endpoint path or natural-language API question.
+    output_shape: OpenAPI excerpt with operation + schema.
+  provides_fields:
+  - service
+  - endpoint
+  - method
+  - summary_line
+  - auth_required
+  - request_schema_ref
+  - response_schema_ref
+- name: dev_decisions
+  kind: vector
+  extraction_schema: parsers/schemas/developer/decisions/v1.json
+  sources:
+  - kind: confluence
+    space: ENG
+    include_labels:
+    - code-decision
+    - refactor
+  - kind: git
+    repo: org/fa-code
+    paths:
+    - '**/DECISIONS.md'
+    - '**/CHANGELOG.md'
+  retrieval_tools:
+  - vector_search
+  kb_card:
+    summary: Developer-level decisions and rationale (refactors, lib choices).
+    use_when: Question is 'why does the code work this way'.
+    input_shape: Question.
+    output_shape: Top-K cited decision passages.
+  provides_fields:
+  - title
+  - summary
+  - service
+  - files_affected
+  - rationale
 metadata_defaults:
-  persona_visibility: [dev, dev_mgr, architect, eng_mgr, ops_eng]
+  persona_visibility:
+  - dev
+  - dev_mgr
+  - architect
+  - eng_mgr
+  - ops_eng
   owner: dev
   classification: internal
-
 eval:
   gold_set: eval/gold_sets/developer.jsonl
-  exit_criteria: { recall_at_5: 0.80, faithfulness: 0.85, p95_latency_ms: 800, max_tokens_per_query: 2000 }
-
+  exit_criteria:
+    recall_at_5: 0.8
+    faithfulness: 0.85
+    p95_latency_ms: 800
+    max_tokens_per_query: 2000
 ingestion:
-  schedule: "0 */2 * * *"
+  schedule: 0 */2 * * *

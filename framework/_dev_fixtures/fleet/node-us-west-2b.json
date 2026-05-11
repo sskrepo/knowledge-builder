@@ -1,0 +1,20 @@
+{
+  "resource_type": "node",
+  "node_id": "node-us-west-2b",
+  "region": "us-west-2",
+  "availability_zone": "us-west-2b",
+  "status": "degraded",
+  "instance_type": "m6i.2xlarge",
+  "cpu_pct": 81.3,
+  "memory_pct": 90.7,
+  "disk_pct": 55.2,
+  "pod_count": 1,
+  "pod_ids": ["pod-beta-002"],
+  "kernel_version": "5.15.0-1048-aws",
+  "current_patch": "2026-03",
+  "target_patch": "2026-05",
+  "patching_status": "behind",
+  "last_check_at": "2026-05-10T08:00:00Z",
+  "uptime_hours": 720,
+  "labels": {"provider": "aws", "env": "prod", "tier": "compute"}
+}

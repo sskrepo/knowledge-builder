@@ -1,7 +1,7 @@
 """Workflow executor — runs a workflow skill end-to-end.
 
 Per ADR-016. Steps: source discovery → extract (or read cached) → retrieve →
-synthesize → render → deliver.
+synthesize → render → deliver → cost telemetry → eval recording.
 
 Laptop-mode friendly: uses FilestoreContentStore + filesystem deliverer when no
 ADB/Vault/OCI configured.
@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from datetime import datetime
 from typing import Any
@@ -19,6 +20,7 @@ import yaml
 log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+_TELEMETRY_DIR = Path.home() / ".kbf" / "telemetry"
 
 
 class WorkflowExecutor:
@@ -27,6 +29,7 @@ class WorkflowExecutor:
         self.llm = llm
 
     def execute(self, skill_yaml_path: Path, inputs: dict) -> dict:
+        t_start = time.monotonic()
         cfg = yaml.safe_load(Path(skill_yaml_path).read_text())
         skill_name = cfg.get("workflow_skill")
         persona = cfg.get("persona")
@@ -38,16 +41,44 @@ class WorkflowExecutor:
         log.info("resolved %d sources", len(sources))
 
         # 2. Retrieve relevant ContentItems for the inputs
+        t_retrieve_start = time.monotonic()
         passages = self._retrieve_for_inputs(cfg, inputs, sources)
+        retrieve_ms = int((time.monotonic() - t_retrieve_start) * 1000)
 
         # 3. Synthesize structured data per slide_mapping
         rendered_data = self._synthesize(cfg, inputs, passages)
 
         # 4. Render to artifact
+        t_render_start = time.monotonic()
         artifact_bytes = self._render(cfg, rendered_data)
+        render_ms = int((time.monotonic() - t_render_start) * 1000)
 
         # 5. Deliver
+        t_deliver_start = time.monotonic()
         delivery_result = self._deliver(cfg, artifact_bytes, inputs)
+        deliver_ms = int((time.monotonic() - t_deliver_start) * 1000)
+
+        total_ms = int((time.monotonic() - t_start) * 1000)
+
+        output_path = (
+            delivery_result.get("url")
+            or delivery_result.get("path")
+            or delivery_result.get("archive")
+            or ""
+        )
+
+        # 9. Cost telemetry
+        self._record_cost(skill_name, persona, {
+            "tokens_in": 0,
+            "tokens_out": 0,
+            "llm_calls": 0,
+            "latency_ms": total_ms,
+            "render_ms": render_ms,
+            "deliver_ms": deliver_ms,
+        })
+
+        # 10. Eval gold-set recording
+        self._record_eval_entry(skill_name, inputs, output_path)
 
         return {
             "skill": skill_name,
@@ -56,7 +87,45 @@ class WorkflowExecutor:
             "rendered_data": rendered_data,
             "delivery": delivery_result,
             "executed_at": datetime.utcnow().isoformat() + "Z",
+            "metrics": {
+                "latency_ms": total_ms,
+                "render_ms": render_ms,
+                "deliver_ms": deliver_ms,
+            },
         }
+
+    # ------------------------------------------------------------------
+    def _record_cost(self, skill_name: str, persona: str, metrics: dict) -> None:
+        """Write cost telemetry for this workflow execution.
+        metrics: {tokens_in, tokens_out, llm_calls, latency_ms, render_ms, deliver_ms}
+        """
+        _TELEMETRY_DIR.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts": datetime.utcnow().isoformat() + "Z",
+            "operation_kind": "workflow_execute",
+            "skill_name": skill_name,
+            "persona": persona,
+            **metrics,
+        }
+        costs_file = _TELEMETRY_DIR / "workflow_costs.jsonl"
+        with costs_file.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+        log.debug("cost telemetry written: skill=%s latency_ms=%d", skill_name, metrics.get("latency_ms", 0))
+
+    def _record_eval_entry(self, skill_name: str, inputs: dict, output_path: str) -> None:
+        """Record this execution as a potential gold-set entry for eval."""
+        _TELEMETRY_DIR.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts": datetime.utcnow().isoformat() + "Z",
+            "skill_name": skill_name,
+            "inputs": inputs,
+            "output_path": output_path,
+            "candidate": True,
+        }
+        eval_file = _TELEMETRY_DIR / "workflow_eval_candidates.jsonl"
+        with eval_file.open("a") as f:
+            f.write(json.dumps(entry, default=str) + "\n")
+        log.debug("eval candidate recorded: skill=%s", skill_name)
 
     # ------------------------------------------------------------------
     def _resolve_sources(self, cfg: dict, inputs: dict) -> list[dict]:
@@ -72,7 +141,6 @@ class WorkflowExecutor:
         if self.store:
             from ..core.interfaces import Query
             for req in cfg.get("requires_extractions", []):
-                kb_name = req["kb"].split(".", 1)[-1]
                 # Build query from inputs (simple pass-through: input as filter)
                 if "incident_id" in inputs:
                     q = Query(kind="incident_summary", payload={"incident_id": inputs["incident_id"]})
@@ -90,28 +158,79 @@ class WorkflowExecutor:
 
         # Fallback: load from fixture data
         if not passages:
-            passages = self._load_fixture_passages(inputs)
+            passages = self._load_fixture_passages(inputs, cfg=cfg)
 
         return passages
 
-    def _load_fixture_passages(self, inputs: dict) -> list[dict]:
+    def _load_fixture_passages(self, inputs: dict, cfg: dict | None = None) -> list[dict]:
         fixtures_dir = REPO_ROOT / "framework" / "_dev_fixtures"
         if not fixtures_dir.exists():
             return []
-        # Look up by id heuristics
-        for kind_dir in fixtures_dir.iterdir():
+
+        input_values = {str(v) for v in inputs.values() if v is not None}
+
+        # 1. Try exact id-based match across all fixture dirs
+        for kind_dir in sorted(fixtures_dir.iterdir()):
             if not kind_dir.is_dir():
                 continue
-            for fpath in kind_dir.glob("*.json"):
-                data = json.loads(fpath.read_text())
-                # Match if any input value equals data['id'] or 'source_id' or 'release_id'
-                if any(str(v) in (data.get("id"), data.get("source_id"), data.get("release_id"))
-                       for v in inputs.values()):
+            for fpath in sorted(kind_dir.glob("*.json")):
+                try:
+                    data = json.loads(fpath.read_text())
+                except Exception:
+                    continue
+                id_candidates = {
+                    str(data.get("id", "")),
+                    str(data.get("source_id", "")),
+                    str(data.get("release_id", "")),
+                }
+                id_candidates.discard("")
+                if input_values & id_candidates:
                     return [{
                         "text": json.dumps(data, indent=2),
                         "citation": f"fixture://{fpath.name}",
                         "metadata": data,
                     }]
+
+        # 2. Match against fixture field values (e.g., project="all" matches data.project)
+        for kind_dir in sorted(fixtures_dir.iterdir()):
+            if not kind_dir.is_dir():
+                continue
+            for fpath in sorted(kind_dir.glob("*.json")):
+                try:
+                    data = json.loads(fpath.read_text())
+                except Exception:
+                    continue
+                if any(str(data.get(k)) == str(v) for k, v in inputs.items()
+                       if v is not None and k != "project" or str(v) != "all"):
+                    return [{
+                        "text": json.dumps(data, indent=2),
+                        "citation": f"fixture://{fpath.name}",
+                        "metadata": data,
+                    }]
+
+        # 3. KB-name-based dir match — if skill requires a KB and a matching fixture dir exists
+        if cfg:
+            for req in cfg.get("requires_extractions", []):
+                kb_name = (req.get("kb") or "").split(".")[-1].replace("_", "-")
+                for kind_dir in fixtures_dir.iterdir():
+                    if not kind_dir.is_dir():
+                        continue
+                    dir_name = kind_dir.name.replace("_", "-")
+                    if dir_name in kb_name or kb_name in dir_name:
+                        passages = []
+                        for fpath in sorted(kind_dir.glob("*.json")):
+                            try:
+                                data = json.loads(fpath.read_text())
+                                passages.append({
+                                    "text": json.dumps(data, indent=2),
+                                    "citation": f"fixture://{fpath.name}",
+                                    "metadata": data,
+                                })
+                            except Exception:
+                                continue
+                        if passages:
+                            return passages
+
         return []
 
     def _synthesize(self, cfg: dict, inputs: dict, passages: list[dict]) -> dict:

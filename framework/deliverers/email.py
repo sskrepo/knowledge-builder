@@ -23,6 +23,8 @@ class EmailDeliverer(BaseDeliverer):
         log.info("EmailDeliverer: laptop-mode 'sent' to %s; archive=%s", recipients, path)
         return {
             "status": "delivered",
+            "url": None,
+            "error": None,
             "mode": "email_stub",
             "to": recipients,
             "subject": subject,

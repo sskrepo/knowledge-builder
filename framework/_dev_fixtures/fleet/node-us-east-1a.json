@@ -1,0 +1,20 @@
+{
+  "resource_type": "node",
+  "node_id": "node-us-east-1a",
+  "region": "us-east-1",
+  "availability_zone": "us-east-1a",
+  "status": "healthy",
+  "instance_type": "m6i.4xlarge",
+  "cpu_pct": 42.1,
+  "memory_pct": 67.4,
+  "disk_pct": 51.3,
+  "pod_count": 2,
+  "pod_ids": ["pod-alpha-001", "pod-gamma-003"],
+  "kernel_version": "5.15.0-1051-aws",
+  "current_patch": "2026-04",
+  "target_patch": "2026-05",
+  "patching_status": "pending",
+  "last_check_at": "2026-05-10T08:00:00Z",
+  "uptime_hours": 4392,
+  "labels": {"provider": "aws", "env": "prod", "tier": "compute"}
+}

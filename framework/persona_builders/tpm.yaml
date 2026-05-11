@@ -1,62 +1,123 @@
 persona: tpm
-display_name: "TPM Knowledge Builder"
+display_name: TPM Knowledge Builder
 schema_version: 1
 status: draft
 primary_axis: program
-
-functional_areas: [refresh, provisioning, update, patching, dr]
-resources_relevant: [pod, poddb, exadata]
-kinds_supported: [weekly_summary, ecar, decision, concept]
-
+functional_areas:
+- refresh
+- provisioning
+- update
+- patching
+- dr
+resources_relevant:
+- pod
+- poddb
+- exadata
+kinds_supported:
+- weekly_summary
+- ecar
+- decision
+- concept
 knowledge_bases:
-  - name: tpm_weekly_ops
-    kind: wiki
-    extraction_schema: parsers/schemas/tpm/weekly-ops/v1.json
-    sources:
-      - { kind: confluence, space: TPM, include_labels: [weekly-ops, ops-summary] }
-    retrieval_tools: [search_wiki, read_wiki_page, vector_search]
-    kb_card:
-      summary: "Weekly operational summaries: top incidents, blockers, exec asks, services touched."
-      use_when: "Question is about recent ops state or 'what happened in the last N weeks'."
-      input_shape: "Question; optional time_window."
-      output_shape: "Cited weekly summary excerpts."
-      freshness: "Weekly."
-
-  - name: tpm_ecars
-    kind: wiki
-    extraction_schema: parsers/schemas/tpm/ecars/v1.json
-    sources:
-      - { kind: confluence, space: TPM, include_labels: [ecar, compliance] }
-    retrieval_tools: [search_wiki, read_wiki_page]
-    kb_card:
-      summary: "Engineering Change Approval Requests (ECARs) — compliance/risk exceptions."
-      use_when: "Question is about compliance state, exceptions, or risk acceptance."
-      input_shape: "Question; optional tenant/service filter."
-      output_shape: "Cited ECAR documents."
-
-  - name: tpm_dependencies
-    kind: wiki
-    extraction_schema: parsers/schemas/tpm/dependencies/v1.json
-    sources:
-      - { kind: confluence, space: TPM, include_labels: [dependency, cross-team] }
-      - { kind: jira, jql: 'project = OPS AND labels = cross-team-dependency' }
-    retrieval_tools: [search_wiki, read_wiki_page]
-    kb_card:
-      summary: "Cross-team dependency tracking — initiative, depends_on, blocked_by, ETA."
-      use_when: "Question asks 'what's blocking X' or 'who depends on Y'."
-      input_shape: "Question; optional initiative filter."
-      output_shape: "Cited dependency rows + linked ContentItems."
-
+- name: tpm_weekly_ops
+  kind: wiki
+  extraction_schema: parsers/schemas/tpm/weekly-ops/v1.json
+  sources:
+  - kind: confluence
+    space: TPM
+    include_labels:
+    - weekly-ops
+    - ops-summary
+  retrieval_tools:
+  - search_wiki
+  - read_wiki_page
+  - vector_search
+  kb_card:
+    summary: 'Weekly operational summaries: top incidents, blockers, exec asks, services
+      touched.'
+    use_when: Question is about recent ops state or 'what happened in the last N weeks'.
+    input_shape: Question; optional time_window.
+    output_shape: Cited weekly summary excerpts.
+    freshness: Weekly.
+  provides_fields:
+  - week_id
+  - summary
+  - top_incidents
+  - blockers
+  - exec_asks
+  - services_touched
+  - metrics
+- name: tpm_ecars
+  kind: wiki
+  extraction_schema: parsers/schemas/tpm/ecars/v1.json
+  sources:
+  - kind: confluence
+    space: TPM
+    include_labels:
+    - ecar
+    - compliance
+  retrieval_tools:
+  - search_wiki
+  - read_wiki_page
+  kb_card:
+    summary: Engineering Change Approval Requests (ECARs) — compliance/risk exceptions.
+    use_when: Question is about compliance state, exceptions, or risk acceptance.
+    input_shape: Question; optional tenant/service filter.
+    output_shape: Cited ECAR documents.
+  provides_fields:
+  - ecar_id
+  - scope
+  - risk_level
+  - mitigation
+  - owner
+  - approver
+  - expires
+  - tenants_affected
+- name: tpm_dependencies
+  kind: wiki
+  extraction_schema: parsers/schemas/tpm/dependencies/v1.json
+  sources:
+  - kind: confluence
+    space: TPM
+    include_labels:
+    - dependency
+    - cross-team
+  - kind: jira
+    jql: project = OPS AND labels = cross-team-dependency
+  retrieval_tools:
+  - search_wiki
+  - read_wiki_page
+  kb_card:
+    summary: Cross-team dependency tracking — initiative, depends_on, blocked_by,
+      ETA.
+    use_when: Question asks 'what's blocking X' or 'who depends on Y'.
+    input_shape: Question; optional initiative filter.
+    output_shape: Cited dependency rows + linked ContentItems.
+  provides_fields:
+  - initiative
+  - depends_on
+  - blocked_by
+  - owner
+  - status
 metadata_defaults:
-  persona_visibility: [tpm, pm, architect, dev_mgr, eng_mgr, ops_mgr, exec]
+  persona_visibility:
+  - tpm
+  - pm
+  - architect
+  - dev_mgr
+  - eng_mgr
+  - ops_mgr
+  - exec
   owner: tpm
   classification: internal
-
 eval:
   gold_set: eval/gold_sets/tpm.jsonl
-  exit_criteria: { recall_at_5: 0.80, faithfulness: 0.85, p95_latency_ms: 800, max_tokens_per_query: 2000 }
-
+  exit_criteria:
+    recall_at_5: 0.8
+    faithfulness: 0.85
+    p95_latency_ms: 800
+    max_tokens_per_query: 2000
 ingestion:
-  schedule: "0 */6 * * *"
+  schedule: 0 */6 * * *
   max_concurrent_workers: 4
   cost_alarm_tokens_per_day: 4000000

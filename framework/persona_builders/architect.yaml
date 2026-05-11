@@ -1,60 +1,124 @@
 persona: architect
-display_name: "Architect Knowledge Builder"
+display_name: Architect Knowledge Builder
 schema_version: 1
 status: draft
 primary_axis: functional_area
-
-functional_areas: [refresh, provisioning, update, patching, dr, db_infra_patching]
-resources_relevant: [pod, poddb, exadata, block_volume, network]
-kinds_supported: [design, decision, concept, integration]
-
+functional_areas:
+- refresh
+- provisioning
+- update
+- patching
+- dr
+- db_infra_patching
+resources_relevant:
+- pod
+- poddb
+- exadata
+- block_volume
+- network
+kinds_supported:
+- design
+- decision
+- concept
+- integration
 knowledge_bases:
-  - name: architect_designs
-    kind: wiki
-    extraction_schema: parsers/schemas/architect/designs/v1.json
-    sources:
-      - { kind: confluence, space: ARCH, include_labels: [design, system-design] }
-      - { kind: git, repo: org/architecture-docs, paths: ["**/*.md"] }
-    retrieval_tools: [search_wiki, read_wiki_page, vector_search]
-    kb_card:
-      summary: "System and module design documents."
-      use_when: "Question is about how a subsystem is designed or why."
-      input_shape: "Natural-language question; optional service filter."
-      output_shape: "Cited design-doc excerpts."
-
-  - name: architect_adrs
-    kind: wiki
-    extraction_schema: parsers/schemas/architect/adrs/v1.json
-    sources:
-      - { kind: git, repo: org/architecture-docs, paths: ["adr/**/*.md"] }
-      - { kind: confluence, space: ARCH, include_labels: [adr] }
-    retrieval_tools: [search_wiki, read_wiki_page]
-    kb_card:
-      summary: "Architecture Decision Records — context, decision, consequences."
-      use_when: "Question is about why a tech choice was made or what alternatives were considered."
-      input_shape: "Question; optional ADR id."
-      output_shape: "Cited ADR sections."
-
-  - name: architect_system_maps
-    kind: wiki
-    extraction_schema: parsers/schemas/architect/system-maps/v1.json
-    sources:
-      - { kind: confluence, space: ARCH, include_labels: [system-map, integration-map] }
-    retrieval_tools: [search_wiki, read_wiki_page, graph_traverse]
-    kb_card:
-      summary: "Service maps, integration topologies, dependency diagrams."
-      use_when: "Question is about how systems connect or who calls whom."
-      input_shape: "Question; optional service filter."
-      output_shape: "Cited map excerpts; graph traversal results."
-
+- name: architect_designs
+  kind: wiki
+  extraction_schema: parsers/schemas/architect/designs/v1.json
+  sources:
+  - kind: confluence
+    space: ARCH
+    include_labels:
+    - design
+    - system-design
+  - kind: git
+    repo: org/architecture-docs
+    paths:
+    - '**/*.md'
+  retrieval_tools:
+  - search_wiki
+  - read_wiki_page
+  - vector_search
+  kb_card:
+    summary: System and module design documents.
+    use_when: Question is about how a subsystem is designed or why.
+    input_shape: Natural-language question; optional service filter.
+    output_shape: Cited design-doc excerpts.
+  provides_fields:
+  - design_name
+  - summary
+  - services_touched
+  - resources_touched
+  - design_decisions
+  - rejected_alternatives
+  - open_questions
+- name: architect_adrs
+  kind: wiki
+  extraction_schema: parsers/schemas/architect/adrs/v1.json
+  sources:
+  - kind: git
+    repo: org/architecture-docs
+    paths:
+    - adr/**/*.md
+  - kind: confluence
+    space: ARCH
+    include_labels:
+    - adr
+  retrieval_tools:
+  - search_wiki
+  - read_wiki_page
+  kb_card:
+    summary: Architecture Decision Records — context, decision, consequences.
+    use_when: Question is about why a tech choice was made or what alternatives were
+      considered.
+    input_shape: Question; optional ADR id.
+    output_shape: Cited ADR sections.
+  provides_fields:
+  - adr_id
+  - title
+  - status
+  - supersedes
+  - context
+  - decision
+  - consequences
+- name: architect_system_maps
+  kind: wiki
+  extraction_schema: parsers/schemas/architect/system-maps/v1.json
+  sources:
+  - kind: confluence
+    space: ARCH
+    include_labels:
+    - system-map
+    - integration-map
+  retrieval_tools:
+  - search_wiki
+  - read_wiki_page
+  - graph_traverse
+  kb_card:
+    summary: Service maps, integration topologies, dependency diagrams.
+    use_when: Question is about how systems connect or who calls whom.
+    input_shape: Question; optional service filter.
+    output_shape: Cited map excerpts; graph traversal results.
+  provides_fields:
+  - map_name
+  - summary
+  - nodes
+  - edges
 metadata_defaults:
-  persona_visibility: [architect, dev_mgr, eng_mgr, dev, exec]
+  persona_visibility:
+  - architect
+  - dev_mgr
+  - eng_mgr
+  - dev
+  - exec
   owner: architect
   classification: internal
-
 eval:
   gold_set: eval/gold_sets/architect.jsonl
-  exit_criteria: { recall_at_5: 0.80, faithfulness: 0.85, p95_latency_ms: 1000, max_tokens_per_query: 2500 }
-
+  exit_criteria:
+    recall_at_5: 0.8
+    faithfulness: 0.85
+    p95_latency_ms: 1000
+    max_tokens_per_query: 2500
 ingestion:
-  schedule: "0 */6 * * *"
+  schedule: 0 */6 * * *

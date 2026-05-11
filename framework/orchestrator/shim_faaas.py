@@ -37,6 +37,13 @@ class ShimFaaas:
     def is_valid_functional_area(self, fa: str) -> bool:
         return any(f["id"] == fa for f in self.functional_areas())
 
+    def persona_knowledge_focus(self, persona_id: str) -> list[str]:
+        """Return knowledge_focus list for a given persona id."""
+        for p in self.personas():
+            if p["id"] == persona_id:
+                return p.get("knowledge_focus", [])
+        return []
+
     def render_for_prompt(self) -> str:
         """Compact YAML-like rendering for orchestrator system prompt."""
         lines = ["# FAaaS Ontology"]

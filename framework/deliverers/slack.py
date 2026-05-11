@@ -21,7 +21,10 @@ class SlackDeliverer(BaseDeliverer):
             path = outbox / f"{ts}-{destination.get('channel','default')}.json"
             path.write_bytes(artifact)
             return {
-                "status": "delivered", "mode": "slack_stub",
+                "status": "delivered",
+                "url": None,
+                "error": None,
+                "mode": "slack_stub",
                 "archive": str(path),
                 "note": "laptop-mode: real send requires webhook_url",
             }
@@ -30,7 +33,7 @@ class SlackDeliverer(BaseDeliverer):
             import requests
             r = requests.post(webhook_url, data=artifact, timeout=10,
                               headers={"Content-Type": "application/json"})
-            return {"status": "delivered", "code": r.status_code}
+            return {"status": "delivered", "url": webhook_url, "error": None, "code": r.status_code}
         except Exception as e:
             log.exception("Slack send failed: %s", e)
-            return {"status": "failed", "error": str(e)}
+            return {"status": "failed", "url": None, "error": str(e)}

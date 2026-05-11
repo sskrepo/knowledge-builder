@@ -26,8 +26,9 @@ class ObjectStorageDeliverer(BaseDeliverer):
         log.info("ObjectStorageDeliverer: laptop-mode write to %s", local_path)
         return {
             "status": "delivered",
+            "url": f"file://{local_path}",
+            "error": None,
             "mode": "oci_object_storage_stub",
             "path": str(local_path),
-            "url": f"file://{local_path}",
             "note": "laptop-mode: real OCI Object Storage upload requires OCI SDK + creds",
         }

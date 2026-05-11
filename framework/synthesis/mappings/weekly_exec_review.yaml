@@ -1,0 +1,10 @@
+title: "Weekly Executive Review"
+sections:
+  RAG_Status:       { source_field: rag_status }
+  Top_Milestones:   { source_field: top_milestones }
+  Blockers:         { source_field: blockers }
+  Executive_Asks:   { source_field: exec_asks }
+  Incident_Count:   { source_field: incident_count }
+  MTTR_Minutes:     { source_field: mttr_minutes }
+  Project:          { source_field: project }
+  Week:             { source_field: week_id }

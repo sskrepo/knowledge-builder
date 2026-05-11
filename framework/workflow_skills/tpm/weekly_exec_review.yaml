@@ -1,0 +1,59 @@
+workflow_skill: weekly_exec_review
+persona: tpm
+status: draft
+
+trigger:
+  on_schedule:
+    cron: "0 16 * * 5"
+    delivery:
+      kind: filesystem
+      path: "~/.kbf/outputs/tpm-weekly-exec-review-{week_id}.pptx"
+  on_request:
+    enabled: true
+    inputs:
+      - { name: project, type: string, description: "Project name or 'all' for all projects", default: "all" }
+    output_format: pptx
+    response_mode: artifact_url
+
+skill_card:
+  summary: "Produce a Friday weekly executive review PowerPoint deck for TPM sign-off."
+  use_when: |
+    User asks for the weekly exec review, weekly status deck, TPM weekly PPT,
+    or any variant of the Friday executive summary for a project or all projects.
+  example_invocations:
+    - "generate the weekly exec review"
+    - "weekly exec review for project Orion"
+    - "produce the Friday TPM deck"
+    - "exec review for all projects this week"
+  do_not_use_for: |
+    Per-incident deep-dives (use ops_eng.incident_summary).
+    Release gate decisions (use pm.release_brief).
+    Live operational queries (use query_fleet).
+
+requires_extractions:
+  - kb: tpm.tpm_weekly_ops
+    required_fields:
+      - week_id
+      - project
+      - rag_status
+      - top_milestones
+      - blockers
+      - exec_asks
+      - incident_count
+      - mttr_minutes
+
+synthesis:
+  output_format: pptx
+  template: framework/synthesis/templates/weekly_exec_review.md
+  title: "Weekly Exec Review — {project}"
+  slide_mapping: framework/synthesis/mappings/weekly_exec_review.yaml
+
+delivery:
+  kind: filesystem
+  path: "~/.kbf/outputs/tpm-weekly-exec-review-{project}.pptx"
+
+eval:
+  gold_set: eval/gold_sets/tpm-weekly_exec_review-workflow.jsonl
+  exit_criteria:
+    field_accuracy: 0.85
+    delivery_success_rate: 0.99

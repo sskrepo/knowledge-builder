@@ -127,6 +127,26 @@ def cmd_promote(args):
     cfg_path = Path(args.config)
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
+
+    if args.validate_links:
+        from ..skill_builder.validate_links import validate_workflow_links
+        skills_dir = REPO_ROOT / "framework" / "workflow_skills"
+        pb_dir = REPO_ROOT / "framework" / "persona_builders"
+        persona = cfg.get("persona", "")
+        persona_skills = list((skills_dir / persona).glob("*.yaml")) if persona else []
+        all_errors: list[str] = []
+        for skill_path in persona_skills:
+            if skill_path.name.startswith("_"):
+                continue
+            errors = validate_workflow_links(str(skill_path), str(pb_dir))
+            all_errors.extend(errors)
+        if all_errors:
+            print(f"❌ Link validation failed for {cfg_path.name}:", file=sys.stderr)
+            for e in all_errors:
+                print(f"  • {e}", file=sys.stderr)
+            return 1
+        print(f"✓ Link validation passed for {cfg_path.name}")
+
     cfg["status"] = "production"
     with open(cfg_path, "w") as f:
         yaml.safe_dump(cfg, f, sort_keys=False)
@@ -141,15 +161,83 @@ def cmd_migrate(args):
 
 
 # ============================================================================
+# Interactive skill-builder (conversation.py)
+# ============================================================================
+def _run_interactive_skill_builder(args):
+    from ..skill_builder.conversation import SkillBuilderConversation
+
+    persona = args.persona or ""
+    if not persona:
+        persona = input("Persona (e.g. ops_eng, pm, tpm): ").strip()
+
+    conv = SkillBuilderConversation(persona=persona)
+    turn = conv.start()
+    print(f"\n{turn.message}\n")
+
+    while not turn.done:
+        if turn.options:
+            print(f"  Suggestions: {turn.options}")
+        user_input = input("> ").strip()
+        if not user_input:
+            continue
+        if user_input.lower() in ("quit", "exit", "q"):
+            print("Session cancelled.")
+            return 0
+        turn = conv.respond(user_input)
+        print(f"\n{turn.message}\n")
+        if turn.artifacts_preview:
+            print("  Artifacts preview:")
+            for k, v in turn.artifacts_preview.items():
+                print(f"    {k}: {v}")
+            print()
+
+    return 0
+
+
+# ============================================================================
+# code-wiki-build (Phase 2 / Track B)
+# ============================================================================
+def cmd_code_wiki_build(args):
+    """Build a structural code wiki index from a Python repository.
+
+    Scans .py files, extracts module docstrings / class names / function
+    signatures, writes ContentItems to the filestore and a fast-lookup index
+    at {store_root}/code_wiki_index.json.
+    """
+    from ..adapters.code_wiki_builder import CodeWikiBuilder
+
+    repo_path = Path(args.repo_path).resolve()
+    if not repo_path.exists():
+        print(f"❌ repo path does not exist: {repo_path}", file=sys.stderr)
+        return 1
+
+    store_root = args.store_root or os.environ.get(
+        "KBF_STORE_ROOT", str(Path.home() / ".kbf" / "store")
+    )
+
+    print(f"▶ code-wiki-build: scanning {repo_path}")
+    print(f"  store root: {store_root}")
+
+    builder = CodeWikiBuilder(repo_path=repo_path, store_root=store_root)
+    index_path = builder.run()
+
+    import json as _json
+    index = _json.loads(Path(index_path).read_text())
+    print(f"✓ Indexed {len(index)} Python modules")
+    print(f"  Index written to: {index_path}")
+    print()
+    print("Now you can use the MCP tools:")
+    print("  find_symbol <name>")
+    print("  read_code_page <module_path>")
+    return 0
+
+
+# ============================================================================
 # skill-builder (V2 / ADR-015)
 # ============================================================================
 def cmd_skill_builder(args):
     if not args.intent_file:
-        print("Conversational mode is Phase 3 polish; for now use --intent-file <yaml>",
-              file=sys.stderr)
-        print("Example:")
-        print("  kb-cli skill-builder --intent-file framework/_dev_fixtures/skill_builder_intents/example_workflow.yaml")
-        return 1
+        return _run_interactive_skill_builder(args)
     intent_path = Path(args.intent_file)
     if not intent_path.exists():
         print(f"❌ {intent_path} does not exist", file=sys.stderr)
@@ -191,11 +279,15 @@ def cmd_skill_list(args):
     print(f"{'Name':<40} {'Persona':<15} {'Status':<10} {'Triggers':<25}")
     print("-" * 90)
     for s in skills:
+        cfg = s.skill_config
         triggers = []
-        if s["on_request"]: triggers.append("on_request")
-        if s["on_schedule"]: triggers.append("on_schedule")
-        print(f"{s['name'] or '(unnamed)':<40} {s['persona'] or '?':<15} "
-              f"{s['status']:<10} {','.join(triggers):<25}")
+        if (cfg.get("trigger") or {}).get("on_request", {}).get("enabled"):
+            triggers.append("on_request")
+        if (cfg.get("trigger") or {}).get("on_schedule", {}).get("cron"):
+            triggers.append("on_schedule")
+        status = cfg.get("status", "draft")
+        print(f"{s.skill_name or '(unnamed)':<40} {s.persona or '?':<15} "
+              f"{status:<10} {','.join(triggers):<25}")
     return 0
 
 
@@ -212,20 +304,22 @@ def cmd_workflow_run(args):
     target = None
     if "." in args.skill_name:
         persona, name = args.skill_name.split(".", 1)
-        target = next((s for s in skills if s["persona"] == persona and s["name"] == name), None)
+        target = next(
+            (s for s in skills if s.persona == persona and s.skill_name == name), None
+        )
     else:
-        candidates = [s for s in skills if s["name"] == args.skill_name]
+        candidates = [s for s in skills if s.skill_name == args.skill_name]
         if len(candidates) == 1:
             target = candidates[0]
         elif len(candidates) > 1:
             print(f"Ambiguous skill name {args.skill_name!r}; please qualify with persona:")
             for c in candidates:
-                print(f"  {c['persona']}.{c['name']}")
+                print(f"  {c.persona}.{c.skill_name}")
             return 1
 
     if not target:
         print(f"❌ unknown workflow skill: {args.skill_name}", file=sys.stderr)
-        print(f"Available: {[s['name'] for s in skills]}")
+        print(f"Available: {[s.skill_name for s in skills]}")
         return 1
 
     inputs = json.loads(args.inputs) if args.inputs else {}
@@ -238,9 +332,9 @@ def cmd_workflow_run(args):
         store = FilestoreContentStore(root=store_root)
 
     executor = WorkflowExecutor(store=store)
-    result = executor.execute(Path(target["path"]), inputs)
+    result = executor.execute(Path(target._path), inputs)
 
-    print(f"✓ Workflow {target['persona']}.{target['name']} executed")
+    print(f"✓ Workflow {target.persona}.{target.skill_name} executed")
     print(f"  Inputs:   {result['inputs']}")
     print(f"  Delivery: {result['delivery']}")
     print(f"  Output:   {result['delivery'].get('url') or result['delivery'].get('path') or '(sync return)'}")
@@ -268,14 +362,17 @@ def main():
     pi.add_argument("--sample", type=int, default=5); pi.set_defaults(fn=cmd_ingest)
 
     pe = sub.add_parser("eval"); pe.add_argument("config"); pe.set_defaults(fn=cmd_eval)
-    pp = sub.add_parser("promote"); pp.add_argument("config"); pp.set_defaults(fn=cmd_promote)
+    pp = sub.add_parser("promote"); pp.add_argument("config")
+    pp.add_argument("--validate-links", action="store_true", help="validate workflow links before promoting (ADR-017)")
+    pp.set_defaults(fn=cmd_promote)
 
     pm = sub.add_parser("migrate")
     pm.add_argument("--schema", required=True); pm.add_argument("--env", required=True)
     pm.set_defaults(fn=cmd_migrate)
 
-    psb = sub.add_parser("skill-builder", help="synthesize skills from intent file")
-    psb.add_argument("--intent-file", help="YAML intent file describing the task")
+    psb = sub.add_parser("skill-builder", help="synthesize skills (interactive or from intent file)")
+    psb.add_argument("--intent-file", help="YAML intent file (omit for interactive mode)")
+    psb.add_argument("--persona", help="persona name for interactive mode")
     psb.add_argument("--dry-run", action="store_true", help="don't write artifacts to disk")
     psb.set_defaults(fn=cmd_skill_builder)
 
@@ -289,6 +386,11 @@ def main():
     pwr.add_argument("--inputs", default="{}", help="JSON object of inputs")
     pwr.add_argument("--show-data", action="store_true")
     pwr.set_defaults(fn=cmd_workflow_run)
+
+    pcwb = sub.add_parser("code-wiki-build", help="build structural code wiki index from a Python repo")
+    pcwb.add_argument("--repo-path", default=".", help="path to the Python repo root (default: .)")
+    pcwb.add_argument("--store-root", default=None, help="filestore root (default: $KBF_STORE_ROOT or ~/.kbf/store)")
+    pcwb.set_defaults(fn=cmd_code_wiki_build)
 
     args = p.parse_args()
     return args.fn(args)

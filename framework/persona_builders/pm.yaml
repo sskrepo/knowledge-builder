@@ -1,69 +1,123 @@
-# PM Knowledge Builder — STARTER (replace before promoting to production)
 persona: pm
-display_name: "PM Knowledge Builder"
+display_name: PM Knowledge Builder
 schema_version: 1
 status: draft
 primary_axis: feature_or_release
-
 functional_areas: []
-resources_relevant: [pod, poddb, exadata]
-kinds_supported: [feature_brief, release_plan, decision, concept]
-
+resources_relevant:
+- pod
+- poddb
+- exadata
+kinds_supported:
+- feature_brief
+- release_plan
+- decision
+- concept
 knowledge_bases:
-  - name: pm_briefs
-    kind: wiki
-    extraction_schema: parsers/schemas/pm/briefs/v1.json
-    sources:
-      - { kind: confluence, space: PRODUCT, include_labels: [prd, feature-brief],
-          auth_secret_ref: vault://kb/confluence-readonly }
-      - { kind: jira, jql: 'project = PM AND issuetype in (Feature, Epic)',
-          auth_secret_ref: vault://kb/jira-readonly }
-    retrieval_tools: [search_wiki, read_wiki_page, vector_search]
-    kb_card:
-      summary: "Product feature briefs and PRDs from PRODUCT space."
-      use_when: "Question is about a feature definition, scope, owner, or rationale."
-      input_shape: "Natural-language question; optional release filter."
-      output_shape: "Cited passages from one or more PRD pages."
-      do_not_use_for: "Ops/incident queries, code-level questions."
-      freshness: "Updated on Confluence webhook + nightly diff."
-      expected_volume: "~500 pages"
-
-  - name: pm_release_plans
-    kind: wiki
-    extraction_schema: parsers/schemas/pm/release-plans/v1.json
-    sources:
-      - { kind: confluence, space: PRODUCT, include_labels: [release-plan] }
-      - { kind: jira, jql: 'project = PM AND issuetype = "Release"' }
-    retrieval_tools: [search_wiki, read_wiki_page]
-    kb_card:
-      summary: "Per-release scope, target dates, gating risks."
-      use_when: "Question references a release version (e.g. 25.01) or asks 'what's planned'."
-      input_shape: "Question, optional release filter."
-      output_shape: "Cited release-plan excerpts."
-      freshness: "Weekly snapshot."
-
-  - name: pm_market_research
-    kind: vector
-    extraction_schema: parsers/schemas/pm/research/v1.json
-    sources:
-      - { kind: confluence, space: PRODUCT, include_labels: [research, competitive] }
-    retrieval_tools: [vector_search]
-    kb_card:
-      summary: "Competitive scans, market positioning, customer-research notes."
-      use_when: "Question is about competitors, pricing, or market gaps."
-      input_shape: "Natural-language question."
-      output_shape: "Top-K cited passages with similarity scores."
-
+- name: pm_briefs
+  kind: wiki
+  extraction_schema: parsers/schemas/pm/briefs/v1.json
+  sources:
+  - kind: confluence
+    space: PRODUCT
+    include_labels:
+    - prd
+    - feature-brief
+    auth_secret_ref: vault://kb/confluence-readonly
+  - kind: jira
+    jql: project = PM AND issuetype in (Feature, Epic)
+    auth_secret_ref: vault://kb/jira-readonly
+  retrieval_tools:
+  - search_wiki
+  - read_wiki_page
+  - vector_search
+  kb_card:
+    summary: Product feature briefs and PRDs from PRODUCT space.
+    use_when: Question is about a feature definition, scope, owner, or rationale.
+    input_shape: Natural-language question; optional release filter.
+    output_shape: Cited passages from one or more PRD pages.
+    do_not_use_for: Ops/incident queries, code-level questions.
+    freshness: Updated on Confluence webhook + nightly diff.
+    expected_volume: ~500 pages
+  provides_fields:
+  - feature_name
+  - owner
+  - target_release
+  - personas_impacted
+  - summary
+  - scope
+  - acceptance_criteria
+  - dependencies
+  - related_design_docs
+- name: pm_release_plans
+  kind: wiki
+  extraction_schema: parsers/schemas/pm/release-plans/v1.json
+  sources:
+  - kind: confluence
+    space: PRODUCT
+    include_labels:
+    - release-plan
+  - kind: jira
+    jql: project = PM AND issuetype = "Release"
+  retrieval_tools:
+  - search_wiki
+  - read_wiki_page
+  kb_card:
+    summary: Per-release scope, target dates, gating risks.
+    use_when: Question references a release version (e.g. 25.01) or asks 'what's planned'.
+    input_shape: Question, optional release filter.
+    output_shape: Cited release-plan excerpts.
+    freshness: Weekly snapshot.
+  provides_fields:
+  - release_id
+  - target_date
+  - status
+  - scope_items
+  - gating_risks
+  - owners
+  - freeze_dates
+- name: pm_market_research
+  kind: vector
+  extraction_schema: parsers/schemas/pm/research/v1.json
+  sources:
+  - kind: confluence
+    space: PRODUCT
+    include_labels:
+    - research
+    - competitive
+  retrieval_tools:
+  - vector_search
+  kb_card:
+    summary: Competitive scans, market positioning, customer-research notes.
+    use_when: Question is about competitors, pricing, or market gaps.
+    input_shape: Natural-language question.
+    output_shape: Top-K cited passages with similarity scores.
+  provides_fields:
+  - topic
+  - summary
+  - competitors
+  - gaps
+  - implications
+  - sources
+  - snapshot_date
 metadata_defaults:
-  persona_visibility: [pm, tpm, architect, dev_mgr, eng_mgr, exec]
+  persona_visibility:
+  - pm
+  - tpm
+  - architect
+  - dev_mgr
+  - eng_mgr
+  - exec
   owner: pm
   classification: internal
-
 eval:
   gold_set: eval/gold_sets/pm.jsonl
-  exit_criteria: { recall_at_5: 0.80, faithfulness: 0.85, p95_latency_ms: 800, max_tokens_per_query: 2000 }
-
+  exit_criteria:
+    recall_at_5: 0.8
+    faithfulness: 0.85
+    p95_latency_ms: 800
+    max_tokens_per_query: 2000
 ingestion:
-  schedule: "0 */4 * * *"
+  schedule: 0 */4 * * *
   max_concurrent_workers: 4
   cost_alarm_tokens_per_day: 5000000

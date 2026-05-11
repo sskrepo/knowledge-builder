@@ -1,0 +1,49 @@
+{
+  "id": "fixture-weekly-ops-2026-W19",
+  "source": "tpm_weekly_ops",
+  "source_id": "weekly-ops-2026-W19",
+  "title": "Weekly Ops Summary — Week 2026-W19",
+  "week_id": "2026-W19",
+  "project": "all",
+  "rag_status": "AMBER",
+  "top_milestones": [
+    "Pod DB state migration to v4 schema: 60% complete (target: 100% by W20)",
+    "Auth-service token cache redesign: PR merged, staging validation in progress",
+    "Orion platform upgrade: blocked on dependency audit (see blockers)"
+  ],
+  "blockers": [
+    "Orion upgrade blocked: third-party SDK license audit pending Legal approval (ETA W20)",
+    "Auth-service load-test environment: capacity request not yet approved by Ops-Mgr"
+  ],
+  "exec_asks": [
+    "Approve capacity request for auth-service load-test environment (owner: Eng-Mgr)",
+    "Expedite Legal review of Orion SDK license (owner: Legal lead)"
+  ],
+  "incident_count": 3,
+  "mttr_minutes": 28,
+  "incidents_summary": [
+    {
+      "id": "INC-EXAMPLE-001",
+      "severity": "sev2",
+      "service": "auth-service",
+      "mttr_minutes": 22,
+      "status": "resolved"
+    },
+    {
+      "id": "INC-EXAMPLE-003",
+      "severity": "sev3",
+      "service": "poddb-service",
+      "mttr_minutes": 35,
+      "status": "resolved"
+    },
+    {
+      "id": "INC-EXAMPLE-005",
+      "severity": "sev3",
+      "service": "notification-service",
+      "mttr_minutes": 27,
+      "status": "resolved"
+    }
+  ],
+  "created_at": "2026-05-08T16:00:00Z",
+  "updated_at": "2026-05-08T16:30:00Z"
+}

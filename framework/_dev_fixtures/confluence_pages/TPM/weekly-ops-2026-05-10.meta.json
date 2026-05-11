@@ -1,0 +1,9 @@
+{
+  "id": "tpm-weekly-ops-20260510",
+  "title": "Weekly Ops — 10 May 2026",
+  "space": "TPM",
+  "labels": ["weekly-ops", "release-25.01", "operational"],
+  "version": 1,
+  "updated_at": "2026-05-10T09:00:00Z",
+  "url": "https://confluence.example.com/display/TPM/Weekly+Ops+2026-05-10"
+}

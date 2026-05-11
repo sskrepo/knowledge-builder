@@ -11,7 +11,9 @@ status: current
 # Current Status
 
 ## Where we are
-**Phase 0 — Setup, FULL design pass complete.** Beyond the initial Phase 0 deliverables, an Architect kickoff produced ADRs 006–011, three architect wiki pages (architecture / data-model / api-design), the full configuration plane (dev/staging/prod env yamls, adapter yamls including dual-mode Confluence/Jira, shim_faaas ontology, bootstrap-vault and check-config scripts), Adapter Protocol + dual-mode adapter stubs, and a complete Option-3 persona starter pack (8 persona builder configs + 22 extraction schemas + 8 gold sets, all `status: draft`). PDD also published as .docx; exec brief as .pptx.
+**Phase 2 Track A+B — Fleet adapter + Code Wiki — implementation complete (filestore mode).** All 4 new MCP retrieval tools are implemented and registered. Fleet adapter reads from fixture files, code wiki builder produces a structural AST index, and both sets of tools carry citations on every result.
+
+Prior: Phase 0 full design pass produced ADRs 006–011, architect wiki pages, full configuration plane, Adapter Protocol + dual-mode adapter stubs, Option-3 persona starter pack. Phase 1 produced the full code (adapters, parsers, IncidentVectorStore, orchestrator, eval harness, MCP server, kb-cli). PDD published as .docx; exec brief as .pptx. ADR-014 (OCI GenAI LLM), ADR-015–018 (skill-by-demonstration, workflow skills, extraction workflow linking, skill suggestion loop) + V2 PDD + phases V2 authored. Skill builder, workflow runtime, renderers, deliverers all implemented for Phase 2 V2.
 
 Two things gate Phase 1:
 1. **Your Gate-1 review** of ADRs + PM ingest (see dashboard)

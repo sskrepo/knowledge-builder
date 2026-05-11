@@ -42,6 +42,14 @@ eval:
   artifact_storage: oci://kb-raw-staging/eval/runs/
   ci_token_cap_per_pr_usd: 10
 
+# ---- Orchestrator routing thresholds (per ADR-006 amend 3) ---------------
+orchestrator:
+  routing_thresholds:
+    tier1_workflow_match: 0.85
+    tier2_kb_retrieval: 0.60
+    tier3_multi_persona: 0.40
+    tier4_no_answer_floor: 0.30
+
 # ---- OCI Generative AI Inference (LLM provider per ADR-014) -------------
 oci_genai:
   endpoint: https://inference.generativeai.us-ashburn-1.oci.oraclecloud.com

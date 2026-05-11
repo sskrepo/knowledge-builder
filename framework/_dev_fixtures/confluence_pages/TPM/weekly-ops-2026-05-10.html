@@ -1,0 +1,57 @@
+<h1>Weekly Ops — 10 May 2026</h1>
+
+<p>This page summarizes operational status for the week of 10 May 2026 across all FA releases.</p>
+
+<h2>Release 25.01 Status</h2>
+
+<p>Release <strong>25.01</strong> remains <em>in-progress</em>. Key gating risks:</p>
+
+<ul>
+  <li>Kafka throughput cap not yet validated under prod load</li>
+  <li>auth-service cross-region failover tests still failing</li>
+</ul>
+
+<h2>Incidents This Week</h2>
+
+<p>Two active P2 incidents:</p>
+
+<ul>
+  <li><a href="https://jira.example.com/browse/INC-EXAMPLE-001">INC-EXAMPLE-001</a> — auth-service NPE on token verify (pod-alpha-001, tenant-99)</li>
+  <li><a href="https://jira.example.com/browse/INC-EXAMPLE-003">INC-EXAMPLE-003</a> — PODDB NULL state on tenant-23</li>
+</ul>
+
+<h2>Cross-Team Dependencies</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>Team</th>
+      <th>Status</th>
+      <th>Blocker</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>platform-auth-team</td>
+      <td>At risk</td>
+      <td>Cross-region failover tests</td>
+    </tr>
+    <tr>
+      <td>ops-eng-team</td>
+      <td>On track</td>
+      <td>None</td>
+    </tr>
+    <tr>
+      <td>platform-events-team</td>
+      <td>At risk</td>
+      <td>Kafka throughput validation</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Action Items</h2>
+
+<ul>
+  <li>Platform-auth-team to complete failover tests by 2026-05-17</li>
+  <li>TPM to escalate Kafka cap to Exec sponsor if not resolved by 2026-05-15</li>
+</ul>

@@ -11,4 +11,4 @@ class FilesystemDeliverer(BaseDeliverer):
         path = Path(destination["path"]).expanduser()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(artifact)
-        return {"status": "delivered", "path": str(path), "url": f"file://{path}"}
+        return {"status": "delivered", "url": f"file://{path}", "error": None, "path": str(path)}

@@ -1,0 +1,23 @@
+{
+  "resource_type": "pod",
+  "pod_id": "pod-gamma-003",
+  "tenant_id": "tenant-globex",
+  "region": "eu-west-1",
+  "availability_zone": "eu-west-1a",
+  "node_id": "node-us-east-1a",
+  "status": "healthy",
+  "version": "24.12.8",
+  "fa_release": "24.12",
+  "stack": "prod",
+  "restart_count": 0,
+  "restart_count_24h": 0,
+  "cpu_pct": 21.0,
+  "memory_pct": 45.2,
+  "disk_pct": 38.9,
+  "last_check_at": "2026-05-10T08:00:00Z",
+  "last_refresh": "2026-05-10T08:00:00Z",
+  "poddb_state": "ACTIVE",
+  "uptime_hours": 8760,
+  "services": ["api-gateway", "notification-service"],
+  "labels": {"team": "enterprise", "env": "prod", "tier": "api"}
+}

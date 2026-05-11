@@ -10,6 +10,8 @@ class SyncReturnDeliverer(BaseDeliverer):
     def deliver(self, artifact: bytes, destination: dict) -> dict:
         return {
             "status": "delivered",
+            "url": None,
+            "error": None,
             "mode": "sync_return",
             "artifact_base64": base64.b64encode(artifact).decode("ascii"),
             "size_bytes": len(artifact),

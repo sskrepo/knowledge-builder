@@ -1,60 +1,118 @@
 persona: eng_mgr
-display_name: "Engineering Manager Knowledge Builder"
+display_name: Engineering Manager Knowledge Builder
 schema_version: 1
 status: draft
 primary_axis: functional_area
-
-functional_areas: [refresh, provisioning, update, patching, dr]
-resources_relevant: [pod, poddb, exadata, block_volume]
-kinds_supported: [decision, runbook, known_issue, concept]
-
+functional_areas:
+- refresh
+- provisioning
+- update
+- patching
+- dr
+resources_relevant:
+- pod
+- poddb
+- exadata
+- block_volume
+kinds_supported:
+- decision
+- runbook
+- known_issue
+- concept
 knowledge_bases:
-  - name: eng_mgr_decisions
-    kind: wiki
-    extraction_schema: parsers/schemas/eng-mgr/decisions/v1.json
-    sources:
-      - { kind: confluence, space: ENG, include_labels: [decision, eng-mgr] }
-    retrieval_tools: [search_wiki, read_wiki_page]
-    kb_card:
-      summary: "Engineering decisions made per functional area / service."
-      use_when: "Question is 'why did we decide X for REFRESH/PATCHING/DR'."
-      input_shape: "Question; functional_area filter strongly recommended."
-      output_shape: "Cited decision documents."
-
-  - name: eng_mgr_runbooks
-    kind: wiki
-    extraction_schema: parsers/schemas/eng-mgr/runbooks/v1.json
-    sources:
-      - { kind: confluence, space: ENG, include_labels: [runbook] }
-      - { kind: git, repo: org/eng-runbooks, paths: ["**/*.md"] }
-    retrieval_tools: [search_wiki, read_wiki_page]
-    kb_card:
-      summary: "Engineering-side runbooks (debugging, escalation flows)."
-      use_when: "Question is procedural — 'how do I debug X'."
-      input_shape: "Question; resources/functional_area filters."
-      output_shape: "Cited runbook steps."
-
-  - name: eng_mgr_known_issues
-    kind: vector
-    extraction_schema: parsers/schemas/eng-mgr/known-issues/v1.json
-    sources:
-      - { kind: confluence, space: ENG, include_labels: [known-issue] }
-      - { kind: jira, jql: 'project = ENG AND labels = known-issue' }
-    retrieval_tools: [vector_search]
-    kb_card:
-      summary: "Catalogued known engineering issues with resolutions."
-      use_when: "Question describes a symptom; finds similar past cases."
-      input_shape: "Symptom description; resources filter."
-      output_shape: "Top-K similar known issues with resolutions."
-
+- name: eng_mgr_decisions
+  kind: wiki
+  extraction_schema: parsers/schemas/eng-mgr/decisions/v1.json
+  sources:
+  - kind: confluence
+    space: ENG
+    include_labels:
+    - decision
+    - eng-mgr
+  retrieval_tools:
+  - search_wiki
+  - read_wiki_page
+  kb_card:
+    summary: Engineering decisions made per functional area / service.
+    use_when: Question is 'why did we decide X for REFRESH/PATCHING/DR'.
+    input_shape: Question; functional_area filter strongly recommended.
+    output_shape: Cited decision documents.
+  provides_fields:
+  - decision_title
+  - context
+  - decision
+  - functional_area
+  - service
+  - owner
+  - rejected_alternatives
+- name: eng_mgr_runbooks
+  kind: wiki
+  extraction_schema: parsers/schemas/eng-mgr/runbooks/v1.json
+  sources:
+  - kind: confluence
+    space: ENG
+    include_labels:
+    - runbook
+  - kind: git
+    repo: org/eng-runbooks
+    paths:
+    - '**/*.md'
+  retrieval_tools:
+  - search_wiki
+  - read_wiki_page
+  kb_card:
+    summary: Engineering-side runbooks (debugging, escalation flows).
+    use_when: Question is procedural — 'how do I debug X'.
+    input_shape: Question; resources/functional_area filters.
+    output_shape: Cited runbook steps.
+  provides_fields:
+  - runbook_title
+  - trigger
+  - steps
+  - rollback
+  - functional_area
+  - resources
+  - escalation
+- name: eng_mgr_known_issues
+  kind: vector
+  extraction_schema: parsers/schemas/eng-mgr/known-issues/v1.json
+  sources:
+  - kind: confluence
+    space: ENG
+    include_labels:
+    - known-issue
+  - kind: jira
+    jql: project = ENG AND labels = known-issue
+  retrieval_tools:
+  - vector_search
+  kb_card:
+    summary: Catalogued known engineering issues with resolutions.
+    use_when: Question describes a symptom; finds similar past cases.
+    input_shape: Symptom description; resources filter.
+    output_shape: Top-K similar known issues with resolutions.
+  provides_fields:
+  - title
+  - symptoms
+  - root_cause
+  - workaround
+  - permanent_fix_status
+  - resources
 metadata_defaults:
-  persona_visibility: [eng_mgr, dev_mgr, dev, ops_eng, ops_mgr, architect]
+  persona_visibility:
+  - eng_mgr
+  - dev_mgr
+  - dev
+  - ops_eng
+  - ops_mgr
+  - architect
   owner: eng_mgr
   classification: internal
-
 eval:
   gold_set: eval/gold_sets/eng-mgr.jsonl
-  exit_criteria: { recall_at_5: 0.80, faithfulness: 0.85, p95_latency_ms: 800, max_tokens_per_query: 2000 }
-
+  exit_criteria:
+    recall_at_5: 0.8
+    faithfulness: 0.85
+    p95_latency_ms: 800
+    max_tokens_per_query: 2000
 ingestion:
-  schedule: "0 */4 * * *"
+  schedule: 0 */4 * * *

@@ -1,12 +1,13 @@
-"""FastAPI MCP server — exposes Phase 1 retrieval tools.
+"""FastAPI MCP server — exposes Phase 1 + Phase 2 retrieval tools.
 
 Run:  uvicorn framework.deploy.mcp_server:app --host 0.0.0.0 --port 8080
 Health: GET /healthz
 MCP:    POST /mcp/tools/call  body: {"name": "vector_search", "arguments": {...}}
 
-Phase 1 scope: bootstraps the orchestrator, dispatches the 4 v1 retrievers,
-returns standard MCP responses. Production-ready scaffolding; needs real ADB
-+ OpenAI key to actually serve queries.
+Phase 1 tools: vector_search, get_incident_summary, list_sources
+Phase 2 tools: query_fleet, text_to_sql, find_symbol, read_code_page
+
+All Phase 2 tools work in filestore mode (KBF_STORE_BACKEND=filestore).
 """
 from __future__ import annotations
 
@@ -34,11 +35,19 @@ def _load_app():
     from ..retrievers.vector_search import VectorSearchRetriever
     from ..retrievers.get_incident_summary import GetIncidentSummaryRetriever
     from ..retrievers.list_sources import ListSourcesRetriever
+    from ..retrievers.query_fleet import QueryFleetRetriever
+    from ..retrievers.text_to_sql import TextToSqlRetriever
+    from ..retrievers.find_symbol import FindSymbolRetriever
+    from ..retrievers.read_code_page import ReadCodePageRetriever
+    from ..adapters.udap_adapter import UdapAdapter
     from ..retrievers.tools import register_v1_tools
+    from ..workflow_runtime.skill_registry import register_workflow_skills_as_mcp_tools
+    from ..workflow_runtime.executor import WorkflowExecutor
 
     REPO_ROOT = Path(__file__).resolve().parents[2]
     SHIM_FAAAS_PATH = REPO_ROOT / "framework" / "config" / "shim_faaas.yaml"
     PERSONA_BUILDERS_DIR = REPO_ROOT / "framework" / "persona_builders"
+    WORKFLOW_SKILLS_DIR = REPO_ROOT / "framework" / "workflow_skills"
 
     state: dict = {}
 
@@ -57,13 +66,40 @@ def _load_app():
         from ..stores.incident_vector_store import IncidentVectorStore
         store = IncidentVectorStore(adb_pool=None, llm=state["llm"])
         state["stores"] = {"ops_incidents": store}
+
+        # Phase 2: UDAP adapter + fleet/code retrievers
+        udap_cfg = {
+            "connection": {},
+            "allowlisted_views_file": str(REPO_ROOT / "framework" / "retrievers" / "fleet_views.yaml"),
+            "text_to_sql": {"guardrails": {"max_rows": 1000}},
+        }
+        udap_adapter = UdapAdapter(udap_cfg)
+        state["udap_adapter"] = udap_adapter
+
+        store_root = os.environ.get("KBF_STORE_ROOT", str(Path.home() / ".kbf" / "store"))
+
         retrievers = {
             "vector_search": VectorSearchRetriever(state["stores"]),
             "get_incident_summary": GetIncidentSummaryRetriever(store),
             "list_sources": ListSourcesRetriever(state["shim_faaas"], state["shim_kb"]),
+            # Phase 2 tools
+            "query_fleet": QueryFleetRetriever(udap_adapter),
+            "text_to_sql": TextToSqlRetriever(llm=state["llm"], udap_adapter=udap_adapter),
+            "find_symbol": FindSymbolRetriever(store_root=store_root),
+            "read_code_page": ReadCodePageRetriever(store_root=store_root),
         }
         state["retrievers"] = retrievers
         state["tool_registry"] = register_v1_tools(retrievers)
+
+        # Workflow skills as MCP tools — registered at startup per ADR-016
+        log.info("registering workflow skills as MCP tools…")
+        workflow_registry = register_workflow_skills_as_mcp_tools(WORKFLOW_SKILLS_DIR)
+        state["workflow_registry"] = workflow_registry
+        state["workflow_executor"] = WorkflowExecutor(store=None, llm=state["llm"])
+        for tool_name, wf_tool in workflow_registry.items():
+            state["tool_registry"][tool_name] = wf_tool.to_mcp_tool_definition()
+        log.info("registered %d workflow skills as MCP tools: %s",
+                 len(workflow_registry), list(workflow_registry.keys()))
 
         # Persona skills
         ops_eng_skill = OpsEngSkill(

@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+
+import yaml
 
 from ..core.llm import LLMClient
 from ..orchestrator.budget import Budget
@@ -19,6 +22,32 @@ from ..orchestrator.intent_classifier import IntentSignal, IntentFilter
 from ..orchestrator.shim_kb import ShimKb
 
 log = logging.getLogger(__name__)
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+_DEFAULT_THRESHOLDS = {
+    "tier1_workflow_match": 0.85,
+    "tier2_kb_retrieval": 0.60,
+    "tier3_multi_persona": 0.40,
+    "tier4_no_answer_floor": 0.30,
+}
+
+
+def _load_routing_thresholds() -> dict:
+    """Read orchestrator.routing_thresholds from the active env config.
+    Falls back to hardcoded defaults if config is missing or malformed.
+    """
+    env = os.environ.get("KBF_ENV", "dev")
+    config_path = _REPO_ROOT / "framework" / "config" / f"{env}.yaml"
+    try:
+        cfg = yaml.safe_load(config_path.read_text()) or {}
+        thresholds = cfg.get("orchestrator", {}).get("routing_thresholds", {})
+        merged = dict(_DEFAULT_THRESHOLDS)
+        merged.update({k: float(v) for k, v in thresholds.items() if k in _DEFAULT_THRESHOLDS})
+        return merged
+    except Exception as e:
+        log.warning("could not load routing thresholds from %s: %s; using defaults", config_path, e)
+        return dict(_DEFAULT_THRESHOLDS)
 
 
 @dataclass
@@ -52,9 +81,9 @@ class BasePersonaSkill:
     persona: str = ""
     PROMPT_FRAGMENT: str = ""
 
-    # Confidence thresholds (per ADR-006 amend 3)
+    # Hardcoded defaults — overridden by config at __init__ time (ADR-006 amend 3)
     tier1_threshold: float = 0.85
-    tier2_threshold: float = 0.6
+    tier2_threshold: float = 0.60
 
     def __init__(
         self,
@@ -63,6 +92,7 @@ class BasePersonaSkill:
         retrievers: dict,
         shim_workflows=None,                  # ADR-006 amend 2 / ADR-016
         workflow_executor=None,
+        skill_suggester=None,                 # ADR-018
         model: str = "gpt-4o",
     ):
         self.llm = llm
@@ -70,7 +100,12 @@ class BasePersonaSkill:
         self.retrievers = retrievers
         self.shim_workflows = shim_workflows
         self.workflow_executor = workflow_executor
+        self.skill_suggester = skill_suggester
         self.model = model
+        # Load thresholds from env-specific config; fall back to class-level defaults
+        _thresholds = _load_routing_thresholds()
+        self.tier1_threshold = _thresholds["tier1_workflow_match"]
+        self.tier2_threshold = _thresholds["tier2_kb_retrieval"]
 
     def __call__(self, query: str, intent_signal: IntentSignal, budget: Budget):
         # ADR-007 amend 5: Tier 1 — try persona's workflow skills first
@@ -188,6 +223,32 @@ Rules:
         # 3. Dedupe + score-merge + char cap (ADR-007 amend 1)
         passages = self._dedupe_and_cap(passages, budget.max_context_chars)
 
+        # 4. Tier 4 fallback: if no passages were found and confidence is low,
+        #    log the miss to skill_suggester (ADR-018)
+        tier4_triggered = not passages and intent_signal.confidence < self.tier2_threshold
+        if tier4_triggered and self.skill_suggester:
+            try:
+                self.skill_suggester.log_miss(
+                    query=query,
+                    persona=self.persona,
+                    context={
+                        "plan": plan,
+                        "confidence": intent_signal.confidence,
+                        "used_kbs": used_kbs,
+                    },
+                )
+            except Exception as e:
+                log.warning("skill_suggester.log_miss failed: %s", e)
+
+        closest_kbs = self._closest_kbs(query, top_n=3) if tier4_triggered else []
+        tier4_notes = None
+        if tier4_triggered:
+            tier4_notes = (
+                "No grounded knowledge for this query. "
+                f"Closest KB matches: {[k.get('name') for k in closest_kbs]}. "
+                "Suggestion: 'Want me to scaffold a workflow skill for queries like this?'"
+            )
+
         from ..orchestrator.context_builder import ContextPacket
         return ContextPacket(
             persona=self.persona,
@@ -197,8 +258,21 @@ Rules:
             used_tools=list(set(used_tools)),
             cost={"tool_calls": tool_calls},
             confidence=intent_signal.confidence,
-            notes=plan.get("reasoning"),
+            notes=tier4_notes or plan.get("reasoning"),
         )
+
+    def _closest_kbs(self, query: str, top_n: int = 3) -> list[dict]:
+        """Return top-N KB cards by keyword overlap with query."""
+        import re
+        q_tokens = set(re.findall(r"[a-z0-9]+", query.lower()))
+        scored: list[tuple[float, dict]] = []
+        for kb in self.shim_kb.all_cards():
+            use_when = kb.get("use_when", "")
+            kb_tokens = set(re.findall(r"[a-z0-9]+", use_when.lower()))
+            overlap = len(q_tokens & kb_tokens) / max(len(q_tokens | kb_tokens), 1)
+            scored.append((overlap, kb))
+        scored.sort(key=lambda x: -x[0])
+        return [kb for _, kb in scored[:top_n]]
 
     # =====================================================================
     # ADR-007 amend 5: Tier 1 — workflow skill match
@@ -257,11 +331,15 @@ Rules:
     def _invoke_workflow(self, match: dict, query: str, intent: IntentSignal, budget: Budget):
         """Invoke the matched workflow skill via the workflow_executor."""
         cards = self.shim_workflows.cards_for(self.persona)
-        target = next((c for c in cards if c.get("name") == match["skill"]), None)
+        target = next(
+            (c for c in cards if (c.get("name") or c.get("skill_name")) == match["skill"]),
+            None,
+        )
         if not target:
             log.warning("matched skill %s not found in cards", match["skill"])
             return None
-        result = self.workflow_executor.execute(Path(target["_path"]), match["inputs"])
+        skill_path = target.get("_path") or target.get("skill_path") or target.get("path", "")
+        result = self.workflow_executor.execute(Path(skill_path), match["inputs"])
         # Wrap result in a workflow-artifact response shape
         from ..orchestrator.context_builder import ContextPacket
         return ContextPacket(
@@ -311,7 +389,7 @@ Rules:
         return out
 
     def _default_plan(self) -> dict:
-        cards = self.shim_kb.cards_for(self.persona)
+        cards = self.shim_kb.cards_visible_to(self.persona)
         if not cards:
             return {"kbs_to_query": [], "filters": [], "reasoning": "no KBs available"}
         # default: try the first KB with vector_search

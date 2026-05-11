@@ -1,0 +1,23 @@
+{
+  "resource_type": "pod",
+  "pod_id": "pod-beta-002",
+  "tenant_id": "tenant-acme-corp",
+  "region": "us-west-2",
+  "availability_zone": "us-west-2b",
+  "node_id": "node-us-west-2b",
+  "status": "degraded",
+  "version": "25.01.2",
+  "fa_release": "25.01",
+  "stack": "prod",
+  "restart_count": 14,
+  "restart_count_24h": 3,
+  "cpu_pct": 78.5,
+  "memory_pct": 88.3,
+  "disk_pct": 52.7,
+  "last_check_at": "2026-05-10T08:00:00Z",
+  "last_refresh": "2026-05-10T07:45:00Z",
+  "poddb_state": "ACTIVE",
+  "uptime_hours": 312,
+  "services": ["auth-service", "billing-service"],
+  "labels": {"team": "billing", "env": "prod", "tier": "web"}
+}
