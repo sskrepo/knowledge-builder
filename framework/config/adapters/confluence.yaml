@@ -1,6 +1,6 @@
-# Confluence adapter — dual-mode per ADR-011. Flip mode: native | mcp.
+# Confluence adapter — tri-mode per ADR-011 / ADR-020. Flip mode: native | mcp | codex_cli.
 adapter: confluence
-mode: mcp                                 # native | mcp
+mode: mcp                                 # native | mcp | codex_cli
 
 native:
   base_url: https://confluence.mycompany.internal
@@ -27,6 +27,19 @@ mcp:
   rate_limit: { requests_per_minute: 60 }
   cache_ttl_seconds: 300
   poll_interval_seconds: 300              # if MCP server doesn't expose webhooks
+
+# codex_cli:                              # ADR-020 — laptop-only stdio MCP transport
+#   server_name: confluence              # matches [[mcpServers]] name in ~/.codex/config.toml
+#   config_path: ~/.codex/config.toml   # default; override if Codex installed non-standard
+#   tool_map:                           # same structure as mcp.tool_map
+#     list_pages_in_space: confluence.list_pages
+#     get_page_by_id: confluence.get_page
+#     search: confluence.search
+#     list_attachments: confluence.list_attachments
+#   required_capabilities: [list_pages_in_space, get_page_by_id]
+#   timeout_seconds: 60
+#   max_retries: 2
+#   poll_interval_seconds: 300          # no webhook support in codex_cli mode
 
 content_filtering:
   exclude_archived: true

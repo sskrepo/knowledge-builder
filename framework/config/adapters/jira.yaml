@@ -1,6 +1,6 @@
-# Jira adapter — dual-mode per ADR-011.
+# Jira adapter — tri-mode per ADR-011 / ADR-020. Flip mode: native | mcp | codex_cli.
 adapter: jira
-mode: native                              # native | mcp
+mode: native                              # native | mcp | codex_cli
 
 native:
   base_url: https://jira.mycompany.internal
@@ -28,3 +28,16 @@ mcp:
   rate_limit: { requests_per_minute: 60 }
   cache_ttl_seconds: 300
   poll_interval_seconds: 300
+
+# codex_cli:                              # ADR-020 — laptop-only stdio MCP transport
+#   server_name: jira                    # matches [[mcpServers]] name in ~/.codex/config.toml
+#   config_path: ~/.codex/config.toml   # default; override if Codex installed non-standard
+#   tool_map:                           # same structure as mcp.tool_map
+#     search_issues: jira.search
+#     get_issue: jira.get_issue
+#     list_comments: jira.list_comments
+#     list_attachments: jira.list_attachments
+#   required_capabilities: [search_issues, get_issue]
+#   timeout_seconds: 60
+#   max_retries: 2
+#   poll_interval_seconds: 300          # no webhook support in codex_cli mode

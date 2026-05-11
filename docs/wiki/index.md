@@ -45,6 +45,12 @@
 - [ADR-012 — In-DB embedding via DBMS_VECTOR](adr/ADR-012-in-db-embedding.md)
 - [ADR-013 — Filter strictness contract (hard / soft-with-multiplier)](adr/ADR-013-filter-strictness.md)
 - [ADR-014 — LLM access via OCI Generative AI Inference (AIRA pattern)](adr/ADR-014-llm-via-oci-genai.md)
+- [ADR-015 — Skill-by-demonstration (skill_builder module)](adr/ADR-015-skill-by-demonstration.md)
+- [ADR-016 — Workflow skills (renderers + deliverers)](adr/ADR-016-workflow-skills.md)
+- [ADR-017 — Extraction workflow linking](adr/ADR-017-extraction-workflow-linking.md)
+- [ADR-018 — Skill suggestion loop](adr/ADR-018-skill-suggestion-loop.md)
+- [ADR-019 — Bastion auto-reconnect for Oracle ADB in laptop mode](adr/ADR-019-bastion-auto-reconnect.md)
+- [ADR-020 — Codex CLI as MCP transport for laptop mode](adr/ADR-020-codex-cli-mcp-transport.md)
 
 ## Engineering
 - 🚀 **[laptop-quickstart](engineering/laptop-quickstart.md)** — V2; run framework end-to-end on laptop with no provisioning (no ADB, no Vault, no OpenAI required)

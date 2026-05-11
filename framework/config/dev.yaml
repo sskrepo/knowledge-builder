@@ -5,6 +5,7 @@
 
 env: dev
 region: us-ashburn-1
+deployment_mode: laptop      # laptop | vm | container
 
 # ---- Oracle 23ai Autonomous Database (converged store; per ADR-001/002) ------
 adb:
@@ -28,6 +29,18 @@ adb:
     kb_shim:
       user: KB_SHIM_RW
       password_secret: vault://kb/kb-shim-rw-dev
+
+# ---- OCI Bastion (laptop-mode SSH tunnel; per ADR-019) -----------------------
+bastion:
+  bastion_ocid: ocid1.bastion.oc1.iad.YOUR_BASTION_OCID
+  target_db_host: 10.0.1.50          # ADB private IP (from OCI Console)
+  target_db_port: 1521
+  local_tunnel_port: 15211           # localhost port SSH tunnel listens on
+  ssh_key_path: ~/.ssh/oci_bastion_key   # key authorised for the bastion
+  session_ttl_seconds: 10800         # 3 h — OCI maximum
+  oci_cli_path: /opt/homebrew/bin/oci    # override if installed elsewhere
+  connect_timeout_seconds: 30        # how long to wait for tunnel port to open
+  max_reconnect_attempts: 3          # give up after this many tunnel re-creates
 
 # ---- OCI Vault (the secrets store) -------------------------------------------
 vault:

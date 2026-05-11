@@ -10,10 +10,20 @@ status: current
 
 # Knowledgebase — Dashboard
 
-**Current phase:** Phase 1-3 code complete + V3 deployment architecture designed
-**Updated:** 2026-05-10 by tpm
+**Current phase:** Phase 1-3 + V3 + laptop mode code complete
+**Updated:** 2026-05-11 by tpm
 
-## 🌅 Morning briefing — 2026-05-10 (V3 deployment architecture complete)
+## 🌅 Morning briefing — 2026-05-11 (Laptop mode: bastion + Codex CLI transport)
+
+**Phases 1-3 + V3 + laptop mode code complete.** 160+ Python files, ~16K LOC, 574 tests passing (107 new). Two new ADRs (019-020) designed and implemented: bastion auto-reconnect for ADB tunnels and Codex CLI as MCP transport for Confluence/Jira. Split-deployment model: authorSkill runs locally (laptop with Codex CLI auth), consumption runs remotely (VM), both write to shared ADB.
+
+**New laptop-mode capabilities:**
+- **Bastion auto-reconnect** (ADR-019) — when SSH tunnel expires (3h OCI limit), framework auto-creates new bastion session via `oci` CLI, restarts tunnel, retries ADB connection. Max 3 attempts. Non-laptop mode: exponential backoff only.
+- **Codex CLI MCP transport** (ADR-020) — `mode: codex_cli` in adapter config. Reads MCP server spawn command from `~/.codex/config.toml`, spawns subprocess, speaks MCP JSON-RPC over stdio. No LLM intermediary. Laptop-only (KBF_ENV guard).
+
+---
+
+## 🌅 Earlier briefing — 2026-05-10 (V3 deployment architecture complete)
 
 **Phases 1-3 code complete + V3 deployment architecture designed.** 132 Python files, ~13K LOC, 22 framework modules. Everything runs against filestore + stub LLM — no external provisioning needed. PDD V3 defines the complete external API surface. OCI deployment runbook ready.
 
@@ -46,6 +56,7 @@ python -m framework.cli.kb_cli promote framework/persona_builders/ops-eng.yaml -
 | **2 — Fleet + code wiki + skill-builder** | Fleet adapter, code wiki, 4 MCP tools, skill-builder Phase A (module split per ADR-015), provides_fields backfill | Code complete |
 | **3 — Workflow runtime + orchestrator** | conversation.py (15-state machine), WorkflowMCPTool, 4-tier routing, Tier 3 fanout, cost telemetry, validate_workflow_links, 3 workflow skills, WikiMetadataStore, Confluence ingestion | Code complete |
 | **V3 — Deployment interaction layer** | PDD V3 design + full implementation: REST routes, MCP tools, auth, sessions, serialization, cost store, OpenAPI spec, OCI runbook | Code complete (468 tests, 0 failures) |
+| **Laptop mode** | Bastion auto-reconnect (ADR-019), Codex CLI MCP transport (ADR-020), split-deployment topology | Code complete (107 new tests) |
 
 **Key capabilities now available:**
 - **2 MCP tools** — `askKnowledgeBase` (consumption, server routes internally) + `authorSkill` (knowledge builder, server-driven 15-state session)
@@ -150,16 +161,17 @@ python -m framework.cli.kb_cli promote framework/persona_builders/ops-eng.yaml -
 
 (none)
 
-## ✅ Done (Phases 0-3 + V3 design)
+## ✅ Done (Phases 0-3 + V3 + laptop mode)
 - DECISIONs 001–004 filed and decided
-- ADRs 001–018 authored (including amendments to 006/007/011)
+- ADRs 001–020 authored (including amendments to 006/007/011)
 - PDD V2 (~700 lines) + Executive Brief
 - **PDD V3** (~1550 lines, 4 revisions) — 2 MCP tools, 6 REST endpoint groups, 15-state authorSkill session, REVIEW_SCHEMA quality gate, session persistence/resume, camelCase naming, client-agnostic
 - **OpenAPI 3.1 spec** (framework/deploy/openapi.yaml, 1302 lines) — authoritative REST contract
 - **OCI deployment runbook** (docs/wiki/engineering/oci-deployment-runbook.md, 1676 lines) — empty OCI tenancy → live framework
 - PM wiki ingest (project-overview, personas, 6 module pages)
 - Configuration plane (dev/staging/prod yamls, adapter configs, routing thresholds)
-- Full adapter suite (Confluence native+MCP, Jira native+MCP, Git, UDAP/Fleet, code wiki builder)
+- Full adapter suite (Confluence native+MCP+codex_cli, Jira native+MCP+codex_cli, Git, UDAP/Fleet, code wiki builder)
+- **Laptop mode**: bastion auto-reconnect (framework/core/adb_pool.py), Codex CLI MCP transport (codex_cli.py adapters), split-deployment topology support
 - Parser pipeline (LLM parser with schema injection, markdown-aware chunker)
 - Store layer (IncidentVectorStore, FilestoreContentStore, WikiMetadataStore)
 - Retriever suite (vector_search, get_incident_summary, list_sources, query_fleet, text_to_sql, find_symbol, read_code_page)
