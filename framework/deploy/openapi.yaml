@@ -1,0 +1,1302 @@
+openapi: 3.1.0
+
+info:
+  title: Knowledge Builder Framework API
+  version: 1.0.0
+  description: |
+    External REST API for the Knowledge Builder Framework.
+
+    Two interaction models:
+
+    **Consumption Flow** — `POST /api/v1/ask`
+    Single endpoint for all knowledge queries. Routes internally through a four-tier
+    confidence system (workflow skill → KB retrieval → multi-persona fanout → no-answer).
+    Clients never specify which KB, retriever, or persona skill to use.
+
+    **Knowledge Builder Flow** — `/api/v1/kb/authorSkill`
+    Server-side stateful session API for authoring new skills. The client is a
+    pass-through: it posts user input, shows the server's message, collects the next
+    reply, and repeats until `done=true`. The server drives a 14-state machine.
+
+    **Naming conventions:**
+    - External API surface (this spec): camelCase field names.
+    - DB columns: snake_case (PostgreSQL/Oracle convention). The API layer translates.
+    - Python internal code: snake_case (Python convention). Not visible here.
+
+    **Authentication:** Bearer token required on all endpoints.
+    Token scopes: `read` (ask + GET authorSkill), `write` (POST/DELETE authorSkill), `admin`.
+
+  contact:
+    name: Knowledge Builder Framework Team
+  license:
+    name: Internal
+
+servers:
+  - url: https://{ociVmHostname}
+    description: OCI Compute VM (SSE/HTTPS mode — typical for team members)
+    variables:
+      ociVmHostname:
+        default: kb-framework.internal
+        description: OCI VM hostname or IP
+  - url: http://localhost:8080
+    description: Local development (laptop quickstart, filestore mode)
+
+tags:
+  - name: Consumption
+    description: |
+      Knowledge query endpoint. Single entry point for all knowledge queries.
+      Routes internally through the four-tier system.
+  - name: AuthorSkill
+    description: |
+      Knowledge Builder session management. Server-side stateful session API
+      for authoring new workflow skills. Client is a pass-through.
+  - name: Operations
+    description: Health, cost telemetry, version, and ingestion job status.
+
+security:
+  - bearerAuth: []
+
+paths:
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Consumption Flow
+  # ─────────────────────────────────────────────────────────────────────────
+
+  /api/v1/ask:
+    post:
+      operationId: askKnowledgeBase
+      tags: [Consumption]
+      summary: Single entry point for all knowledge queries
+      description: |
+        Routes internally through the four-tier system:
+        - Tier 1: Workflow skill match (≥0.85 confidence) — returns curated artifact output
+        - Tier 2: KB retrieval + synthesis (≥0.60) — cited answer from raw content
+        - Tier 3: Multi-persona fanout (≥0.40) — synthesized from multiple persona KBs
+        - Tier 4: Honest "no answer" (<0.40) — includes skill suggestion
+
+        `persona` and `serviceId` are routing hints, not hard filters.
+        The intent classifier makes the final routing decision.
+
+        MCP tool name: `askKnowledgeBase`
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AskRequest'
+            examples:
+              opsIncidentQuery:
+                summary: Query about recent incidents
+                value:
+                  question: "What were the root causes of the last 3 pod DB incidents?"
+                  persona: "ops_eng"
+                  serviceId: null
+                  functionalArea: null
+                  maxResults: 10
+              tpmBlockerQuery:
+                summary: TPM weekly blockers
+                value:
+                  question: "What were the top 3 blockers in the TPM weekly review last week?"
+                  persona: "tpm"
+      responses:
+        '200':
+          description: Synthesized answer with citations
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AskResponse'
+              examples:
+                tier1Match:
+                  summary: Tier 1 workflow skill match
+                  value:
+                    answer: "Based on last week's exec review: 1. Customer Events migration blocked on DB schema approval. 2. Pod refresh behind schedule in EMEA. 3. Auth service dependency on Q2 deadline."
+                    citations:
+                      - contentId: "wiki-tpm-weekly-2026-05-05"
+                        chunkId: "chunk-003"
+                        text: "Blocker 1: Customer Events migration blocked on DB schema approval from infra team."
+                        citationUrl: "https://confluence.internal/PROD/weekly-2026-05-05"
+                        score: 0.91
+                        metadata:
+                          persona: "tpm"
+                          kind: "wiki"
+                          functionalArea: ["program_management"]
+                          resources: []
+                          services: ["customer-events"]
+                          sourceSha: "a3f1b2c"
+                          schemaVersion: 1
+                    confidence: 0.91
+                    tierUsed: 1
+                    tierDescription: "workflow_skill"
+                    costTokens:
+                      prompt: 840
+                      completion: 210
+                      total: 1050
+                    skillSuggestion:
+                      offered: false
+                      message: null
+                      candidateId: null
+                tier4NoAnswer:
+                  summary: Tier 4 no answer with skill suggestion
+                  value:
+                    answer: "I couldn't find a grounded answer to this question."
+                    citations: []
+                    confidence: 0.28
+                    tierUsed: 4
+                    tierDescription: "no_answer"
+                    costTokens:
+                      prompt: 310
+                      completion: 45
+                      total: 355
+                    skillSuggestion:
+                      offered: true
+                      message: "This query type has been logged. Want to scaffold a workflow skill for queries like this?"
+                      candidateId: "cand-ops_eng-20260510-x7f2"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PermissionDenied'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Knowledge Builder Flow — session management
+  # ─────────────────────────────────────────────────────────────────────────
+
+  /api/v1/kb/authorSkill:
+    post:
+      operationId: startAuthorSkillSession
+      tags: [AuthorSkill]
+      summary: Start a new authoring session
+      description: |
+        Starts a new knowledge builder session. The server creates a new `synthId`
+        and advances the state machine to IDENTIFY_PERSONA.
+
+        If a `synthId` is provided in the request body, the server resumes that session
+        instead of creating a new one (equivalent to `POST /api/v1/kb/authorSkill/{synthId}`).
+
+        **Client pattern (pass-through):**
+        1. POST user input → receive `{ synthId, state, message, options, ... }`
+        2. Show `message` to user
+        3. Collect user reply
+        4. POST reply to `POST /api/v1/kb/authorSkill/{synthId}`
+        5. Repeat until `done=true`
+
+        MCP tool name: `authorSkill` (with `synthId=null`)
+
+        Required scope: `write`
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthorSkillStartRequest'
+            examples:
+              newSession:
+                summary: Start a new session
+                value:
+                  input: "I want to automate weekly ADB-S migration status updates for ops engineering"
+              resumeSession:
+                summary: Resume existing session (alternative to POST /{synthId})
+                value:
+                  synthId: "synth-ops_eng-adb_s_migration-20260510"
+                  input: "resume"
+      responses:
+        '200':
+          description: Session created (or resumed). Returns first state prompt.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthorSkillResponse'
+              examples:
+                identifyPersonaState:
+                  summary: New session — IDENTIFY_PERSONA state
+                  value:
+                    synthId: "synth-ops_eng-adb_s_migration-20260510"
+                    state: "IDENTIFY_PERSONA"
+                    message: "I'll help you build that skill. Based on your intent, this looks like an ops_eng skill.\n\nAvailable personas:\n  - ops_eng (Operations Engineer) — 2 skills\n  - tpm (Technical Program Manager) — 3 skills\n\nShall I proceed with ops_eng?"
+                    data:
+                      suggestedPersona: "ops_eng"
+                      suggestionReason: "Intent mentions ADB-S migration, which matches ops_eng skills."
+                      availablePersonas:
+                        - name: "ops_eng"
+                          displayName: "Operations Engineer"
+                          skillCount: 2
+                        - name: "tpm"
+                          displayName: "Technical Program Manager"
+                          skillCount: 3
+                    options: ["yes / ops_eng", "tpm", "pm", "architect", "list"]
+                    progress:
+                      step: 1
+                      total: 14
+                      label: "Identify persona"
+                    done: false
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PermissionDenied'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+    get:
+      operationId: listAuthorSkillSessions
+      tags: [AuthorSkill]
+      summary: List all authoring sessions for the authenticated user
+      description: |
+        Returns all sessions belonging to the authenticated user, ordered by
+        `updatedAt` descending. Includes sessions in all statuses.
+
+        Required scope: `read`
+      responses:
+        '200':
+          description: List of sessions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionListResponse'
+              examples:
+                mixedSessions:
+                  summary: In-progress and completed sessions
+                  value:
+                    sessions:
+                      - synthId: "synth-ops_eng-adb_s_migration-20260510"
+                        persona: "ops_eng"
+                        skillName: "adb_s_provisioning_migration_status"
+                        intent: "Automate weekly ADB-S migration status updates"
+                        state: "REVIEW_SCHEMA"
+                        progress:
+                          step: 5
+                          total: 14
+                          label: "Review extraction schema"
+                        createdAt: "2026-05-10T10:00:00Z"
+                        updatedAt: "2026-05-10T14:32:00Z"
+                        expiresAt: "2026-05-17T14:32:00Z"
+                        status: "in_progress"
+                      - synthId: "synth-tpm-weekly_exec-20260509"
+                        persona: "tpm"
+                        skillName: "weekly_exec_review"
+                        intent: "Produce weekly exec review PPT"
+                        state: "DONE"
+                        progress:
+                          step: 14
+                          total: 14
+                          label: "Done"
+                        createdAt: "2026-05-09T09:00:00Z"
+                        updatedAt: "2026-05-09T16:00:00Z"
+                        expiresAt: null
+                        status: "promoted"
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PermissionDenied'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/kb/authorSkill/{synthId}:
+    parameters:
+      - name: synthId
+        in: path
+        required: true
+        description: Unique session identifier returned by the start endpoint
+        schema:
+          type: string
+          example: "synth-ops_eng-adb_s_migration-20260510"
+
+    post:
+      operationId: continueAuthorSkillSession
+      tags: [AuthorSkill]
+      summary: Continue an in-progress authoring session
+      description: |
+        Advances the server-side state machine by one step. The client posts the
+        user's reply and receives the next prompt.
+
+        The server validates that the input matches the `options` for the current state.
+        Invalid input returns HTTP 400 `invalid_input`.
+
+        MCP tool name: `authorSkill` (with `synthId` set)
+
+        Required scope: `write`
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthorSkillContinueRequest'
+            examples:
+              confirmPersona:
+                summary: Confirm suggested persona
+                value:
+                  input: "yes"
+              provideArtifact:
+                summary: Provide artifact path
+                value:
+                  input: "path/to/example.pptx"
+              editFieldDescription:
+                summary: Edit extraction instruction for a field
+                value:
+                  input: "describe migration_status as 'Current migration state for the ADB-S project. One of: canary_running, canary_complete, paused, complete.'"
+      responses:
+        '200':
+          description: Next state prompt after advancing the state machine
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthorSkillResponse'
+              examples:
+                analyzeArtifactState:
+                  summary: Persona confirmed — ANALYZE_ARTIFACT state
+                  value:
+                    synthId: "synth-ops_eng-adb_s_migration-20260510"
+                    state: "ANALYZE_ARTIFACT"
+                    message: "Great — ops_eng it is. Do you have an example artifact I can analyze? Provide a file path or URL."
+                    data:
+                      persona: "ops_eng"
+                      acceptedFormats: ["pptx", "docx", "md", "pdf", "confluence_url", "email"]
+                    options: ["[file_path_or_url]", "skip — I'll describe the fields manually"]
+                    progress:
+                      step: 2
+                      total: 14
+                      label: "Analyze artifact"
+                    done: false
+                committedState:
+                  summary: All artifacts committed — COMMITTED state
+                  value:
+                    synthId: "synth-ops_eng-adb_s_migration-20260510"
+                    state: "COMMITTED"
+                    message: "Committed. 4 artifacts written to git (sha: a3f1b2c). Want me to validate, ingest, and run eval now?"
+                    data:
+                      committedPaths:
+                        - "framework/parsers/schemas/ops_eng/adb_s_migration_status/v1.json"
+                        - "framework/workflow_skills/ops_eng/adb_s_migration_status.yaml"
+                      gitCommitSha: "a3f1b2c"
+                    options: ["yes / continue", "stop"]
+                    progress:
+                      step: 9
+                      total: 14
+                      label: "Committed"
+                    done: false
+                doneState:
+                  summary: Terminal state — skill promoted to production
+                  value:
+                    synthId: "synth-ops_eng-adb_s_migration-20260510"
+                    state: "DONE"
+                    message: "Done. ops_eng.adb_s_migration_status is now in production. It will run every Monday at 9am and is available on request via askKnowledgeBase."
+                    data: {}
+                    options: []
+                    progress:
+                      step: 14
+                      total: 14
+                      label: "Done"
+                    done: true
+        '400':
+          description: |
+            Invalid input — does not match any accepted option for the current state.
+            Also returned for invalid state transitions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: "invalid_input"
+                  message: "Input 'banana' is not a valid option for state IDENTIFY_PERSONA. Valid options: yes, ops_eng, tpm, pm, architect, list"
+                  details: {}
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PermissionDenied'
+        '404':
+          description: Session not found or belongs to a different user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: "session_not_found"
+                  message: "Session synth-ops_eng-adb_s_migration-20260510 not found or you do not have access."
+                  details: {}
+        '409':
+          description: Session is expired or already done
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                sessionExpired:
+                  value:
+                    error:
+                      code: "session_expired"
+                      message: "Session TTL has elapsed. Start a new session."
+                      details: {}
+                sessionDone:
+                  value:
+                    error:
+                      code: "session_done"
+                      message: "Session is in DONE state. No further input accepted."
+                      details: {}
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+    get:
+      operationId: getAuthorSkillSession
+      tags: [AuthorSkill]
+      summary: Get the current state of a session (without advancing it)
+      description: |
+        Returns the current state and data of the session. Used to inspect a session
+        before resuming it — for example, after the user closes and reopens Claude Code.
+
+        Returns the same envelope as POST responses, with an additional `sessionSummary`
+        field showing accumulated session context.
+
+        Required scope: `read`
+      responses:
+        '200':
+          description: Current session state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthorSkillGetResponse'
+              examples:
+                reviewSchemaState:
+                  summary: Session at REVIEW_SCHEMA state
+                  value:
+                    synthId: "synth-ops_eng-adb_s_migration-20260510"
+                    state: "REVIEW_SCHEMA"
+                    message: "Review the extraction instructions for your 3 fields. Edit any that are unclear. Type 'ok' to confirm all."
+                    data:
+                      fields:
+                        - name: "migration_status"
+                          type: "string"
+                          description: "Status of OC1 pod migration from ExaCS to ADB-S."
+                          enum: null
+                          example: "canary_done_emea_paused_us"
+                        - name: "pod_count"
+                          type: "integer"
+                          description: "Total number of pods migrated to ADB-S in this reporting period."
+                          enum: null
+                          example: 47
+                      schemaNotes: "The 'description' field is what the LLM parser uses as its extraction instruction."
+                    options: ["ok", "describe <field> as <text>", "set type of <field> to <type>", "show <field>"]
+                    progress:
+                      step: 5
+                      total: 14
+                      label: "Review extraction schema"
+                    done: false
+                    sessionSummary:
+                      persona: "ops_eng"
+                      intent: "Automate weekly ADB-S migration status updates"
+                      artifactPath: "path/to/example.pptx"
+                      fieldsConfirmed: ["migration_status", "pod_count", "canary_region"]
+                      sourcesConfigured: []
+                      triggersConfigured: null
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PermissionDenied'
+        '404':
+          description: Session not found or belongs to a different user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+    delete:
+      operationId: cancelAuthorSkillSession
+      tags: [AuthorSkill]
+      summary: Cancel / abandon an in-progress session
+      description: |
+        Marks the session as `abandoned`. No git changes are rolled back — if the session
+        was in COMMITTED or later state, those commits are kept.
+
+        Sessions in `abandoned` state are cleaned up after 7 days.
+
+        Required scope: `write`
+      responses:
+        '200':
+          description: Session cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelSessionResponse'
+              examples:
+                cancelledBeforeCommit:
+                  value:
+                    synthId: "synth-ops_eng-adb_s_migration-20260510"
+                    status: "abandoned"
+                    message: "Session abandoned. No files were committed."
+                    committedBeforeAbandon: false
+                cancelledAfterCommit:
+                  value:
+                    synthId: "synth-ops_eng-adb_s_migration-20260510"
+                    status: "abandoned"
+                    message: "Session abandoned. Previously committed artifacts are retained in git."
+                    committedBeforeAbandon: true
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PermissionDenied'
+        '404':
+          description: Session not found or belongs to a different user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Operational endpoints
+  # ─────────────────────────────────────────────────────────────────────────
+
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [Operations]
+      summary: Health check
+      description: |
+        Returns health status of all framework components.
+        Returns HTTP 200 if all checks pass; HTTP 503 if any check fails.
+
+        No authentication required for this endpoint.
+      security: []
+      responses:
+        '200':
+          description: All components healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: "healthy"
+                checks:
+                  adb: "ok"
+                  ociGenai: "ok"
+                  vault: "ok"
+                  git: "ok"
+                  confluenceAdapter: "ok"
+                  jiraAdapter: "ok"
+                uptimeSeconds: 86400
+                version: "1.0.0"
+        '503':
+          description: One or more components degraded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: "degraded"
+                checks:
+                  adb: "ok"
+                  ociGenai: "error: connection timeout"
+                  vault: "ok"
+                  git: "ok"
+                  confluenceAdapter: "ok"
+                  jiraAdapter: "ok"
+                uptimeSeconds: 3600
+                version: "1.0.0"
+
+  /api/v1/metrics/cost:
+    get:
+      operationId: getCostMetrics
+      tags: [Operations]
+      summary: Cost telemetry — token usage by persona and operation
+      description: |
+        Returns aggregated token usage for the specified period.
+        Useful for monitoring LLM cost by persona, skill, and operation type.
+
+        Required scope: `admin`
+      parameters:
+        - name: persona
+          in: query
+          required: false
+          description: Filter by persona name (e.g., `tpm`, `ops_eng`)
+          schema:
+            type: string
+        - name: skillName
+          in: query
+          required: false
+          description: Filter by skill name
+          schema:
+            type: string
+        - name: startDate
+          in: query
+          required: false
+          description: Start of reporting period (ISO 8601 date, e.g., `2026-05-01`)
+          schema:
+            type: string
+            format: date
+        - name: endDate
+          in: query
+          required: false
+          description: End of reporting period (ISO 8601 date, e.g., `2026-05-10`)
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Cost telemetry for the period
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CostMetricsResponse'
+              example:
+                period:
+                  start: "2026-05-01"
+                  end: "2026-05-10"
+                totalTokens: 4820000
+                byPersona:
+                  tpm:
+                    prompt: 1200000
+                    completion: 310000
+                    total: 1510000
+                  ops_eng:
+                    prompt: 2400000
+                    completion: 910000
+                    total: 3310000
+                byOperation:
+                  ingestion: 3200000
+                  retrieval: 1100000
+                  synthesis: 520000
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/PermissionDenied'
+
+  /api/v1/version:
+    get:
+      operationId: getVersion
+      tags: [Operations]
+      summary: API version information
+      description: |
+        Returns the current API version, schema version, and build SHA.
+        Used by clients to verify compatibility.
+
+        No authentication required.
+      security: []
+      responses:
+        '200':
+          description: Version information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VersionResponse'
+              example:
+                apiVersion: "v1"
+                schemaVersion: "1.0.0"
+                buildSha: "a3f1b2c9d4e5f6a7"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Component definitions
+# ─────────────────────────────────────────────────────────────────────────────
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: |
+        Bearer token issued per consumer. Stored in OCI Vault.
+        Format: `Authorization: Bearer <token>`
+
+        Token scopes:
+        - `read` — askKnowledgeBase and GET /api/v1/kb/authorSkill* endpoints
+        - `write` — authorSkill (POST) and DELETE /api/v1/kb/authorSkill/{synthId}
+        - `admin` — metrics and system configuration endpoints
+
+  schemas:
+
+    # ── Consumption ──────────────────────────────────────────────────────────
+
+    AskRequest:
+      type: object
+      required: [question]
+      properties:
+        question:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: The natural language question or task. Required.
+          example: "What were the root causes of the last 3 pod DB incidents?"
+        persona:
+          type: [string, 'null']
+          description: |
+            Routing hint — restrict to this persona's shim scope.
+            The intent classifier may override this if it contradicts a high-confidence
+            classification. Hint only, not a hard filter.
+          example: "ops_eng"
+        serviceId:
+          type: [string, 'null']
+          description: Routing hint — restrict to content tagged with this service.
+          example: "customer-events"
+        functionalArea:
+          type: [string, 'null']
+          description: Routing hint — restrict to this functional area dimension.
+          example: "database_operations"
+        maxResults:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 100
+          default: 10
+          description: Maximum KB results to gather per persona.
+
+    AskResponse:
+      type: object
+      required: [answer, citations, confidence, tierUsed, tierDescription, costTokens, skillSuggestion]
+      properties:
+        answer:
+          type: string
+          description: Synthesized natural language answer with inline citations.
+        citations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Citation'
+          description: Source evidence passages used to synthesize the answer.
+        confidence:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          description: Overall confidence of the answer.
+        tierUsed:
+          type: integer
+          enum: [1, 2, 3, 4]
+          description: |
+            Which tier produced the answer:
+            - 1: workflow skill match
+            - 2: KB retrieval
+            - 3: multi-persona fanout
+            - 4: no answer
+        tierDescription:
+          type: string
+          enum: [workflow_skill, kb_retrieval, multi_persona_fanout, no_answer]
+          description: Human-readable tier name.
+        costTokens:
+          $ref: '#/components/schemas/TokenCost'
+        skillSuggestion:
+          $ref: '#/components/schemas/SkillSuggestion'
+
+    Citation:
+      type: object
+      required: [contentId, text, citationUrl, score, metadata]
+      properties:
+        contentId:
+          type: string
+          description: Unique ID of the source ContentItem.
+        chunkId:
+          type: [string, 'null']
+          description: ID of the specific chunk within the ContentItem, if applicable.
+        text:
+          type: string
+          description: The evidence passage from the source.
+        citationUrl:
+          type: string
+          format: uri
+          description: |
+            Source URL. Always present — absence is a bug.
+            Points to the original Confluence page, Jira ticket, git file, etc.
+        score:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          description: Retrieval confidence score for this citation.
+        metadata:
+          $ref: '#/components/schemas/CitationMetadata'
+
+    CitationMetadata:
+      type: object
+      required: [persona, kind, sourceSha, schemaVersion]
+      properties:
+        persona:
+          type: string
+          description: Persona KB this content came from.
+        kind:
+          type: string
+          enum: [vector, wiki, graph, sql_passthrough, code_index, filestore]
+          description: Storage kind of the source KB.
+        functionalArea:
+          type: array
+          items:
+            type: string
+          description: Functional area tags on this content.
+        resources:
+          type: array
+          items:
+            type: string
+          description: Resource tags on this content.
+        services:
+          type: array
+          items:
+            type: string
+          description: Service tags on this content.
+        sourceSha:
+          type: string
+          description: Git SHA or content hash of the source at ingestion time.
+        schemaVersion:
+          type: integer
+          description: Parser schema version used to extract this content.
+
+    TokenCost:
+      type: object
+      required: [prompt, completion, total]
+      properties:
+        prompt:
+          type: integer
+          minimum: 0
+          description: Prompt tokens consumed.
+        completion:
+          type: integer
+          minimum: 0
+          description: Completion tokens consumed.
+        total:
+          type: integer
+          minimum: 0
+          description: Total tokens consumed.
+
+    SkillSuggestion:
+      type: object
+      required: [offered]
+      properties:
+        offered:
+          type: boolean
+          description: True if Tier 4 triggered a skill suggestion.
+        message:
+          type: [string, 'null']
+          description: Suggestion message to show the user.
+        candidateId:
+          type: [string, 'null']
+          description: ID of the logged skill candidate in kb_shim.skill_candidates.
+
+    # ── AuthorSkill — requests ───────────────────────────────────────────────
+
+    AuthorSkillStartRequest:
+      type: object
+      required: [input]
+      properties:
+        input:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: |
+            The user's initial intent message describing the skill to build.
+            Example: "I want to automate weekly ADB-S migration status updates for ops engineering"
+        synthId:
+          type: [string, 'null']
+          description: |
+            If provided, resumes this session instead of creating a new one.
+            Equivalent to calling `POST /api/v1/kb/authorSkill/{synthId}`.
+
+    AuthorSkillContinueRequest:
+      type: object
+      required: [input]
+      properties:
+        input:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: |
+            The user's reply to the server's last prompt.
+            Must match one of the patterns in the `options` array of the previous response.
+            Example: "yes", "ops_eng", "path/to/artifact.pptx", "ok"
+
+    # ── AuthorSkill — responses ──────────────────────────────────────────────
+
+    AuthorSkillResponse:
+      type: object
+      required: [synthId, state, message, options, progress, done]
+      description: |
+        Universal session response envelope. Returned by all POST authorSkill endpoints
+        regardless of which state the machine is in.
+      properties:
+        synthId:
+          type: string
+          description: |
+            Unique session identifier. Created on the first POST, returned on every
+            subsequent call. The client must store this to resume the session.
+          example: "synth-ops_eng-adb_s_migration-20260510"
+        state:
+          $ref: '#/components/schemas/SessionState'
+        message:
+          type: string
+          description: |
+            Plain English text to show the user. No client formatting required.
+            This is what Claude Code / Codex displays verbatim.
+        data:
+          type: object
+          description: |
+            State-specific payload. Schema varies by state — see PDD V3 §6.4 for
+            the per-state data shape.
+          additionalProperties: true
+        options:
+          type: array
+          items:
+            type: string
+          description: |
+            Accepted input patterns for this state. Used by Claude Code to guide the user
+            on what to type next.
+        progress:
+          $ref: '#/components/schemas/SessionProgress'
+        done:
+          type: boolean
+          description: |
+            True only in the DONE state. When true, the session is complete and archived.
+            No further input is accepted.
+
+    AuthorSkillGetResponse:
+      allOf:
+        - $ref: '#/components/schemas/AuthorSkillResponse'
+        - type: object
+          properties:
+            sessionSummary:
+              $ref: '#/components/schemas/SessionSummary'
+
+    SessionState:
+      type: string
+      enum:
+        - IDENTIFY_PERSONA
+        - ANALYZE_ARTIFACT
+        - REVIEW_FIELDS
+        - REVIEW_SCHEMA
+        - CHECK_REUSE
+        - CONFIGURE_SOURCES
+        - CONFIGURE_TRIGGERS
+        - PREVIEW
+        - CONFIRM
+        - COMMITTED
+        - VALIDATE
+        - INGEST
+        - EVAL
+        - PROMOTE
+        - DONE
+      description: |
+        Current state of the 14-state (+ DONE terminal) authoring machine.
+        Valid transitions are defined in PDD V3 §16.
+
+    SessionProgress:
+      type: object
+      required: [step, total, label]
+      properties:
+        step:
+          type: integer
+          minimum: 1
+          maximum: 14
+          description: Current step number (1-indexed).
+        total:
+          type: integer
+          enum: [14]
+          description: Total steps in the workflow (always 14).
+        label:
+          type: string
+          description: Human-readable label for the current state.
+          example: "Review extraction schema"
+
+    SessionSummary:
+      type: object
+      description: Accumulated session context. Returned on GET requests.
+      properties:
+        persona:
+          type: [string, 'null']
+          description: Persona selected in IDENTIFY_PERSONA (null until confirmed).
+        intent:
+          type: string
+          description: User's original intent message.
+        artifactPath:
+          type: [string, 'null']
+          description: Path or URL of the artifact analyzed in ANALYZE_ARTIFACT.
+        fieldsConfirmed:
+          type: array
+          items:
+            type: string
+          description: Field names confirmed in REVIEW_FIELDS.
+        sourcesConfigured:
+          type: array
+          items:
+            type: string
+          description: Source specs configured in CONFIGURE_SOURCES.
+        triggersConfigured:
+          type: [object, 'null']
+          description: Trigger configuration set in CONFIGURE_TRIGGERS.
+          additionalProperties: true
+
+    SessionListItem:
+      type: object
+      required: [synthId, state, progress, createdAt, updatedAt, status]
+      properties:
+        synthId:
+          type: string
+          description: Unique session identifier.
+        persona:
+          type: [string, 'null']
+          description: Persona selected (null if session abandoned before IDENTIFY_PERSONA).
+        skillName:
+          type: [string, 'null']
+          description: Derived skill name (null until PREVIEW state).
+        intent:
+          type: string
+          description: User's original intent message.
+        state:
+          $ref: '#/components/schemas/SessionState'
+        progress:
+          $ref: '#/components/schemas/SessionProgress'
+        createdAt:
+          type: string
+          format: date-time
+          description: Session creation time (ISO 8601).
+        updatedAt:
+          type: string
+          format: date-time
+          description: Last state transition time (ISO 8601).
+        expiresAt:
+          type: [string, 'null']
+          format: date-time
+          description: |
+            Session expiry time (ISO 8601). Null for DONE/promoted sessions.
+            In-progress sessions expire 7 days after the last update.
+        status:
+          type: string
+          enum: [in_progress, committed, promoted, abandoned, expired]
+          description: Overall session lifecycle status.
+
+    SessionListResponse:
+      type: object
+      required: [sessions]
+      properties:
+        sessions:
+          type: array
+          items:
+            $ref: '#/components/schemas/SessionListItem'
+          description: All sessions for the authenticated user, ordered by updatedAt descending.
+
+    CancelSessionResponse:
+      type: object
+      required: [synthId, status, message, committedBeforeAbandon]
+      properties:
+        synthId:
+          type: string
+          description: The cancelled session ID.
+        status:
+          type: string
+          enum: [abandoned]
+          description: Always "abandoned" after a successful DELETE.
+        message:
+          type: string
+          description: Human-readable cancellation confirmation.
+        committedBeforeAbandon:
+          type: boolean
+          description: |
+            True if the session had already committed artifacts to git before being abandoned.
+            When true, those commits are retained.
+
+    # ── Operational ──────────────────────────────────────────────────────────
+
+    HealthResponse:
+      type: object
+      required: [status, checks, uptimeSeconds, version]
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded]
+          description: Overall health status.
+        checks:
+          type: object
+          description: Per-component health check results.
+          properties:
+            adb:
+              type: string
+              description: Oracle ADB connection status.
+            ociGenai:
+              type: string
+              description: OCI Generative AI Inference status.
+            vault:
+              type: string
+              description: OCI Vault status.
+            git:
+              type: string
+              description: Git repository connectivity status.
+            confluenceAdapter:
+              type: string
+              description: Confluence adapter status.
+            jiraAdapter:
+              type: string
+              description: Jira adapter status.
+        uptimeSeconds:
+          type: integer
+          minimum: 0
+          description: Seconds since the server process started.
+        version:
+          type: string
+          description: Application version string.
+
+    CostMetricsResponse:
+      type: object
+      required: [period, totalTokens, byPersona, byOperation]
+      properties:
+        period:
+          type: object
+          required: [start, end]
+          properties:
+            start:
+              type: string
+              format: date
+              description: Start of reporting period (ISO 8601 date).
+            end:
+              type: string
+              format: date
+              description: End of reporting period (ISO 8601 date).
+        totalTokens:
+          type: integer
+          minimum: 0
+          description: Total tokens consumed across all personas and operations.
+        byPersona:
+          type: object
+          description: Token breakdown by persona name.
+          additionalProperties:
+            $ref: '#/components/schemas/TokenCost'
+        byOperation:
+          type: object
+          description: Token breakdown by operation type (ingestion, retrieval, synthesis).
+          properties:
+            ingestion:
+              type: integer
+              minimum: 0
+            retrieval:
+              type: integer
+              minimum: 0
+            synthesis:
+              type: integer
+              minimum: 0
+
+    VersionResponse:
+      type: object
+      required: [apiVersion, schemaVersion, buildSha]
+      properties:
+        apiVersion:
+          type: string
+          description: API major version (e.g., "v1").
+          example: "v1"
+        schemaVersion:
+          type: string
+          description: OpenAPI schema version.
+          example: "1.0.0"
+        buildSha:
+          type: string
+          description: Git SHA of the deployed build.
+          example: "a3f1b2c9d4e5f6a7"
+
+    # ── Errors ───────────────────────────────────────────────────────────────
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Machine-readable error code.
+              enum:
+                - invalid_argument
+                - invalid_input
+                - unauthenticated
+                - permission_denied
+                - session_not_found
+                - session_expired
+                - session_done
+                - rate_limited
+                - upstream_unavailable
+                - budget_exceeded
+            message:
+              type: string
+              description: Human-readable error message.
+            details:
+              type: object
+              description: Optional additional error context.
+              additionalProperties: true
+
+  responses:
+
+    BadRequest:
+      description: |
+        Bad request. Common causes:
+        - question is empty or exceeds 4096 chars (ask endpoint)
+        - input does not match accepted options for current state (authorSkill)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: "invalid_argument"
+              message: "question must be between 1 and 4096 characters"
+              details: {}
+
+    Unauthenticated:
+      description: Missing or invalid bearer token.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: "unauthenticated"
+              message: "Authorization header missing or token invalid"
+              details: {}
+
+    PermissionDenied:
+      description: Token lacks the required scope for this operation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: "permission_denied"
+              message: "Token lacks 'write' scope required for this operation"
+              details: {}
+
+    RateLimited:
+      description: Per-token RPM cap exceeded.
+      headers:
+        Retry-After:
+          description: Seconds until the rate limit window resets.
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: "rate_limited"
+              message: "Rate limit exceeded. Retry after 23 seconds."
+              details:
+                retryAfterSeconds: 23
+
+    UpstreamUnavailable:
+      description: ADB or OCI GenAI is unreachable. Retry with exponential backoff.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error:
+              code: "upstream_unavailable"
+              message: "Oracle ADB is currently unreachable. The framework is in read-only mode."
+              details:
+                affectedComponent: "adb"

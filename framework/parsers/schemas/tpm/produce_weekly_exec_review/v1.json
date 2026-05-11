@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/tpm/produce_weekly_exec_review/v1.json",
+  "title": "tpm \u2014 produce_weekly_exec_review \u2014 v1",
+  "description": "Synthesized by skill_builder for persona=tpm, kb=produce_weekly_exec_review. Refine before promoting.",
+  "type": "object",
+  "required": [
+    "rag_status"
+  ],
+  "properties": {
+    "rag_status": {
+      "type": "string",
+      "enum": [
+        "red",
+        "amber",
+        "green"
+      ],
+      "description": "RAG status. Must be red, amber, or green."
+    }
+  },
+  "additionalProperties": false
+}

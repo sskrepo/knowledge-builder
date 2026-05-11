@@ -5,7 +5,9 @@
 - [log](log.md)
 
 ## Framework — start here
-- 📄 **[PDD V2 — Knowledge Builder Framework](pdd/PDD-Knowledge-Builder-Framework-v2.md)** — current; two-flow model, three-shim arch, four-tier routing, workflow skills, skill-by-demonstration
+- 📄 **[PDD V3 — Knowledge Builder Framework (Deployment Interaction Layer)](pdd/PDD-Knowledge-Builder-Framework-v3.md)** — current; REST API surface, MCP tool catalog, two interaction models (Consumption + Knowledge Builder), OCI deployment topology
+- 📋 **[OpenAPI 3.1 Spec](../../framework/deploy/openapi.yaml)** — authoritative REST contract; all field names camelCase; source of truth for client SDK generation. Covers: `POST /api/v1/ask`, `POST/GET/DELETE /api/v1/kb/authorSkill[/{synthId}]`, `/healthz`, `/api/v1/metrics/cost`, `/api/v1/version`
+- 📄 **[PDD V2 — Knowledge Builder Framework (Internal Architecture)](pdd/PDD-Knowledge-Builder-Framework-v2.md)** — internal architecture reference; two-flow model, three-shim arch, four-tier routing, workflow skills, skill-by-demonstration. Read alongside V3.
 - 📄 [PDD V1 — Knowledge Builder Framework](pdd/PDD-Knowledge-Builder-Framework.md) — superseded by V2 (also as .docx in same folder)
 - 📊 **[Executive Brief](exec-brief.md)** — 14-section deck for leadership (also as .pptx in same folder)
 - [project-overview](project-overview.md) — vision, personas, value loop, v1 scope
@@ -49,6 +51,7 @@
 - 🎯 **[workshop-ops-guide](engineering/workshop-ops-guide.md)** — how to run the application + stand up the NL gold-set feeder for persona workshops
 - [dev-guide](engineering/dev-guide.md) — Phase 1 setup + first end-to-end run
 - [runbook](engineering/runbook.md) — operations playbook
+- 🖥️ **[oci-deployment-runbook](engineering/oci-deployment-runbook.md)** — complete step-by-step guide: empty OCI tenancy → live framework on a Compute VM (VCN, ADB, Vault, GenAI, Nginx, systemd, MCP client config)
 
 ## Persona starter packs (in `framework/persona_builders/`)
 All 8 producer personas have starter configs + extraction schemas + gold sets — labeled `status: draft`. Persona teams refine and promote to `status: production` per ADR-004.

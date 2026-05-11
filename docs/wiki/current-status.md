@@ -11,7 +11,7 @@ status: current
 # Current Status
 
 ## Where we are
-**Phase 1-3 code complete (filestore/stub mode).** 176 Python files, 22 framework modules. All code runs against filestore + stub LLM — no external provisioning needed for development or workshops.
+**Phase 1-3 + V3 deployment layer code complete.** 150+ Python files, ~15K LOC, 468 tests passing. All code runs against filestore + stub LLM — no external provisioning needed. PDD V3 external API surface fully implemented: 2 MCP tools, 9 REST endpoints, bearer auth, session persistence, camelCase serialization.
 
 ### What's runnable today
 ```bash
@@ -36,7 +36,8 @@ python -m framework.cli.kb_cli promote framework/persona_builders/ops-eng.yaml -
 | **0 — Setup** | ADRs 001-018, PDD V2, config plane, persona starters | Done |
 | **1 — Skeleton + incident KB** | Adapters, parsers, stores, retrievers, orchestrator, eval, MCP server, CLI | Code complete (stub mode) |
 | **2 — Fleet + code wiki + skill-builder** | Fleet adapter, code wiki, 4 MCP tools, skill-builder Phase A (module split per ADR-015), provides_fields backfill | Code complete |
-| **3 — Workflow runtime + orchestrator** | conversation.py, WorkflowMCPTool, 4-tier routing, Tier 3 fanout, cost telemetry, validate_workflow_links, 3 workflow skills, WikiMetadataStore, Confluence ingestion | Code complete |
+| **3 — Workflow runtime + orchestrator** | conversation.py (15-state machine), WorkflowMCPTool, 4-tier routing, Tier 3 fanout, cost telemetry, validate_workflow_links, 3 workflow skills, WikiMetadataStore, Confluence ingestion | Code complete |
+| **V3 — Deployment interaction layer** | PDD V3 design + implementation: 2 MCP tools (askKnowledgeBase, authorSkill), REST routes (ask + 5 authorSkill + 3 ops), bearer auth middleware, session persistence (filestore + ADB), camelCase serialization, cost store, OpenAPI 3.1 spec, OCI deployment runbook | Code complete (468 tests, 0 failures) |
 | **Eval tooling** | GoldSetFeeder interactive CLI (`kb-cli gold-feed`), 7-state machine, count_entries() utility, gold_sets/ directory, 63 tests | Code complete |
 
 ## What gates integration testing

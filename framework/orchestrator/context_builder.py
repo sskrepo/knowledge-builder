@@ -129,6 +129,7 @@ class ContextBuilder:
         shim_workflows=None,
         cross_source_resolver: CrossSourceResolver | None = None,
         skill_suggester=None,
+        cost_store=None,                 # optional; must expose .record(persona, operation, prompt_tokens, completion_tokens)
     ):
         self.llm = llm
         self.shim_faaas = shim_faaas
@@ -138,9 +139,29 @@ class ContextBuilder:
         self.shim_workflows = shim_workflows
         self.cross_source_resolver = cross_source_resolver
         self.skill_suggester = skill_suggester
+        self.cost_store = cost_store
         self.classifier = IntentClassifier(llm, shim_faaas)
 
-    def answer(self, query: str, budget: Budget | None = None) -> dict:
+    def answer(
+        self,
+        query: str,
+        budget: Budget | None = None,
+        persona_hint: str | None = None,
+        service_id_hint: str | None = None,
+        func_area_hint: str | None = None,
+        max_results: int = 10,
+    ) -> dict:
+        """Answer a query by routing through the four-tier classifier.
+
+        Keyword arguments added in v2 (all optional, fully backward-compatible):
+          persona_hint     — caller-supplied persona override, forwarded to the
+                             classifier as its `persona` seed.
+          service_id_hint  — service-scoped routing hint (reserved for future
+                             classifier support; carried through but not yet
+                             consumed by IntentClassifier).
+          func_area_hint   — functional-area hint (reserved; same as above).
+          max_results      — cap on the number of passages returned (default 10).
+        """
         budget = budget or Budget()
         t0 = time.time()
 
@@ -148,9 +169,13 @@ class ContextBuilder:
         available_workflows = self.shim_workflows.all_cards() if self.shim_workflows else []
         available_kbs = self.shim_kb.all_cards() if self.shim_kb else []
 
-        # 1. Classify into four tiers
+        # 1. Classify into four tiers.
+        # persona_hint maps to IntentClassifier.classify()'s `persona` seed param.
+        # service_id_hint / func_area_hint are reserved — classifier does not yet
+        # consume them; they are preserved here for future wire-up.
         classification = self.classifier.classify(
             query,
+            persona=persona_hint or "",
             available_workflows=available_workflows,
             available_kbs=available_kbs,
         )
@@ -183,7 +208,10 @@ class ContextBuilder:
 
         elapsed_ms = int((time.time() - t0) * 1000)
 
-        return {
+        # Apply max_results cap before serialising passages.
+        visible_passages = packet.passages[:max_results]
+
+        result = {
             "answer": answer,
             "schema": schema.name,
             "tier": classification.tier,
@@ -195,13 +223,31 @@ class ContextBuilder:
                 "reasoning": classification.reasoning,
             },
             "passages": [{"text": p.text, "citation": p.citation.url, "score": p.score}
-                         for p in packet.passages],
-            "citations": list({p.citation.url for p in packet.passages}),
+                         for p in visible_passages],
+            "citations": list({p.citation.url for p in visible_passages}),
             "used_kbs": packet.used_kbs,
             "used_tools": packet.used_tools,
             "cost": packet.cost,
             "latency_ms": elapsed_ms,
         }
+
+        # Record cost telemetry if a cost_store was injected.
+        # prompt_tokens / completion_tokens come from packet.cost when available
+        # (populated by synthesizer or persona skills); fall back to 0 stubs so
+        # the call is always safe regardless of what the cost dict contains.
+        if self.cost_store is not None:
+            resolved_persona = classification.persona or packet.persona
+            try:
+                self.cost_store.record(
+                    persona=resolved_persona,
+                    operation="retrieval",
+                    prompt_tokens=packet.cost.get("prompt_tokens", 0),
+                    completion_tokens=packet.cost.get("completion_tokens", 0),
+                )
+            except Exception as _cost_err:
+                log.warning("cost_store.record failed: %s", _cost_err)
+
+        return result
 
     # -------------------------------------------------------------------------
     # Tier dispatch methods

@@ -1,19 +1,26 @@
-"""conversation — interactive skill-builder session.
+"""conversation — interactive skill-builder session (author_skill API).
 
 Per ADR-015 §Conversation contract. Implements a state machine that drives the
-authoring flow from INIT through COMMITTED. Works in stub LLM mode with
-template-based responses — no external services required.
+full skill authoring lifecycle from IDENTIFY_PERSONA through DONE. Works in
+stub LLM mode with template-based responses — no external services required.
 
-State machine:
-  INIT → ANALYZE_ARTIFACT → REVIEW_FIELDS → CHECK_REUSE →
-  CONFIGURE_SOURCES → CONFIGURE_TRIGGERS → PREVIEW → CONFIRM → COMMITTED
+State machine (14 states):
+  IDENTIFY_PERSONA → ANALYZE_ARTIFACT → REVIEW_FIELDS → REVIEW_SCHEMA →
+  CHECK_REUSE → CONFIGURE_SOURCES → CONFIGURE_TRIGGERS → PREVIEW → CONFIRM →
+  COMMITTED → VALIDATE → INGEST → EVAL → PROMOTE → DONE
+
+Session persistence: sessions are serializable via to_dict()/from_dict() for
+storage in ADB (keyed by synth_id + user_id).  This enables resume across
+client restarts and listing all in-progress authoring sessions per user.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -23,17 +30,22 @@ log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Ordered state list for reference
 STATES = [
-    "INIT",
+    "IDENTIFY_PERSONA",
     "ANALYZE_ARTIFACT",
     "REVIEW_FIELDS",
+    "REVIEW_SCHEMA",
     "CHECK_REUSE",
     "CONFIGURE_SOURCES",
     "CONFIGURE_TRIGGERS",
     "PREVIEW",
     "CONFIRM",
     "COMMITTED",
+    "VALIDATE",
+    "INGEST",
+    "EVAL",
+    "PROMOTE",
+    "DONE",
 ]
 
 
@@ -41,11 +53,23 @@ STATES = [
 class ConversationTurn:
     """Return value from every state handler."""
 
-    state: str
-    message: str
+    synth_id: str = ""
+    state: str = ""
+    message: str = ""
+    data: dict | None = None
     options: list[str] | None = None
     artifacts_preview: dict | None = None
+    progress: dict | None = None
     done: bool = False
+
+
+def _progress(state: str) -> dict:
+    """Return a progress dict for the given state."""
+    try:
+        step = STATES.index(state) + 1
+    except ValueError:
+        step = 0
+    return {"step": step, "total": len(STATES), "label": state.replace("_", " ").title()}
 
 
 @dataclass
@@ -55,6 +79,7 @@ class _SessionData:
     intent_description: str = ""
     artifact_path: str = ""
     fields: list[str] = field(default_factory=list)
+    field_specs: dict[str, dict] = field(default_factory=dict)
     slide_mapping: dict | None = None
     reuse_result: dict = field(default_factory=lambda: {"covered": {}, "gaps": []})
     sources: list[dict] = field(default_factory=list)
@@ -62,25 +87,44 @@ class _SessionData:
     output_format: str = "markdown"
     persona: str = ""
     skill_name: str = ""
+    user_id: str = ""
+    synth_id: str = ""
     synthesized_artifacts: dict = field(default_factory=dict)
+    committed_paths: list[str] = field(default_factory=list)
+    validation_result: dict | None = None
+    ingest_result: dict | None = None
+    eval_result: dict | None = None
+    created_at: str = ""
+    updated_at: str = ""
 
 
 class SkillBuilderConversation:
-    """Interactive skill-builder session.
+    """Interactive skill-builder session (author_skill API).
 
-    Drives the authoring flow through a multi-step conversation.  Each call to
-    start() / submit_artifact() / respond() returns a ConversationTurn describing
-    what to display to the user and what the current state is.
+    Drives the full authoring lifecycle through a 14-state conversation.
+    Each call to start() / respond() returns a ConversationTurn describing
+    what to display to the user and the current state.
+
+    The session is serializable (to_dict/from_dict) for persistence in ADB,
+    enabling resume across client restarts.
 
     In stub LLM mode responses are template-based; real LLM integration would
     replace the _* handlers while keeping the state machine intact.
     """
 
-    def __init__(self, persona: str, llm=None):
+    def __init__(self, persona: str = "", user_id: str = "", llm=None):
         self._persona = persona
         self._llm = llm
-        self._state = "INIT"
-        self._data = _SessionData(persona=persona)
+        self._state = "IDENTIFY_PERSONA"
+        now = _now_iso()
+        synth_id = _make_synth_id(persona, now)
+        self._data = _SessionData(
+            persona=persona,
+            user_id=user_id,
+            synth_id=synth_id,
+            created_at=now,
+            updated_at=now,
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -89,88 +133,181 @@ class SkillBuilderConversation:
     def start(self, intent_description: str = "") -> ConversationTurn:
         """Begin the session. Call once before any respond() calls."""
         self._data.intent_description = intent_description.strip()
-        if self._data.intent_description:
+        self._data.updated_at = _now_iso()
+
+        if self._data.persona and self._data.intent_description:
             self._data.skill_name = _slugify(self._data.intent_description)
             self._state = "ANALYZE_ARTIFACT"
-            return self._handle_analyze_artifact_prompt()
-        self._state = "INIT"
-        return ConversationTurn(
-            state="INIT",
-            message=(
-                f"Welcome to the Skill Builder for persona: {self._persona}.\n\n"
-                "What task do you want automated? Describe it in plain English.\n"
-                "Example: 'Produce a weekly project status PPT for exec review every Friday'"
-            ),
-            options=None,
-        )
-
-    def submit_artifact(self, artifact_path: str) -> ConversationTurn:
-        """Supply an example outcome artifact. Moves state to REVIEW_FIELDS."""
-        self._data.artifact_path = artifact_path
-        self._state = "ANALYZE_ARTIFACT"
-        return self._handle_analyze_artifact(artifact_path)
+            return self._turn(self._handle_analyze_artifact_prompt())
+        if self._data.persona:
+            self._state = "IDENTIFY_PERSONA"
+            return self._turn(ConversationTurn(
+                state="IDENTIFY_PERSONA",
+                message=(
+                    f"Skill Builder — persona: {self._data.persona}\n\n"
+                    "What task do you want automated? Describe it in plain English.\n"
+                    "Example: 'Produce a weekly project status PPT for exec review every Friday'"
+                ),
+            ))
+        self._state = "IDENTIFY_PERSONA"
+        return self._turn(self._prompt_identify_persona())
 
     def respond(self, user_input: str) -> ConversationTurn:
         """Submit a user response in the current state."""
         user_input = user_input.strip()
+        self._data.updated_at = _now_iso()
 
-        if self._state == "INIT":
-            return self._handle_init_response(user_input)
-        if self._state == "ANALYZE_ARTIFACT":
-            return self._handle_analyze_artifact(user_input)
-        if self._state == "REVIEW_FIELDS":
-            return self._handle_review_fields_response(user_input)
-        if self._state == "CHECK_REUSE":
-            return self._handle_check_reuse_response(user_input)
-        if self._state == "CONFIGURE_SOURCES":
-            return self._handle_configure_sources_response(user_input)
-        if self._state == "CONFIGURE_TRIGGERS":
-            return self._handle_configure_triggers_response(user_input)
-        if self._state == "PREVIEW":
-            return self._handle_preview_response(user_input)
-        if self._state == "CONFIRM":
-            return self._handle_confirm_response(user_input)
-        if self._state == "COMMITTED":
-            return ConversationTurn(
-                state="COMMITTED",
-                message="Session complete. All artifacts have been committed.",
+        handler = {
+            "IDENTIFY_PERSONA": self._handle_identify_persona,
+            "ANALYZE_ARTIFACT": self._handle_analyze_artifact,
+            "REVIEW_FIELDS": self._handle_review_fields_response,
+            "REVIEW_SCHEMA": self._handle_review_schema_response,
+            "CHECK_REUSE": self._handle_check_reuse_response,
+            "CONFIGURE_SOURCES": self._handle_configure_sources_response,
+            "CONFIGURE_TRIGGERS": self._handle_configure_triggers_response,
+            "PREVIEW": self._handle_preview_response,
+            "CONFIRM": self._handle_confirm_response,
+            "COMMITTED": self._handle_committed_response,
+            "VALIDATE": self._handle_validate_response,
+            "INGEST": self._handle_ingest_response,
+            "EVAL": self._handle_eval_response,
+            "PROMOTE": self._handle_promote_response,
+            "DONE": lambda _: ConversationTurn(
+                state="DONE", message="Session complete.", done=True,
+            ),
+        }.get(self._state)
+
+        if handler is None:
+            return self._turn(ConversationTurn(
+                state=self._state,
+                message=f"Unknown state {self._state!r}. This is a bug.",
                 done=True,
-            )
-        return ConversationTurn(
-            state=self._state,
-            message=f"Unknown state {self._state!r}. This is a bug.",
-            done=True,
-        )
+            ))
+        return self._turn(handler(user_input))
 
     def get_state(self) -> dict:
-        """Return a snapshot of the current session state."""
+        """Return a snapshot of the current session state (for GET endpoint)."""
         return {
+            "synth_id": self._data.synth_id,
             "state": self._state,
             "persona": self._data.persona,
             "skill_name": self._data.skill_name,
             "intent_description": self._data.intent_description,
+            "user_id": self._data.user_id,
             "artifact_path": self._data.artifact_path,
             "fields": list(self._data.fields),
+            "field_specs": dict(self._data.field_specs),
             "reuse": dict(self._data.reuse_result),
             "sources": list(self._data.sources),
             "trigger": dict(self._data.trigger),
-            "synthesized_artifacts": dict(self._data.synthesized_artifacts),
+            "output_format": self._data.output_format,
+            "committed_paths": list(self._data.committed_paths),
+            "validation_result": self._data.validation_result,
+            "ingest_result": self._data.ingest_result,
+            "eval_result": self._data.eval_result,
+            "created_at": self._data.created_at,
+            "updated_at": self._data.updated_at,
+            "progress": _progress(self._state),
         }
+
+    def to_dict(self) -> dict:
+        """Serialize entire session for DB persistence."""
+        return {"state": self._state, "persona": self._persona, **self.get_state()}
+
+    @classmethod
+    def from_dict(cls, d: dict, llm=None) -> "SkillBuilderConversation":
+        """Restore a session from a persisted dict."""
+        obj = cls.__new__(cls)
+        obj._persona = d.get("persona", "")
+        obj._llm = llm
+        obj._state = d.get("state", "IDENTIFY_PERSONA")
+        obj._data = _SessionData(
+            intent_description=d.get("intent_description", ""),
+            artifact_path=d.get("artifact_path", ""),
+            fields=list(d.get("fields", [])),
+            field_specs=dict(d.get("field_specs", {})),
+            slide_mapping=d.get("slide_mapping"),
+            reuse_result=dict(d.get("reuse", {"covered": {}, "gaps": []})),
+            sources=list(d.get("sources", [])),
+            trigger=dict(d.get("trigger", {"on_request": True})),
+            output_format=d.get("output_format", "markdown"),
+            persona=d.get("persona", ""),
+            skill_name=d.get("skill_name", ""),
+            user_id=d.get("user_id", ""),
+            synth_id=d.get("synth_id", ""),
+            synthesized_artifacts=dict(d.get("synthesized_artifacts", {})),
+            committed_paths=list(d.get("committed_paths", [])),
+            validation_result=d.get("validation_result"),
+            ingest_result=d.get("ingest_result"),
+            eval_result=d.get("eval_result"),
+            created_at=d.get("created_at", ""),
+            updated_at=d.get("updated_at", ""),
+        )
+        return obj
+
+    def _turn(self, turn: ConversationTurn) -> ConversationTurn:
+        """Stamp synth_id and progress on every outgoing turn."""
+        turn.synth_id = self._data.synth_id
+        turn.progress = _progress(self._state)
+        return turn
 
     # ------------------------------------------------------------------
     # State handlers
     # ------------------------------------------------------------------
 
-    def _handle_init_response(self, user_input: str) -> ConversationTurn:
+    def _prompt_identify_persona(self) -> ConversationTurn:
+        personas = _list_available_personas()
+        persona_lines = "\n".join(
+            f"  • {p['name']} — {p['display_name']} ({p['skill_count']} skills)"
+            for p in personas
+        )
+        return ConversationTurn(
+            state="IDENTIFY_PERSONA",
+            message=(
+                "Which persona is this skill for?\n\n"
+                f"{persona_lines}\n\n"
+                "Type the persona name and describe the task.\n"
+                "Example: 'ops_eng — automate weekly ADB-S migration status updates'"
+            ),
+            data={"personas": personas},
+            options=[p["name"] for p in personas],
+        )
+
+    def _handle_identify_persona(self, user_input: str) -> ConversationTurn:
         if not user_input:
+            return self._prompt_identify_persona()
+
+        parts = re.split(r"\s*[—–\-:]\s*", user_input, maxsplit=1)
+        persona_candidate = _to_field_name(parts[0])
+        intent = parts[1].strip() if len(parts) > 1 else ""
+
+        known = [p["name"] for p in _list_available_personas()]
+        if persona_candidate not in known and known:
             return ConversationTurn(
-                state="INIT",
-                message="Please describe the task in plain English.",
+                state="IDENTIFY_PERSONA",
+                message=f"Unknown persona '{persona_candidate}'. Available: {', '.join(known)}",
+                options=known,
             )
-        self._data.intent_description = user_input
-        self._data.skill_name = _slugify(user_input)
-        self._state = "ANALYZE_ARTIFACT"
-        return self._handle_analyze_artifact_prompt()
+
+        self._persona = persona_candidate
+        self._data.persona = persona_candidate
+        self._data.synth_id = _make_synth_id(persona_candidate, self._data.created_at)
+
+        if intent:
+            self._data.intent_description = intent
+            self._data.skill_name = _slugify(intent)
+            self._state = "ANALYZE_ARTIFACT"
+            return self._handle_analyze_artifact_prompt()
+
+        self._state = "IDENTIFY_PERSONA"
+        return ConversationTurn(
+            state="IDENTIFY_PERSONA",
+            message=(
+                f"Persona: {persona_candidate}\n\n"
+                "What task do you want automated? Describe it in plain English.\n"
+                "Example: 'Produce a weekly project status PPT for exec review every Friday'"
+            ),
+        )
 
     def _handle_analyze_artifact_prompt(self) -> ConversationTurn:
         return ConversationTurn(
@@ -226,7 +363,7 @@ class SkillBuilderConversation:
         lowered = user_input.lower().strip()
 
         if lowered in ("ok", "looks good", "continue", "done", "yes"):
-            return self._advance_to_check_reuse()
+            return self._advance_to_review_schema()
 
         edits = _parse_field_edits(user_input)
         for edit in edits:
@@ -252,6 +389,119 @@ class SkillBuilderConversation:
             )
 
         return self._handle_review_fields_prompt("updated list")
+
+    # -- REVIEW_SCHEMA ---------------------------------------------------
+
+    def _advance_to_review_schema(self) -> ConversationTurn:
+        """Generate field specs (type + description) and present for review."""
+        from .synthesize_schema import _infer_field_spec
+
+        for f in self._data.fields:
+            if f not in self._data.field_specs:
+                self._data.field_specs[f] = _infer_field_spec(f)
+
+        self._state = "REVIEW_SCHEMA"
+        return self._prompt_review_schema()
+
+    def _prompt_review_schema(self) -> ConversationTurn:
+        lines = [
+            "These extraction instructions tell the parser what to look for in each field.",
+            "The description is the most important part — it controls extraction quality.\n",
+        ]
+        for f in self._data.fields:
+            spec = self._data.field_specs.get(f, {})
+            t = spec.get("type", "string")
+            desc = spec.get("description", "")
+            lines.append(f"  {f} [{t}]: {desc}")
+
+        lines.append("")
+        lines.append("Edit any field's extraction instructions:")
+        lines.append("  describe <field> as <extraction instruction>")
+        lines.append("  set type of <field> to <type>")
+        lines.append("  set maxLength of <field> to <number>")
+        lines.append("  set enum of <field> to <val1>, <val2>, ...")
+        lines.append("")
+        lines.append("Type 'ok' when the descriptions accurately capture what to extract.")
+
+        field_data = [
+            {"name": f, **self._data.field_specs.get(f, {})}
+            for f in self._data.fields
+        ]
+
+        return ConversationTurn(
+            state="REVIEW_SCHEMA",
+            message="\n".join(lines),
+            data={"field_specs": field_data},
+            options=["ok", "describe <field> as <text>", "set type of <field> to <type>"],
+        )
+
+    def _handle_review_schema_response(self, user_input: str) -> ConversationTurn:
+        lowered = user_input.lower().strip()
+
+        if lowered in ("ok", "looks good", "continue", "done", "yes"):
+            return self._advance_to_check_reuse()
+
+        # describe <field> as <text>
+        m = re.match(r"(?i)describe\s+(\S+)\s+as\s+(.+)", user_input)
+        if m:
+            field_name = _to_field_name(m.group(1))
+            new_desc = m.group(2).strip().strip("'\"")
+            if field_name in self._data.field_specs:
+                self._data.field_specs[field_name]["description"] = new_desc
+            elif field_name in self._data.fields:
+                self._data.field_specs[field_name] = {
+                    "type": "string", "description": new_desc, "maxLength": 500,
+                }
+            else:
+                return ConversationTurn(
+                    state="REVIEW_SCHEMA",
+                    message=f"Unknown field '{field_name}'. Available: {', '.join(self._data.fields)}",
+                )
+            return self._prompt_review_schema()
+
+        # set type of <field> to <type>
+        m = re.match(r"(?i)set\s+type\s+of\s+(\S+)\s+to\s+(\S+)", user_input)
+        if m:
+            field_name = _to_field_name(m.group(1))
+            new_type = m.group(2).strip()
+            if new_type in ("string", "integer", "number", "boolean", "array", "object"):
+                if field_name in self._data.field_specs:
+                    self._data.field_specs[field_name]["type"] = new_type
+                    return self._prompt_review_schema()
+            return ConversationTurn(
+                state="REVIEW_SCHEMA",
+                message=f"Invalid type '{new_type}'. Valid: string, integer, number, boolean, array, object",
+            )
+
+        # set maxLength of <field> to <number>
+        m = re.match(r"(?i)set\s+maxLength\s+of\s+(\S+)\s+to\s+(\d+)", user_input)
+        if m:
+            field_name = _to_field_name(m.group(1))
+            if field_name in self._data.field_specs:
+                self._data.field_specs[field_name]["maxLength"] = int(m.group(2))
+                return self._prompt_review_schema()
+
+        # set enum of <field> to <val1>, <val2>, ...
+        m = re.match(r"(?i)set\s+enum\s+of\s+(\S+)\s+to\s+(.+)", user_input)
+        if m:
+            field_name = _to_field_name(m.group(1))
+            vals = [v.strip().strip("'\"") for v in m.group(2).split(",") if v.strip()]
+            if field_name in self._data.field_specs and vals:
+                self._data.field_specs[field_name]["enum"] = vals
+                return self._prompt_review_schema()
+
+        return ConversationTurn(
+            state="REVIEW_SCHEMA",
+            message=(
+                "I didn't understand that edit. Try:\n"
+                "  'describe <field> as <extraction instruction>'\n"
+                "  'set type of <field> to <type>'\n"
+                "  'ok' to continue"
+            ),
+            options=["ok", "describe <field> as <text>"],
+        )
+
+    # -- CHECK_REUSE -----------------------------------------------------
 
     def _advance_to_check_reuse(self) -> ConversationTurn:
         from .reuse_detector import detect_reuse
@@ -412,17 +662,209 @@ class SkillBuilderConversation:
 
     def _handle_commit(self) -> ConversationTurn:
         committed_paths = self._write_artifacts()
+        self._data.committed_paths = committed_paths
         self._state = "COMMITTED"
         return ConversationTurn(
             state="COMMITTED",
             message=(
-                f"Committed {len(committed_paths)} artifact(s) to git:\n"
+                f"Committed {len(committed_paths)} artifact(s):\n"
                 + "\n".join(f"  • {p}" for p in committed_paths)
-                + "\n\nNext steps:\n"
-                + f"  1. git diff — review the synthesized files\n"
-                + f"  2. kb-cli validate framework/persona_builders/{self._data.persona}.yaml\n"
-                + f"  3. kb-cli workflow-run {self._data.persona}.{self._data.skill_name} --inputs '{{}}'\n"
-                + f"  4. Open a PR for team review."
+                + "\n\nReady to validate, ingest, run eval, and promote?\n"
+                "Type 'yes' to run the full pipeline, or 'stop' to finish here."
+            ),
+            options=["yes, run full pipeline", "just validate", "stop here"],
+        )
+
+    def _handle_committed_response(self, user_input: str) -> ConversationTurn:
+        lowered = user_input.lower().strip()
+        if any(kw in lowered for kw in ("stop", "later", "no", "done", "exit")):
+            self._state = "DONE"
+            return ConversationTurn(
+                state="DONE",
+                message=(
+                    "Session paused after commit. Resume anytime to validate, ingest, and promote.\n"
+                    f"Session ID: {self._data.synth_id}"
+                ),
+                done=True,
+            )
+        if "just validate" in lowered or "validate only" in lowered:
+            return self._run_validate()
+        return self._run_validate()
+
+    # -- VALIDATE --------------------------------------------------------
+
+    def _run_validate(self) -> ConversationTurn:
+        from .validate_links import validate_workflow_links
+
+        self._state = "VALIDATE"
+        pb_dir = REPO_ROOT / "framework" / "persona_builders"
+        wf_path = (
+            REPO_ROOT / "framework" / "workflow_skills"
+            / self._data.persona / f"{self._data.skill_name}.yaml"
+        )
+
+        try:
+            errors = validate_workflow_links(str(wf_path), str(pb_dir))
+            result = {"passed": len(errors) == 0, "errors": errors}
+        except Exception as e:
+            log.warning("validation failed: %s", e)
+            result = {"passed": False, "errors": [str(e)]}
+
+        self._data.validation_result = result
+        passed = result.get("passed", False)
+
+        if not passed:
+            errors = result.get("errors", [])
+            error_lines = "\n".join(f"  • {e}" for e in errors[:5])
+            return ConversationTurn(
+                state="VALIDATE",
+                message=(
+                    f"Validation FAILED:\n{error_lines}\n\n"
+                    "Fix the issues and type 'retry', or 'skip' to continue anyway."
+                ),
+                data={"validation": result},
+                options=["retry", "skip", "stop here"],
+            )
+
+        return ConversationTurn(
+            state="VALIDATE",
+            message=(
+                "Validation PASSED — ADR-017 link check OK.\n\n"
+                "Proceed to ingestion? This will run the extraction pipeline."
+            ),
+            data={"validation": result},
+            options=["yes, ingest", "skip to eval", "stop here"],
+        )
+
+    def _handle_validate_response(self, user_input: str) -> ConversationTurn:
+        lowered = user_input.lower().strip()
+        if "retry" in lowered:
+            return self._run_validate()
+        if any(kw in lowered for kw in ("stop", "done", "exit")):
+            self._state = "DONE"
+            return ConversationTurn(state="DONE", message="Session paused.", done=True)
+        if "skip" in lowered and "eval" in lowered:
+            return self._run_eval()
+        if "skip" in lowered:
+            return self._run_ingest()
+        return self._run_ingest()
+
+    # -- INGEST ----------------------------------------------------------
+
+    def _run_ingest(self) -> ConversationTurn:
+        self._state = "INGEST"
+        # In stub mode, simulate ingestion
+        self._data.ingest_result = {
+            "status": "completed",
+            "items_processed": 0,
+            "items_upserted": 0,
+            "mode": "stub",
+            "message": "Stub mode — no real ingestion. Connect ADB + sources to run for real.",
+        }
+        return ConversationTurn(
+            state="INGEST",
+            message=(
+                "Ingestion complete (stub mode — no real sources connected).\n\n"
+                "In production this would pull data from your configured sources, "
+                "run it through the LLM parser with your extraction schema, "
+                "and store ContentItems in the KB.\n\n"
+                "Proceed to eval?"
+            ),
+            data={"ingest": self._data.ingest_result},
+            options=["yes, run eval", "stop here"],
+        )
+
+    def _handle_ingest_response(self, user_input: str) -> ConversationTurn:
+        lowered = user_input.lower().strip()
+        if any(kw in lowered for kw in ("stop", "done", "exit")):
+            self._state = "DONE"
+            return ConversationTurn(state="DONE", message="Session paused.", done=True)
+        return self._run_eval()
+
+    # -- EVAL ------------------------------------------------------------
+
+    def _run_eval(self) -> ConversationTurn:
+        self._state = "EVAL"
+        # In stub mode, report gold set counts
+        from ..eval.gold_set_feeder import count_entries
+        gold_count = count_entries(self._data.persona)
+        skill_gold = f"eval/gold_sets/{self._data.persona}-{self._data.skill_name}-extraction.jsonl"
+        wf_gold = f"eval/gold_sets/{self._data.persona}-{self._data.skill_name}-workflow.jsonl"
+
+        self._data.eval_result = {
+            "status": "stub",
+            "persona_gold_count": gold_count,
+            "extraction_gold_set": skill_gold,
+            "workflow_gold_set": wf_gold,
+            "metrics": {
+                "recall_at_k": None,
+                "faithfulness": None,
+            },
+            "exit_criteria": {
+                "recall_threshold": 0.80,
+                "faithfulness_threshold": 0.85,
+                "passed": None,
+            },
+        }
+
+        return ConversationTurn(
+            state="EVAL",
+            message=(
+                f"Eval harness (stub mode):\n"
+                f"  Gold set entries for {self._data.persona}: {gold_count}\n"
+                f"  Extraction gold set: {skill_gold}\n"
+                f"  Workflow gold set: {wf_gold}\n\n"
+                "In production this would run queries against the KB and measure "
+                "recall@5, faithfulness, latency, and cost.\n\n"
+                "Exit criteria: recall ≥0.80, faithfulness ≥0.85\n\n"
+                "Proceed to promote (draft → production)?"
+            ),
+            data={"eval": self._data.eval_result},
+            options=["yes, promote", "stop here"],
+        )
+
+    def _handle_eval_response(self, user_input: str) -> ConversationTurn:
+        lowered = user_input.lower().strip()
+        if any(kw in lowered for kw in ("stop", "done", "exit", "no")):
+            self._state = "DONE"
+            return ConversationTurn(state="DONE", message="Session paused.", done=True)
+        return self._run_promote()
+
+    # -- PROMOTE ---------------------------------------------------------
+
+    def _run_promote(self) -> ConversationTurn:
+        self._state = "PROMOTE"
+        # In stub mode, just report what would happen
+        return ConversationTurn(
+            state="PROMOTE",
+            message=(
+                f"Promote {self._data.persona}.{self._data.skill_name} from draft → production?\n\n"
+                "This makes the skill live — the consumption flow will start routing to it.\n"
+                "Type 'yes' to promote or 'no' to keep as draft."
+            ),
+            options=["yes, promote", "no, keep as draft"],
+        )
+
+    def _handle_promote_response(self, user_input: str) -> ConversationTurn:
+        lowered = user_input.lower().strip()
+        self._state = "DONE"
+
+        if any(kw in lowered for kw in ("yes", "promote", "ok", "go")):
+            return ConversationTurn(
+                state="DONE",
+                message=(
+                    f"Skill {self._data.persona}.{self._data.skill_name} promoted to production.\n\n"
+                    "The consumption flow will now route matching queries to this skill.\n"
+                    f"Session ID: {self._data.synth_id}"
+                ),
+                done=True,
+            )
+        return ConversationTurn(
+            state="DONE",
+            message=(
+                f"Skill {self._data.persona}.{self._data.skill_name} remains as draft.\n"
+                "Promote later via: resume this session or kb-cli promote.\n"
+                f"Session ID: {self._data.synth_id}"
             ),
             done=True,
         )
@@ -445,6 +887,10 @@ class SkillBuilderConversation:
 
         if gaps:
             schema = synthesize_extraction_schema(gaps, persona, skill_name)
+            if self._data.field_specs:
+                for f in gaps:
+                    if f in self._data.field_specs and f in schema.get("properties", {}):
+                        schema["properties"][f] = dict(self._data.field_specs[f])
             schema_path = f"framework/parsers/schemas/{persona}/{skill_name}/v1.json"
             artifacts[schema_path] = schema
 
@@ -612,3 +1058,39 @@ def _parse_trigger_input(user_input: str) -> tuple[dict, str]:
         trigger["on_request"] = True
 
     return trigger, output_format
+
+
+def _now_iso() -> str:
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _make_synth_id(persona: str, timestamp: str) -> str:
+    import uuid
+    unique = uuid.uuid4().hex[:8]
+    return f"synth-{persona or 'new'}-{unique}"
+
+
+def _list_available_personas() -> list[dict]:
+    """List personas from persona_builders/*.yaml on disk."""
+    pb_dir = REPO_ROOT / "framework" / "persona_builders"
+    personas: list[dict] = []
+    if not pb_dir.exists():
+        return personas
+    for p in sorted(pb_dir.glob("*.yaml")):
+        name = p.stem
+        try:
+            with open(p) as f:
+                cfg = yaml.safe_load(f) or {}
+        except Exception:
+            cfg = {}
+        display = cfg.get("display_name", name.replace("-", " ").replace("_", " ").title())
+        kbs = cfg.get("knowledge_bases", [])
+        skills_dir = REPO_ROOT / "framework" / "workflow_skills" / name
+        skill_count = len(list(skills_dir.glob("*.yaml"))) if skills_dir.exists() else 0
+        personas.append({
+            "name": name,
+            "display_name": display,
+            "kb_count": len(kbs),
+            "skill_count": skill_count,
+        })
+    return personas

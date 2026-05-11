@@ -1,0 +1,20 @@
+# Development-only consumer manifest — DO NOT commit real tokens to git.
+# Used when KBF_STORE_BACKEND=filestore (laptop quickstart).
+# Replace "dev-only-token-replace-me" with a random secret for any shared environment.
+#
+# Field reference (PDD V3 §9.1):
+#   name               — human-readable label for logs and audit
+#   token              — plaintext bearer token (dev/filestore only; use tokenHash in prod)
+#   tokenHash          — SHA-256 hex of the token (omit this field to use plaintext token above)
+#   scopes             — read | write | admin
+#   personaAllowlist   — [] means all personas are allowed
+#   rpmCap             — requests per minute
+#   tokenBudgetPerRequest — max input tokens per /ask or authorSkill call
+#   userId             — stable user id (defaults to SHA-1 prefix of filename stem if omitted)
+
+name: dev-local
+token: "dev-only-token-replace-me"
+scopes: [read, write]
+personaAllowlist: []
+rpmCap: 120
+tokenBudgetPerRequest: 16000

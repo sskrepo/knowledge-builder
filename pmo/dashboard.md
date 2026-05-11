@@ -10,12 +10,12 @@ status: current
 
 # Knowledgebase — Dashboard
 
-**Current phase:** Phase 1-3 code complete (filestore/stub mode)
+**Current phase:** Phase 1-3 code complete + V3 deployment architecture designed
 **Updated:** 2026-05-10 by tpm
 
-## 🌅 Morning briefing — 2026-05-10 (Phase 1-3 code complete)
+## 🌅 Morning briefing — 2026-05-10 (V3 deployment architecture complete)
 
-**Phases 1-3 are code complete.** 176 Python files, 22 framework modules. Everything runs against filestore + stub LLM — no external provisioning needed for development or workshops. The full build landed in a single agent-team session: 60 files, 7052 insertions.
+**Phases 1-3 code complete + V3 deployment architecture designed.** 132 Python files, ~13K LOC, 22 framework modules. Everything runs against filestore + stub LLM — no external provisioning needed. PDD V3 defines the complete external API surface. OCI deployment runbook ready.
 
 **What's runnable on your laptop right now (no ADB / OpenAI / Vault required):**
 
@@ -37,23 +37,30 @@ python -m framework.cli.kb_cli code-wiki-build
 python -m framework.cli.kb_cli promote framework/persona_builders/ops-eng.yaml --validate-links
 ```
 
-**What shipped (cumulative, Phases 0-3):**
+**What shipped (cumulative, Phases 0-3 + V3 design):**
 
 | Phase | Scope | Status |
 |-------|-------|--------|
 | **0 — Setup** | ADRs 001-018, PDD V2, config plane, persona starters | Done |
 | **1 — Skeleton + incident KB** | Adapters, parsers, stores, retrievers, orchestrator, eval, MCP server, CLI | Code complete (stub mode) |
 | **2 — Fleet + code wiki + skill-builder** | Fleet adapter, code wiki, 4 MCP tools, skill-builder Phase A (module split per ADR-015), provides_fields backfill | Code complete |
-| **3 — Workflow runtime + orchestrator** | conversation.py (interactive skill-builder), WorkflowMCPTool, 4-tier routing, Tier 3 fanout, cost telemetry, validate_workflow_links, 3 workflow skills, WikiMetadataStore, Confluence ingestion | Code complete |
+| **3 — Workflow runtime + orchestrator** | conversation.py (15-state machine), WorkflowMCPTool, 4-tier routing, Tier 3 fanout, cost telemetry, validate_workflow_links, 3 workflow skills, WikiMetadataStore, Confluence ingestion | Code complete |
+| **V3 — Deployment interaction layer** | PDD V3 design + full implementation: REST routes, MCP tools, auth, sessions, serialization, cost store, OpenAPI spec, OCI runbook | Code complete (468 tests, 0 failures) |
 
 **Key capabilities now available:**
-- **Interactive skill-builder** — conversational state machine (9 states: INIT→COMMITTED) for persona teams to author skills by demonstration
+- **2 MCP tools** — `askKnowledgeBase` (consumption, server routes internally) + `authorSkill` (knowledge builder, server-driven 15-state session)
+- **9 REST endpoints** — POST /api/v1/ask + POST/GET/DELETE /api/v1/kb/authorSkill + GET /healthz + GET /api/v1/version + GET /api/v1/metrics/cost
+- **Bearer token auth** — consumer manifests (YAML), SHA-256 token lookup, scope enforcement (read/write/admin), sliding-window RPM limiting
+- **Session persistence** — FilestoreSessionStore (dev) + AdbSessionStore (prod), 7-day TTL, resume from any state, per-user isolation
+- **camelCase serialization** — centralized snake↔camel boundary at API edge
+- **Cost telemetry** — append-only JSONL store, query by persona/skill/date range
+- **15-state author_skill session** — IDENTIFY_PERSONA → ... → PROMOTE → DONE
+- **REVIEW_SCHEMA quality gate** — users edit extraction field descriptions (the #1 quality lever)
 - **3 workflow skills** — incident_summary (MD), release_brief (DOCX), weekly_exec_review (PPTX)
 - **4-tier intent routing** — workflow match (0.85) → KB retrieval (0.60) → multi-persona fanout (0.40) → honest "no" + suggestion (0.30)
-- **ADR-017 link validation** — `requires_extractions ⊆ provides_fields` enforced at promote time
-- **Fleet adapter** — UDAP with filestore fixtures, query_fleet + text_to_sql MCP tools
-- **Code wiki builder** — Som-style AST extractor, find_symbol + read_code_page MCP tools
-- **Confluence ingestion** — HTML→markdown, idempotent, WikiMetadataStore
+- **OpenAPI 3.1 spec** — authoritative REST contract at framework/deploy/openapi.yaml
+- **OCI deployment runbook** — empty OCI tenancy → live framework
+- **Client-agnostic** — any MCP client (Claude Code, Codex, Cursor, etc.) works as a pass-through
 
 **What gates integration testing (ask once, when ready):**
 1. Oracle 23ai ADB (dev instance)
@@ -143,10 +150,13 @@ python -m framework.cli.kb_cli promote framework/persona_builders/ops-eng.yaml -
 
 (none)
 
-## ✅ Done (Phases 0-3)
+## ✅ Done (Phases 0-3 + V3 design)
 - DECISIONs 001–004 filed and decided
 - ADRs 001–018 authored (including amendments to 006/007/011)
 - PDD V2 (~700 lines) + Executive Brief
+- **PDD V3** (~1550 lines, 4 revisions) — 2 MCP tools, 6 REST endpoint groups, 15-state authorSkill session, REVIEW_SCHEMA quality gate, session persistence/resume, camelCase naming, client-agnostic
+- **OpenAPI 3.1 spec** (framework/deploy/openapi.yaml, 1302 lines) — authoritative REST contract
+- **OCI deployment runbook** (docs/wiki/engineering/oci-deployment-runbook.md, 1676 lines) — empty OCI tenancy → live framework
 - PM wiki ingest (project-overview, personas, 6 module pages)
 - Configuration plane (dev/staging/prod yamls, adapter configs, routing thresholds)
 - Full adapter suite (Confluence native+MCP, Jira native+MCP, Git, UDAP/Fleet, code wiki builder)
@@ -158,7 +168,7 @@ python -m framework.cli.kb_cli promote framework/persona_builders/ops-eng.yaml -
 - Ingestion pipeline (change_detection, webhook_router, scheduler, confluence_wiki_ingest)
 - Eval harness (runner, recall+latency+cost+faithfulness metrics, markdown+JSON reports)
 - FastAPI MCP server with all retrieval tools registered
-- Skill-builder (intent_to_artifacts, interactive conversation.py state machine, validate_links)
+- Skill-builder (intent_to_artifacts, conversation.py 15-state machine with REVIEW_SCHEMA + post-commit pipeline + session persistence, validate_links)
 - Workflow runtime (executor, skill_registry, WorkflowMCPTool)
 - 5 renderers (markdown, docx, pptx, email, slack) + 5 deliverers (email, filesystem, object_storage, slack, sync_return)
 - 3 workflow skills (ops_eng.incident_summary, pm.release_brief, tpm.weekly_exec_review)
