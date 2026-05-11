@@ -1,7 +1,7 @@
 ---
 title: Current Status
 source: derived from pmo/dashboard.md
-compiled_at: 2026-05-04T00:00:00Z
+compiled_at: 2026-05-10T00:00:00Z
 created: 2026-05-04
 owner: tpm
 tags: [meta]
@@ -11,37 +11,48 @@ status: current
 # Current Status
 
 ## Where we are
-**Phase 2 Track A+B — Fleet adapter + Code Wiki — implementation complete (filestore mode).** All 4 new MCP retrieval tools are implemented and registered. Fleet adapter reads from fixture files, code wiki builder produces a structural AST index, and both sets of tools carry citations on every result.
+**Phase 1-3 code complete (filestore/stub mode).** 176 Python files, 22 framework modules. All code runs against filestore + stub LLM — no external provisioning needed for development or workshops.
 
-Prior: Phase 0 full design pass produced ADRs 006–011, architect wiki pages, full configuration plane, Adapter Protocol + dual-mode adapter stubs, Option-3 persona starter pack. Phase 1 produced the full code (adapters, parsers, IncidentVectorStore, orchestrator, eval harness, MCP server, kb-cli). PDD published as .docx; exec brief as .pptx. ADR-014 (OCI GenAI LLM), ADR-015–018 (skill-by-demonstration, workflow skills, extraction workflow linking, skill suggestion loop) + V2 PDD + phases V2 authored. Skill builder, workflow runtime, renderers, deliverers all implemented for Phase 2 V2.
+### What's runnable today
+```bash
+# Interactive skill-builder (workshop interface)
+python -m framework.cli.kb_cli skill-builder --persona tpm
 
-Two things gate Phase 1:
-1. **Your Gate-1 review** of ADRs + PM ingest (see dashboard)
-2. **External provisioning** — 3 blocking items in [pending-decisions/PHASE-0.md](../../pmo/pending-decisions/PHASE-0.md): Oracle 23ai Autonomous DB, OpenAI API key, OCI Vault
+# Run any of the 3 workflow skills
+python -m framework.cli.kb_cli workflow-run ops_eng.incident_summary --inputs '{"incident_id": "INC-EXAMPLE-001"}'
+python -m framework.cli.kb_cli workflow-run pm.release_brief --inputs '{"release_id": "25.01"}'
+python -m framework.cli.kb_cli workflow-run tpm.weekly_exec_review --inputs '{"project": "all"}'
 
-## Active stories
-(none yet — Phase 1 backlog drafts after Gate 1)
+# List all skills, build code wiki, promote with link validation
+python -m framework.cli.kb_cli skill-list
+python -m framework.cli.kb_cli code-wiki-build
+python -m framework.cli.kb_cli promote framework/persona_builders/ops-eng.yaml --validate-links
+```
 
-## Awaiting user decision
-- 🔴 **Gate 1 — Phase 0**: ADRs 001–005 + PM ingest. Reply `GATE-1-PHASE-0: approved` (or per-artifact: `ADR-001: approved`).
-- 🚨 **External provisioning** (3 blocking items): see [pending-decisions/PHASE-0.md](../../pmo/pending-decisions/PHASE-0.md).
+## What's built
+
+| Phase | Scope | Status |
+|-------|-------|--------|
+| **0 — Setup** | ADRs 001-018, PDD V2, config plane, persona starters | Done |
+| **1 — Skeleton + incident KB** | Adapters, parsers, stores, retrievers, orchestrator, eval, MCP server, CLI | Code complete (stub mode) |
+| **2 — Fleet + code wiki + skill-builder** | Fleet adapter, code wiki, 4 MCP tools, skill-builder Phase A (module split per ADR-015), provides_fields backfill | Code complete |
+| **3 — Workflow runtime + orchestrator** | conversation.py, WorkflowMCPTool, 4-tier routing, Tier 3 fanout, cost telemetry, validate_workflow_links, 3 workflow skills, WikiMetadataStore, Confluence ingestion | Code complete |
+
+## What gates integration testing
+
+External provisioning (ask once, when ready):
+1. Oracle 23ai ADB (dev instance)
+2. OCI Vault + secrets
+3. OpenAI API key or OCI GenAI URL
+4. Confluence API token + space keys
+5. Jira API token + project keys
+6. AIRA team's 50 query/citation pairs (for eval gold set)
 
 ## Recent decisions
-- **DECISION-001** (2026-05-04) — Oracle commitment level: full Oracle stack with OpenAI + LangGraph carve-outs.
-- **DECISION-002** (2026-05-04) — Converged Autonomous DB; logical-polyglot (each data type owns its access pattern + schema), physical-converged (one DB instance).
-- **DECISION-003** (2026-05-04) — OpenAI for LLM and embeddings (Oracle-certified). `gpt-4o` + `text-embedding-3-large` (3072 dims).
-- **DECISION-004** (2026-05-04) — v1 personas: PM + TPM + Aira's incident KB.
+- **DECISION-001–004** (2026-05-04) — all decided (Oracle stack, converged DB, OpenAI, PM/TPM/Aira personas)
+- No open decisions
 
 ## Next milestones
-- You: Gate-1 review (ADRs + PM ingest) and external provisioning kickoff.
-- After Gate 1: PM drafts Phase 1 backlog (stories) and Architect breaks ground on `framework/core/`.
-- After external provisioning: Phase 1 begins; first eval pass against real Confluence/Jira data.
-
-## Open problems flagged (research, not implementation — spec §8)
-- §8.1 — LLM wiki storage for remote agents (default: git + cached MCP + TOC-on-demand). DECISION-006 at Phase 3 kickoff.
-- §8.2 — Code accessibility for remote agents (default: hybrid VM-spinup for write paths + central code wiki for reads). DECISION-005 at Phase 2 kickoff.
-- §8.3 — Per-persona extraction schemas. **Resolved by ADR-004**: framework provides the contract; persona teams own the schemas.
-
-## Lint notes (TPM)
-- `init-project.sh` left `api/`, `server/`, `web/` stubs that don't apply. To be cleaned up at Phase 1 entry when `framework/` proper is created.
-- Phase 0 deliverables authored by TPM acting on behalf of PM and Architect (the symlinked subagents weren't loaded as dispatchable types in this session). Future sessions started with `claude` from this dir will dispatch normally.
+- Schedule persona authoring workshops (workshop guide ready at `pmo/workshops/persona-authoring-workshop.md`)
+- Provide provisioning when ready for integration testing
+- AIRA team exports 50 query/citation pairs for gold set

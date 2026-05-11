@@ -52,7 +52,7 @@ def _extract_classes(tree: ast.Module) -> list[dict]:
             continue
         methods = []
         for item in node.body:
-            if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef):
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 methods.append({
                     "name": item.name,
                     "signature": _func_signature(item),
@@ -73,7 +73,7 @@ def _extract_classes(tree: ast.Module) -> list[dict]:
 def _extract_functions(tree: ast.Module) -> list[dict]:
     funcs = []
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             funcs.append({
                 "name": node.name,
                 "signature": _func_signature(node),
@@ -224,7 +224,8 @@ class CodeWikiBuilder:
                     "module_path": record["module_path"],
                     "file_path": record["file_path"],
                     "class_names": [c["name"] for c in record["classes"]],
-                    "function_names": [f["name"] for f in record["functions"]],
+                    "function_names": [f["name"] for f in record["functions"]]
+                        + [m["name"] for c in record["classes"] for m in c["methods"]],
                     "citation_url": f"code://{record['file_path']}",
                 },
             )

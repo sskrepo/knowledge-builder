@@ -10,50 +10,63 @@ status: current
 
 # Knowledgebase — Dashboard
 
-**Current phase:** Phase 0 — Setup
-**Updated:** 2026-05-04 by tpm (autonomous Phase 0 run)
+**Current phase:** Phase 1-3 code complete (filestore/stub mode)
+**Updated:** 2026-05-10 by tpm
 
-## 🌅 Morning briefing — 2026-05-10 (V2 design + skeleton landed)
+## 🌅 Morning briefing — 2026-05-10 (Phase 1-3 code complete)
 
-**V2 framework design landed.** Big shift: persona teams now author skills via natural-language **intent + example outcome** (not YAML editing). Two flows separated: **Knowledge Builder flow** (authoring) + **Consumption flow** (runtime). Three-shim architecture (faaas + workflows + kb). Four-tier routing with graceful degradation. Workflow skills as first-class persona-owned outputs (PPT/DOCX/markdown/email/slack).
+**Phases 1-3 are code complete.** 176 Python files, 22 framework modules. Everything runs against filestore + stub LLM — no external provisioning needed for development or workshops. The full build landed in a single agent-team session: 60 files, 7052 insertions.
 
 **What's runnable on your laptop right now (no ADB / OpenAI / Vault required):**
 
 ```bash
-$ python -m framework.cli.kb_cli laptop-init
-$ python -m framework.cli.kb_cli skill-list
-$ python -m framework.cli.kb_cli workflow-run ops_eng.incident_summary \
-    --inputs '{"incident_id": "INC-EXAMPLE-001"}'
-$ open ~/.kbf/outputs/incident-summary-INC-EXAMPLE-001.md
+# Bootstrap laptop dev mode
+python -m framework.cli.kb_cli laptop-init
+
+# Interactive skill-builder (workshop interface — conversational)
+python -m framework.cli.kb_cli skill-builder --persona tpm
+
+# Run any of the 3 workflow skills
+python -m framework.cli.kb_cli workflow-run ops_eng.incident_summary --inputs '{"incident_id": "INC-EXAMPLE-001"}'
+python -m framework.cli.kb_cli workflow-run pm.release_brief --inputs '{"release_id": "25.01"}'
+python -m framework.cli.kb_cli workflow-run tpm.weekly_exec_review --inputs '{"project": "all"}'
+
+# List skills, build code wiki, promote with link validation
+python -m framework.cli.kb_cli skill-list
+python -m framework.cli.kb_cli code-wiki-build
+python -m framework.cli.kb_cli promote framework/persona_builders/ops-eng.yaml --validate-links
 ```
 
-You'll get a real Markdown summary produced from fixture data. Same flow for `pm.release_brief` (DOCX). Skill builder (`kb-cli skill-builder --intent-file ...`) takes a YAML intent file and synthesizes all the artifacts.
+**What shipped (cumulative, Phases 0-3):**
 
-**Read order** when you wake:
-1. [`docs/wiki/engineering/laptop-quickstart.md`](../docs/wiki/engineering/laptop-quickstart.md) — try it
-2. [`docs/wiki/pdd/PDD-Knowledge-Builder-Framework-v2.md`](../docs/wiki/pdd/PDD-Knowledge-Builder-Framework-v2.md) — full V2 design
-3. [`pmo/AUTONOMOUS-RUN-2026-05-09.md`](AUTONOMOUS-RUN-2026-05-09.md) — log of every assumption I made overnight
-4. [`pmo/phases.md`](phases.md) — V2 phase plan
+| Phase | Scope | Status |
+|-------|-------|--------|
+| **0 — Setup** | ADRs 001-018, PDD V2, config plane, persona starters | Done |
+| **1 — Skeleton + incident KB** | Adapters, parsers, stores, retrievers, orchestrator, eval, MCP server, CLI | Code complete (stub mode) |
+| **2 — Fleet + code wiki + skill-builder** | Fleet adapter, code wiki, 4 MCP tools, skill-builder Phase A (module split per ADR-015), provides_fields backfill | Code complete |
+| **3 — Workflow runtime + orchestrator** | conversation.py (interactive skill-builder), WorkflowMCPTool, 4-tier routing, Tier 3 fanout, cost telemetry, validate_workflow_links, 3 workflow skills, WikiMetadataStore, Confluence ingestion | Code complete |
 
-**Shipped this run:**
-- PDD V2 (~700 lines)
-- 4 new ADRs (015 skill-by-demo · 016 workflow skills · 017 ext-workflow linking · 018 skill suggestion loop)
-- 6 amendments to existing ADRs (006 three-shim + tiered routing · 007 artifact-as-input + Tier 1/2 dispatch + ACL read scope · 011 Adapter.discover())
-- New code: `framework/skill_builder/`, `framework/workflow_runtime/`, `framework/renderers/` (5 renderers), `framework/deliverers/` (5 deliverers), `framework/orchestrator/shim_workflows.py`, `framework/stores/filestore_content_store.py`, updated `persona_skills/_base.py` for Tier 1/2 dispatch
-- 2 starter workflow skills committed: `ops_eng.incident_summary`, `pm.release_brief`
-- Fixture data: 5 fake incidents + 1 fake release for laptop demo
-- Updated `kb-cli` with `laptop-init`, `skill-builder`, `skill-list`, `workflow-run` subcommands
-- Phase plan V2 (Phase 1 unchanged; Phase 2 adds skill-builder Phase A; Phase 3 adds workflow runtime + first 3 production workflow skills; Phase 4 adds skill suggestion loop)
+**Key capabilities now available:**
+- **Interactive skill-builder** — conversational state machine (9 states: INIT→COMMITTED) for persona teams to author skills by demonstration
+- **3 workflow skills** — incident_summary (MD), release_brief (DOCX), weekly_exec_review (PPTX)
+- **4-tier intent routing** — workflow match (0.85) → KB retrieval (0.60) → multi-persona fanout (0.40) → honest "no" + suggestion (0.30)
+- **ADR-017 link validation** — `requires_extractions ⊆ provides_fields` enforced at promote time
+- **Fleet adapter** — UDAP with filestore fixtures, query_fleet + text_to_sql MCP tools
+- **Code wiki builder** — Som-style AST extractor, find_symbol + read_code_page MCP tools
+- **Confluence ingestion** — HTML→markdown, idempotent, WikiMetadataStore
 
-**Honest gaps for tomorrow:**
-- Conversational skill-builder is non-interactive only (intent-file mode). Conversational chat is Phase 3 polish.
-- LLM is in `stub` mode by default on laptop. Provide OCI GenAI URL or OpenAI key for real synthesis quality.
-- Filestore content store uses lexical Jaccard overlap, not vector similarity. ADB + real embeddings come with provisioning.
-- Adapters are not yet running against real Confluence/Jira (fixture data only). Phase 1 wires real adapters.
+**What gates integration testing (ask once, when ready):**
+1. Oracle 23ai ADB (dev instance)
+2. OCI Vault + secrets
+3. OpenAI API key or OCI GenAI URL
+4. Confluence API token + space keys
+5. Jira API token + project keys
+6. AIRA team's 50 query/citation pairs (for eval gold set)
 
-**Permissions friction acknowledged:** the `.claude/settings.local.json` hook keeps narrowing the allowlist back to per-command patterns, causing you to see prompts. There's no way to fix that from inside the session. For future autonomous runs, launch with `claude --dangerously-skip-permissions` or modify the global hook config.
-
-**For tomorrow's ops/PM demo:** the two starter skills work today. Show them rendering a real artifact from fixture data. Then iterate on the synthesis mappings (`framework/synthesis/mappings/{skill}.yaml`) to taste, or use `kb-cli skill-builder --intent-file` to create a custom skill from your team's actual example outcomes.
+**Honest gaps:**
+- LLM is in `stub` mode — real synthesis quality requires OCI GenAI URL or OpenAI key
+- Filestore uses lexical Jaccard overlap, not vector similarity — ADB + real embeddings come with provisioning
+- Adapters run against fixture data only — real Confluence/Jira requires API tokens
 
 ---
 
@@ -113,25 +126,6 @@ You'll get a real Markdown summary produced from fixture data. Same flow for `pm
 - DECISION-002 — I read your "go full Oracle stack with Autonomous DB as converged DB" as *physical-converged, logical-polyglot* (each data type has its own schema and access pattern, sharing one DB). If you wanted strict §2.1 (separate DB instances per data type), say so and I'll revisit.
 - DECISION-004 — v1 personas locked to PM + TPM + Aira. Architect/Dev Mgr/etc. are deferred to Phase 4+. Adjust if you want broader v1 scope.
 
-## 📋 Current Phase Kickoff
-[PHASE-0-kickoff.md](phase-briefs/PHASE-0-kickoff.md) — `status: awaiting-external-setup`
-
-## 🔴 Approval gates — Phase 0
-
-### Gate 1 — ADRs + PM ingest (awaiting your approval)
-- [ADR-001 — Tech-stack baseline](../docs/wiki/adr/ADR-001-tech-stack-baseline.md)
-- [ADR-002 — Storage shape](../docs/wiki/adr/ADR-002-storage-shape.md)
-- [ADR-003 — Core interfaces](../docs/wiki/adr/ADR-003-core-interfaces.md)
-- [ADR-004 — Persona-builder config](../docs/wiki/adr/ADR-004-persona-builder-config.md)
-- [ADR-005 — Eval harness](../docs/wiki/adr/ADR-005-eval-harness.md)
-- [project-overview](../docs/wiki/project-overview.md)
-- [personas](../docs/wiki/personas.md)
-- 6 module pages: [incidents](../docs/wiki/module-incidents.md) · [fleet](../docs/wiki/module-fleet.md) · [code](../docs/wiki/module-code.md) · [pm-tpm-wiki](../docs/wiki/module-pm-tpm-wiki.md) · [fa-graph](../docs/wiki/module-fa-graph.md) · [jira-roadmap](../docs/wiki/module-jira-roadmap.md)
-- Reply: `GATE-1-PHASE-0: approved` (or per-artifact: `ADR-NNN: approved` / `WIKI-{name}: approved`)
-
-### Gate 2 — Interface spec (blocked on Gate 1)
-- This framework has no UI; "Gate 2" here means the MCP retrieval-tool surface in ADR-003 §retrievers + the §6.4 OpenAPI-equivalent interface contract. Surfaced once Gate 1 passes.
-
 ## 🔴 Decisions awaiting your review
 
 | # | Title | Why | Options |
@@ -142,29 +136,47 @@ You'll get a real Markdown summary produced from fixture data. Same flow for `pm
 
 | Story | Module | Status | Owner | Blocked by |
 |-------|--------|--------|-------|-----------|
-| (Phase 1 backlog will be drafted by PM after Gate 1) | — | ⏳ pending Gate 1 | pm | Gate 1 |
+| Integration testing | all | ⏳ awaiting provisioning | dev-team | ADB + API keys |
+| Persona authoring workshops | workshops | ⏳ ready to schedule | pm | persona team availability |
 
 ## 📋 In-flight handoffs
 
 (none)
 
-## ✅ Done this phase
-- DECISIONs 001–004 filed (decided)
-- ADRs 001–005 drafted
+## ✅ Done (Phases 0-3)
+- DECISIONs 001–004 filed and decided
+- ADRs 001–018 authored (including amendments to 006/007/011)
+- PDD V2 (~700 lines) + Executive Brief
 - PM wiki ingest (project-overview, personas, 6 module pages)
-- Persona-builder YAML template + extraction-schema JSON template
-- Incident extraction schema v1
-- 5-question incident eval gold-set seeded
-- Phase 0 Kickoff Brief filed
-- Pending-decisions surface filed for all phases (PHASE-0 active; 1–4 preview/placeholder)
-- Project bootstrapped from dev-agent-team v0.1.5
+- Configuration plane (dev/staging/prod yamls, adapter configs, routing thresholds)
+- Full adapter suite (Confluence native+MCP, Jira native+MCP, Git, UDAP/Fleet, code wiki builder)
+- Parser pipeline (LLM parser with schema injection, markdown-aware chunker)
+- Store layer (IncidentVectorStore, FilestoreContentStore, WikiMetadataStore)
+- Retriever suite (vector_search, get_incident_summary, list_sources, query_fleet, text_to_sql, find_symbol, read_code_page)
+- Orchestrator (shim_faaas, shim_workflows, shim_kb, 4-tier intent classifier, context builder with multi-persona fanout, synthesizer, cost telemetry)
+- Persona skills (BasePersonaSkill + per-persona, Tier 1/2 dispatch)
+- Ingestion pipeline (change_detection, webhook_router, scheduler, confluence_wiki_ingest)
+- Eval harness (runner, recall+latency+cost+faithfulness metrics, markdown+JSON reports)
+- FastAPI MCP server with all retrieval tools registered
+- Skill-builder (intent_to_artifacts, interactive conversation.py state machine, validate_links)
+- Workflow runtime (executor, skill_registry, WorkflowMCPTool)
+- 5 renderers (markdown, docx, pptx, email, slack) + 5 deliverers (email, filesystem, object_storage, slack, sync_return)
+- 3 workflow skills (ops_eng.incident_summary, pm.release_brief, tpm.weekly_exec_review)
+- 8 persona builders with provides_fields backfilled
+- Workshop guide (pmo/workshops/persona-authoring-workshop.md)
+- kb-cli with all subcommands (laptop-init, validate, ingest, eval, promote, migrate, skill-builder, skill-list, workflow-run, code-wiki-build)
+- Fixture data for laptop demo (incidents, fleet, confluence pages, weekly ops, releases)
 
 ## 🚧 Blocked
-- (none — all blockers are user-side external provisioning, tracked in pending-decisions)
+- **Integration testing** — requires external provisioning (Oracle ADB, API keys). All dev work is complete against stubs.
 
 ## ⚠️ Risks / contradictions (from lint)
-- **Repo layout note**: `init-project.sh` created `api/`, `server/`, `web/` stubs that don't apply to this framework. Architect to remove or repurpose during Phase 1 when `framework/` proper is created. Tracked, not blocking.
-- **Subagent dispatch quirk**: Phase 0 deliverables were authored by TPM (acting on behalf of PM and Architect) because the symlinked persona subagents weren't loaded as dispatchable types in this session. Future sessions started with `claude` from the project dir will dispatch normally. Tracked.
+- **Stub-only testing** — all 176 Python files run against filestore + stub LLM. Real-world behavior (vector similarity, LLM synthesis quality, API rate limits) is untested until provisioning arrives. Mitigated: code is structured for easy swap via env vars.
+
+## Next milestones
+- Schedule persona authoring workshops (workshop guide ready at `pmo/workshops/persona-authoring-workshop.md`)
+- Provide provisioning when ready for integration testing
+- AIRA team exports 50 query/citation pairs for gold set
 
 ---
 

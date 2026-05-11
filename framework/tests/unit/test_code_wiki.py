@@ -214,7 +214,7 @@ def test_idempotent_rebuild(builder, tmp_store):
 def store_with_index(tmp_store):
     from framework.adapters.code_wiki_builder import CodeWikiBuilder
     b = CodeWikiBuilder(
-        repo_path=FRAMEWORK_DIR / "framework" / "adapters",
+        repo_path=FRAMEWORK_DIR,
         store_root=tmp_store,
     )
     b.run()
