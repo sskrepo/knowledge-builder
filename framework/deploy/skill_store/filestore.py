@@ -1,13 +1,16 @@
-"""FilestoreSkillStore — local filesystem implementation (laptop fallback).
+"""FilestoreSkillStore — filesystem-backed implementation for tests and CI.
 
-Wraps the original Path.write_text() logic from SkillBuilderConversation._write_artifacts().
-Used when no ADB pool is available (KBF_ENV=laptop without ADB, or test mode).
+NOTE: Production and laptop both use AdbSkillStore. This class exists only
+for unit tests that need a concrete SkillStore without a real DB connection.
+Do NOT use build_skill_store() with pool=None — it raises ValueError.
+Instantiate FilestoreSkillStore directly in tests.
 
 Layout under REPO_ROOT:
-  framework/workflow_skills/{persona}/{skill_name}.yaml          (workflow_skill)
-  framework/persona_builders/{persona}.yaml.new_kb               (persona_builder_delta)
-  eval/gold_sets/{persona}-{skill_name}-extraction.jsonl         (eval_extraction)
-  eval/gold_sets/{persona}-{skill_name}-workflow.jsonl           (eval_workflow)
+  framework/workflow_skills/{persona}/{skill_name}.yaml            (workflow_skill)
+  framework/persona_builders/{persona}.yaml.new_kb                 (persona_builder_delta)
+  eval/gold_sets/{persona}-{skill_name}-extraction.jsonl           (eval_extraction)
+  eval/gold_sets/{persona}-{skill_name}-workflow.jsonl             (eval_workflow)
+  framework/parsers/schemas/{persona}/{skill_name}/v1.json         (extraction_schema)
 
 read_artifact loads the file back from disk.
 promote is a no-op in filestore mode (no status column).
@@ -33,6 +36,7 @@ _REL_PATH_TEMPLATES: dict[str, str] = {
     "persona_builder_delta":  "framework/persona_builders/{persona}.yaml.new_kb",
     "eval_extraction":        "eval/gold_sets/{persona}-{skill_name}-extraction.jsonl",
     "eval_workflow":          "eval/gold_sets/{persona}-{skill_name}-workflow.jsonl",
+    "extraction_schema":      "framework/parsers/schemas/{persona}/{skill_name}/v1.json",
 }
 
 

@@ -88,37 +88,25 @@ def _load_app():
 
         app.state.consumer_registry = ConsumerRegistry(CONSUMER_MANIFESTS_DIR)
 
-        # Laptop mode: create ADB pool with bastion auto-reconnect (ADR-019).
-        # On DB error, RetryWrapper calls adb-connect.sh and retries transparently.
-        adb_pool = None
-        kbf_env = os.environ.get("KBF_ENV", "")
-        if kbf_env == "laptop":
-            log.info("laptop mode: initialising ADB pool (bastion auto-reconnect)…")
-            adb_pool = _init_laptop_adb_pool(REPO_ROOT)
-            if adb_pool is not None:
-                log.info(
-                    "laptop mode: ADB pool ready — authorSkill sessions backed by ADB"
-                )
-            else:
-                log.warning(
-                    "laptop mode: ADB pool unavailable — falling back to filestore sessions"
-                )
+        # ADB pool — required for all environments (laptop, staging, production).
+        # ADB is always available; there is no filestore fallback.
+        # For laptop: bastion auto-reconnect via adb-connect.sh (ADR-019).
+        # For staging/prod: direct wallet connection (no bastion).
+        # Raises RuntimeError on pool init failure — server must not start without DB.
+        kbf_env = os.environ.get("KBF_ENV", "laptop")
+        log.info("initialising ADB pool (env=%s)…", kbf_env)
+        adb_pool = _init_adb_pool(REPO_ROOT, kbf_env)
+        log.info("ADB pool ready (env=%s)", kbf_env)
         app.state.adb_pool = adb_pool
 
-        # build_session_store auto-selects ADB when pool is not None
+        # All stores are ADB-backed — no filestore fallback.
+        from .error_store import AdbErrorStore
+        from .cost_store import AdbCostStore
         app.state.session_store = build_session_store(pool=adb_pool)
         app.state.artifact_store = build_artifact_store(pool=adb_pool, env=kbf_env)
         app.state.skill_store = build_skill_store(pool=adb_pool, env=kbf_env)
-
-        # Error + cost stores: ADB-backed when pool is available, else filesystem
-        if adb_pool:
-            from .error_store import AdbErrorStore
-            from .cost_store import AdbCostStore
-            app.state.error_store = AdbErrorStore(adb_pool, store_root)
-            app.state.cost_store = AdbCostStore(adb_pool, store_root)
-        else:
-            app.state.error_store = ErrorStore(store_root)
-            app.state.cost_store = CostStore(store_root)
+        app.state.error_store = AdbErrorStore(adb_pool, store_root)
+        app.state.cost_store = AdbCostStore(adb_pool, store_root)
 
         app.state.startup_time = time.time()
 
@@ -126,10 +114,9 @@ def _load_app():
         log.info("loading shim_faaas…")
         state["shim_faaas"] = ShimFaaas(SHIM_FAAAS_PATH)
         state["shim_kb"] = ShimKb(PERSONA_BUILDERS_DIR)
-        # Laptop mode: apply auth overrides from laptop.yaml [llm] section
+        # Apply LLM overrides from env-specific config (laptop.yaml [llm] section etc.)
         llm_kwargs: dict = {}
-        if kbf_env == "laptop" and adb_pool is not None:
-            # _init_laptop_adb_pool already read the YAML — re-read llm section
+        if kbf_env == "laptop":
             llm_kwargs = _load_laptop_llm_overrides(REPO_ROOT)
         state["llm"] = LLMClient(**llm_kwargs)
         app.state.llm = state["llm"]
@@ -353,7 +340,7 @@ def _serialize(obj):
 
 
 # ---------------------------------------------------------------------------
-# Laptop-mode ADB pool helpers
+# ADB pool helpers
 # ---------------------------------------------------------------------------
 
 def _resolve_secret(ref: str) -> str:
@@ -371,6 +358,99 @@ def _resolve_secret(ref: str) -> str:
             log.warning("mcp_server: env var %s is not set (required for ADB auth)", var)
         return val
     return ref  # literal value — not recommended but supported
+
+
+def _init_adb_pool(repo_root: Path, kbf_env: str):
+    """Initialise and return an oracledb connection pool for any environment.
+
+    Reads the env-specific config YAML (laptop.yaml, staging.yaml, prod.yaml),
+    resolves ``env://`` secret references, and calls ``create_adb_pool``.
+
+    For laptop: includes bastion auto-reconnect config (ADR-019).
+    For staging/prod: direct wallet connection (no bastion).
+
+    Raises:
+        RuntimeError: if pool initialisation fails for any reason.
+            ADB is always available — there is no filestore fallback.
+    """
+    cfg_name = {
+        "laptop":     "laptop.yaml",
+        "staging":    "staging.yaml",
+        "production": "prod.yaml",
+    }.get(kbf_env, f"{kbf_env}.yaml")
+    cfg_path = repo_root / "framework" / "config" / cfg_name
+
+    if not cfg_path.exists():
+        raise RuntimeError(
+            f"ADB pool init failed: config file {cfg_path} not found "
+            f"(KBF_ENV={kbf_env!r}). Cannot start without ADB."
+        )
+
+    try:
+        import yaml  # type: ignore[import]
+    except ImportError as exc:
+        raise RuntimeError(
+            "ADB pool init failed: PyYAML not installed. "
+            "Run: pip install pyyaml"
+        ) from exc
+
+    try:
+        with open(cfg_path) as fh:
+            raw = yaml.safe_load(fh)
+
+        adb_raw = raw.get("adb", {})
+        bastion_raw = raw.get("bastion", {})
+
+        admin_password = _resolve_secret(
+            adb_raw.get("admin_password_secret") or adb_raw.get("password_secret", "")
+        )
+        wallet_password = _resolve_secret(
+            adb_raw.get("wallet_password_secret", "")
+        )
+        wallet_path = str(Path(adb_raw.get("wallet_path", "")).expanduser())
+
+        pool_config: dict = {
+            "deployment_mode": raw.get("deployment_mode", kbf_env),
+            "adb": {
+                "service_name": adb_raw.get("dsn") or adb_raw.get("service_name", ""),
+                "wallet_path": wallet_path,
+                "user": adb_raw.get("admin_user") or adb_raw.get("user", "Admin"),
+                "password": admin_password,
+                "wallet_password": wallet_password,
+            },
+        }
+
+        if bastion_raw:
+            pool_config["bastion"] = {
+                "bastion_ocid":            bastion_raw.get("bastion_ocid", ""),
+                "target_db_host":          bastion_raw.get("target_db_host", ""),
+                "target_db_port":          bastion_raw.get("target_db_port", 1522),
+                "local_tunnel_port":       bastion_raw.get("local_tunnel_port", 1522),
+                "ssh_key_path":            bastion_raw.get("ssh_key_path", "~/.ssh/id_rsa"),
+                "session_ttl_seconds":     bastion_raw.get("session_ttl_seconds", 10800),
+                "oci_cli_path":            bastion_raw.get("oci_cli_path", "/opt/homebrew/bin/oci"),
+                "connect_timeout_seconds": bastion_raw.get("connect_timeout_seconds", 30),
+                "max_reconnect_attempts":  bastion_raw.get("max_reconnect_attempts", 3),
+                "script_path":             bastion_raw.get("script_path", ""),
+                "oci_profile":             bastion_raw.get("oci_profile", ""),
+            }
+
+        from ..core.adb_pool import create_adb_pool
+        pool = create_adb_pool(pool_config)
+        if pool is None:
+            raise RuntimeError(
+                f"create_adb_pool returned None for env={kbf_env!r} — "
+                "oracledb unavailable or pool config invalid. Cannot start without ADB."
+            )
+        return pool
+
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(
+            f"ADB pool init failed for env={kbf_env!r} "
+            f"({type(exc).__name__}: {exc}). Cannot start without ADB."
+        ) from exc
 
 
 def _load_laptop_llm_overrides(repo_root: Path) -> dict:
@@ -401,88 +481,6 @@ def _load_laptop_llm_overrides(repo_root: Path) -> dict:
     except Exception as exc:
         log.warning("laptop mode: could not load llm overrides (%s) — using defaults", exc)
         return {}
-
-
-def _init_laptop_adb_pool(repo_root: Path):
-    """Load ``framework/config/laptop.yaml``, resolve secrets, and create an ADB pool.
-
-    Returns:
-        A ``RetryWrapper``-wrapped oracledb pool (with bastion auto-reconnect),
-        or ``None`` if laptop.yaml is missing, PyYAML is absent, oracledb is
-        unavailable, or initialisation fails for any reason.
-    """
-    laptop_cfg_path = repo_root / "framework" / "config" / "laptop.yaml"
-    if not laptop_cfg_path.exists():
-        log.warning(
-            "laptop mode: %s not found — ADB pool disabled (filestore sessions active)",
-            laptop_cfg_path,
-        )
-        return None
-
-    try:
-        import yaml  # type: ignore[import]
-    except ImportError:
-        log.warning("laptop mode: PyYAML not installed — ADB pool disabled")
-        return None
-
-    try:
-        with open(laptop_cfg_path) as fh:
-            raw = yaml.safe_load(fh)
-
-        adb_raw = raw.get("adb", {})
-        bastion_raw = raw.get("bastion", {})
-
-        # Resolve env:// secret references
-        admin_password = _resolve_secret(
-            adb_raw.get("admin_password_secret") or adb_raw.get("password_secret", "")
-        )
-        wallet_password = _resolve_secret(
-            adb_raw.get("wallet_password_secret", "")
-        )
-        wallet_path = str(Path(adb_raw.get("wallet_path", "")).expanduser())
-
-        pool_config: dict = {
-            "deployment_mode": raw.get("deployment_mode", "laptop"),
-            "adb": {
-                # laptop.yaml uses admin_user/dsn; fall back to user/service_name
-                "service_name": adb_raw.get("dsn") or adb_raw.get("service_name", ""),
-                "wallet_path": wallet_path,
-                "user": adb_raw.get("admin_user") or adb_raw.get("user", "Admin"),
-                "password": admin_password,
-                "wallet_password": wallet_password,
-            },
-        }
-
-        if bastion_raw:
-            pool_config["bastion"] = {
-                "bastion_ocid":          bastion_raw.get("bastion_ocid", ""),
-                "target_db_host":        bastion_raw.get("target_db_host", ""),
-                "target_db_port":        bastion_raw.get("target_db_port", 1522),
-                "local_tunnel_port":     bastion_raw.get("local_tunnel_port", 1522),
-                "ssh_key_path":          bastion_raw.get("ssh_key_path", "~/.ssh/id_rsa"),
-                "session_ttl_seconds":   bastion_raw.get("session_ttl_seconds", 10800),
-                "oci_cli_path":          bastion_raw.get("oci_cli_path", "/opt/homebrew/bin/oci"),
-                "connect_timeout_seconds": bastion_raw.get("connect_timeout_seconds", 30),
-                "max_reconnect_attempts":  bastion_raw.get("max_reconnect_attempts", 3),
-                # adb-connect.sh delegation (new in ADR-019)
-                "script_path":           bastion_raw.get("script_path", ""),
-                "oci_profile":           bastion_raw.get("oci_profile", ""),
-            }
-
-        from ..core.adb_pool import create_adb_pool
-        pool = create_adb_pool(pool_config)
-        if pool is None:
-            log.warning("laptop mode: create_adb_pool returned None (oracledb unavailable?)")
-        return pool
-
-    except Exception as exc:
-        log.warning(
-            "laptop mode: ADB pool init failed (%s: %s) — filestore sessions active",
-            type(exc).__name__,
-            exc,
-            exc_info=True,
-        )
-        return None
 
 
 def _load_adapter_base_url(adapter_yaml_path: Path) -> str:

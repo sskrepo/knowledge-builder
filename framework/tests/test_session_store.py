@@ -414,32 +414,22 @@ def test_session_store_is_abstract() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test: factory selects filestore by default
+# Test: factory always requires a pool (ADB is always available)
 # ---------------------------------------------------------------------------
 
 
-def test_factory_returns_filestore_by_default(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.delenv("KBF_STORE_BACKEND", raising=False)
-    monkeypatch.setenv("KBF_STORE_ROOT", str(tmp_path))
-
-    result = build_session_store(pool=None)
-    assert isinstance(result, FilestoreSessionStore)
+def test_factory_raises_when_pool_is_none() -> None:
+    """ADB is always available — factory must not fall back to filestore."""
+    with pytest.raises(ValueError, match="pool is required"):
+        build_session_store(pool=None)
 
 
-def test_factory_returns_filestore_when_explicitly_set(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("KBF_STORE_BACKEND", "filestore")
-    monkeypatch.setenv("KBF_STORE_ROOT", str(tmp_path))
-
-    result = build_session_store(pool=None)
-    assert isinstance(result, FilestoreSessionStore)
-
-
-def test_factory_returns_adb_store_when_set(monkeypatch) -> None:
+def test_factory_returns_adb_store_when_pool_provided() -> None:
+    from unittest.mock import MagicMock
     from framework.deploy.session.adb_store import AdbSessionStore
 
-    monkeypatch.setenv("KBF_STORE_BACKEND", "adb")
-
-    result = build_session_store(pool=None)
+    mock_pool = MagicMock()
+    result = build_session_store(pool=mock_pool)
     assert isinstance(result, AdbSessionStore)
 
 

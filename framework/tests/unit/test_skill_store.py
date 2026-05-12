@@ -338,9 +338,10 @@ class TestAdbSkillStorePromote:
 
 
 class TestBuildSkillStore:
-    def test_returns_filestore_when_pool_is_none(self):
-        store = build_skill_store(pool=None)
-        assert isinstance(store, FilestoreSkillStore)
+    def test_raises_when_pool_is_none(self):
+        """ADB is always available — no filestore fallback."""
+        with pytest.raises(ValueError, match="pool is required"):
+            build_skill_store(pool=None)
 
     def test_returns_adb_store_when_pool_provided(self):
         mock_pool = MagicMock()
@@ -358,6 +359,6 @@ class TestMakeArtifactId:
         result = make_artifact_id("tpm", "weekly_report", "workflow_skill")
         assert result == "tpm.weekly_report.workflow_skill"
 
-    def test_all_four_types_generate_unique_ids(self):
+    def test_all_five_types_generate_unique_ids(self):
         ids = [make_artifact_id("ops_eng", "incident_summary", t) for t in ARTIFACT_TYPES]
-        assert len(set(ids)) == 4
+        assert len(set(ids)) == len(ARTIFACT_TYPES)  # one unique id per artifact type
