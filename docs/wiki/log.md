@@ -4,6 +4,8 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-12] architect | BUG-FIX — OCI instance_principal on laptop. Root cause: `_load_laptop_llm_overrides` in `mcp_server.py` was guarded by `if kbf_env == "laptop":` (correct) but `ingestion_worker.py` called `LLMClient()` with no kwargs, unconditionally using `adapters/llm.yaml`'s `auth: instance_principal`. Fix: replaced `_load_laptop_llm_overrides` with `_load_env_llm_overrides(repo_root, kbf_env)` (works for all envs, not just laptop); `mcp_server.py` lifespan now always calls it; `ingestion_worker.py` now also applies env LLM overrides. 4 new regression tests in `test_llm_factory.py` — all 8 pass.
+
 ## [2026-05-12] backend-dev | DECISION-009 implemented — bug_db config section + _init_bug_pool + bug_pool wiring in mcp_server + mcp_tools + export-bugs CLI + setup-bug-user command + migration-007. All existing tests pass (838/839; test_find_symbol_function pre-existing failure unrelated). 12 new unit tests for _init_bug_pool merge logic and failure resilience.
 
 ## [2026-05-12] architect | ADR-024 — Bug DB connection design. Documents _init_bug_pool inheritance contract (bug_db overrides dsn/wallet_path/wallet_password_secret/user/password_secret from adb; bastion always inherited), setup-bug-user CLI command (admin pool + runtime password resolution; no password in SQL), migration-007 (GRANTs only, not CREATE USER), non-fatal startup policy for bug_pool (degrades to JSONL if pool fails), SQL table references unchanged (KB_SHIM prefix stays), export-bugs CLI update (reads bug_db section). Exact YAML shape documented for laptop/staging/prod configs.

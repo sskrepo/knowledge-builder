@@ -1,6 +1,7 @@
 """OCI Functions / OCI Compute ingestion worker entrypoint."""
 from __future__ import annotations
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -16,6 +17,7 @@ def main(persona_builder: str | None = None):
     from ..adapters.confluence import make_confluence_adapter
     from ..ingestion.pipeline import IngestionPipeline
     from ..core.interfaces import RawItem  # noqa
+    from .mcp_server import _load_env_llm_overrides
     import yaml
 
     REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -27,7 +29,11 @@ def main(persona_builder: str | None = None):
     if persona_builder:
         builder_files = [b for b in builder_files if b.stem == persona_builder]
 
-    llm = LLMClient()
+    # Apply env-specific LLM overrides (e.g. auth: config_file on laptop)
+    # so that instance_principal is not attempted on non-OCI environments.
+    kbf_env = os.environ.get("KBF_ENV", "laptop")
+    llm_kwargs = _load_env_llm_overrides(REPO_ROOT, kbf_env)
+    llm = LLMClient(**llm_kwargs)
     # NB: in real deploy, an oracledb connection pool is created here
     adb_pool = None
 

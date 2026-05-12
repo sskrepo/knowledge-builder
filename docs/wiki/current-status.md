@@ -58,6 +58,10 @@ All 9 gaps from the architect's audit are resolved. Key retrieval paths that wer
 | GAP-H1 | `deploy/routes/ask.py`, `deploy/mcp_tools.py` | persona/serviceId/functionalArea hints forwarded |
 | GAP-C1 | `stores/incident_vector_store.py` | Real HTTPS citation URLs when base URLs configured |
 
+## Bug fix — OCI instance_principal on laptop (2026-05-12)
+
+`mcp_server.py` lifespan now calls `_load_env_llm_overrides(repo_root, kbf_env)` unconditionally (replaces the `if kbf_env == "laptop": _load_laptop_llm_overrides()` guard). `ingestion_worker.py` also applies the same env-LLM overrides before constructing `LLMClient()`. `adapters/llm.yaml`'s `auth: instance_principal` default is only used when the env config YAML has no `[llm]` section. Regression-tested in `test_llm_factory.py` (4 new tests).
+
 ## What gates integration testing
 
 | Item | Status |

@@ -125,9 +125,11 @@ def _load_app():
         state["shim_faaas"] = ShimFaaas(SHIM_FAAAS_PATH)
         state["shim_kb"] = ShimKb(PERSONA_BUILDERS_DIR)
         # Apply LLM overrides from env-specific config (laptop.yaml [llm] section etc.)
-        llm_kwargs: dict = {}
-        if kbf_env == "laptop":
-            llm_kwargs = _load_laptop_llm_overrides(REPO_ROOT)
+        # _load_env_llm_overrides reads the [llm] section from the active env YAML
+        # and returns kwargs that override adapters/llm.yaml defaults.  This ensures
+        # auth: config_file flows through on laptop rather than falling back to the
+        # adapters/llm.yaml default of auth: instance_principal.
+        llm_kwargs: dict = _load_env_llm_overrides(REPO_ROOT, kbf_env)
         state["llm"] = LLMClient(**llm_kwargs)
         app.state.llm = state["llm"]
 
@@ -596,34 +598,61 @@ def _init_bug_pool(repo_root: Path, kbf_env: str):
         return None
 
 
-def _load_laptop_llm_overrides(repo_root: Path) -> dict:
-    """Read laptop.yaml [llm] section and return kwargs for LLMClient().
+def _load_env_llm_overrides(repo_root: Path, kbf_env: str) -> dict:
+    """Read [llm] section from the active env config YAML and return kwargs for LLMClient().
 
-    Only applies auth / config_profile overrides — endpoint and model are
-    inherited from framework/config/adapters/llm.yaml.
+    The env-specific YAML (laptop.yaml, staging.yaml, prod.yaml) is allowed to
+    override any key that the generic adapters/llm.yaml provides.  This is the
+    correct place for auth mode — adapters/llm.yaml defaults to
+    ``auth: instance_principal`` for OCI Compute, but laptop.yaml must override
+    with ``auth: config_file`` to use the local ~/.oci/config profile.
+
+    Only the [llm] section keys present in the env YAML are forwarded as kwargs;
+    absent keys fall back to adapters/llm.yaml defaults inside LLMClient().
 
     Returns empty dict on any error so LLMClient() falls back gracefully.
     """
-    laptop_cfg_path = repo_root / "framework" / "config" / "laptop.yaml"
-    if not laptop_cfg_path.exists():
+    cfg_name = {
+        "laptop":     "laptop.yaml",
+        "staging":    "staging.yaml",
+        "production": "prod.yaml",
+    }.get(kbf_env, f"{kbf_env}.yaml")
+    env_cfg_path = repo_root / "framework" / "config" / cfg_name
+    if not env_cfg_path.exists():
+        log.debug("_load_env_llm_overrides: %s not found — no LLM overrides", env_cfg_path)
         return {}
     try:
         import yaml  # type: ignore[import]
-        with open(laptop_cfg_path) as fh:
+        with open(env_cfg_path) as fh:
             raw = yaml.safe_load(fh)
         llm_raw = raw.get("llm", {})
+        if not llm_raw:
+            return {}
         kwargs: dict = {}
-        if llm_raw.get("auth"):
-            kwargs["auth"] = llm_raw["auth"]
-        if llm_raw.get("config_profile"):
-            kwargs["config_profile"] = llm_raw["config_profile"]
-        if llm_raw.get("provider"):
-            kwargs["provider"] = llm_raw["provider"]
-        log.info("laptop mode: LLMClient overrides from laptop.yaml: %s", kwargs)
+        # Forward any recognised LLM init kwargs present in the env config.
+        # This covers auth, config_profile, provider; endpoint/models stay in
+        # adapters/llm.yaml to avoid duplication.
+        for key in ("auth", "config_profile", "provider", "endpoint",
+                    "compartment_ocid", "timeout_s"):
+            if llm_raw.get(key):
+                kwargs[key] = llm_raw[key]
+        log.info(
+            "env=%s: LLMClient overrides from %s: %s",
+            kbf_env, cfg_name, kwargs,
+        )
         return kwargs
     except Exception as exc:
-        log.warning("laptop mode: could not load llm overrides (%s) — using defaults", exc)
+        log.warning(
+            "env=%s: could not load LLM overrides from %s (%s) — using adapter defaults",
+            kbf_env, cfg_name, exc,
+        )
         return {}
+
+
+# Keep old name as an alias for any external callers that may reference it.
+def _load_laptop_llm_overrides(repo_root: Path) -> dict:  # pragma: no cover
+    """Deprecated alias — use _load_env_llm_overrides(repo_root, 'laptop') instead."""
+    return _load_env_llm_overrides(repo_root, "laptop")
 
 
 def _load_adapter_base_url(adapter_yaml_path: Path) -> str:
