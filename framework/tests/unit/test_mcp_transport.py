@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import textwrap
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -276,33 +277,139 @@ class TestResourcesList:
 
 
 # ---------------------------------------------------------------------------
-# tools/call — auth missing
+# tools/call — auth missing (PRODUCTION mode: KBF_ENV=production)
+#
+# In dev mode (KBF_ENV=laptop/dev) the anonymous bypass is active, so
+# missing tokens succeed.  These tests explicitly set KBF_ENV=production
+# to exercise the auth-failure path, which now returns HTTP 401 (not a
+# JSON-RPC 200 error) with a WWW-Authenticate header and setup snippet.
 # ---------------------------------------------------------------------------
 
 
 class TestToolsCallAuthMissing:
-    def test_returns_jsonrpc_error_minus_32603(self, transport_client):
-        """tools/call without Bearer token must return JSON-RPC error -32603."""
-        resp = _post(
-            transport_client,
-            _jsonrpc("tools/call", {"name": "echo", "arguments": {"message": "hi"}}),
-            headers={},  # no auth
-        )
-        assert resp.status_code == 200  # JSON-RPC uses 200 for protocol errors
-        body = resp.json()
-        assert "error" in body
-        assert body["error"]["code"] == -32603
-        assert "Unauthorized" in body["error"]["message"]
+    def _prod_app(self, tmp_path):
+        """Build a transport app and force production mode for this test."""
+        return _make_transport_app(tmp_path)
 
-    def test_bad_token_returns_error(self, transport_client):
-        resp = _post(
-            transport_client,
-            _jsonrpc("tools/call", {"name": "echo", "arguments": {"message": "hi"}}),
-            headers={"Authorization": "Bearer wrong-token-000"},
-        )
+    def test_no_token_returns_401(self, tmp_path):
+        """tools/call without Bearer token in prod mode → HTTP 401."""
+        app, _ = self._prod_app(tmp_path)
+        with patch.dict(os.environ, {"KBF_ENV": "production"}):
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/mcp",
+                    json=_jsonrpc("tools/call", {"name": "echo", "arguments": {"message": "hi"}}),
+                    headers={},
+                )
+        assert resp.status_code == 401
+
+    def test_no_token_has_www_authenticate_header(self, tmp_path):
+        app, _ = self._prod_app(tmp_path)
+        with patch.dict(os.environ, {"KBF_ENV": "production"}):
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/mcp",
+                    json=_jsonrpc("tools/call", {"name": "echo", "arguments": {"message": "hi"}}),
+                    headers={},
+                )
+        assert "www-authenticate" in {k.lower() for k in resp.headers}
+        assert "Bearer" in resp.headers.get("www-authenticate", resp.headers.get("WWW-Authenticate", ""))
+
+    def test_no_token_body_has_mcp_json_snippet(self, tmp_path):
+        """401 body must include exact .mcp.json snippet so clients can self-configure."""
+        app, _ = self._prod_app(tmp_path)
+        with patch.dict(os.environ, {"KBF_ENV": "production"}):
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/mcp",
+                    json=_jsonrpc("tools/call", {"name": "echo", "arguments": {"message": "hi"}}),
+                    headers={},
+                )
         body = resp.json()
-        assert "error" in body
-        assert body["error"]["code"] == -32603
+        assert "mcpJsonSnippet" in body
+        assert "Authorization" in body["mcpJsonSnippet"]
+
+    def test_no_token_body_has_discovery_link(self, tmp_path):
+        app, _ = self._prod_app(tmp_path)
+        with patch.dict(os.environ, {"KBF_ENV": "production"}):
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/mcp",
+                    json=_jsonrpc("tools/call", {"name": "echo", "arguments": {"message": "hi"}}),
+                    headers={},
+                )
+        body = resp.json()
+        assert "discovery" in body
+        assert ".well-known" in body["discovery"]
+
+    def test_bad_token_returns_401(self, tmp_path):
+        app, _ = self._prod_app(tmp_path)
+        with patch.dict(os.environ, {"KBF_ENV": "production"}):
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/mcp",
+                    json=_jsonrpc("tools/call", {"name": "echo", "arguments": {"message": "hi"}}),
+                    headers={"Authorization": "Bearer totally-wrong-token"},
+                )
+        assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Dev mode — no auth required for tools/call
+# ---------------------------------------------------------------------------
+
+
+class TestDevMode:
+    """In dev mode (KBF_ENV=laptop/dev/local) tools/call works without any token."""
+
+    def test_no_token_succeeds_in_laptop_mode(self, tmp_path):
+        app, _ = _make_transport_app(tmp_path)
+        with patch.dict(os.environ, {"KBF_ENV": "laptop"}):
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/mcp",
+                    json=_jsonrpc("tools/call", {"name": "echo", "arguments": {"message": "hello"}}),
+                    headers={},  # no auth
+                )
+        assert resp.status_code == 200
+        assert resp.json()["result"]["isError"] is False
+
+    def test_no_token_succeeds_in_dev_mode(self, tmp_path):
+        app, _ = _make_transport_app(tmp_path)
+        with patch.dict(os.environ, {"KBF_ENV": "dev"}):
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/mcp",
+                    json=_jsonrpc("tools/call", {"name": "echo", "arguments": {"message": "hello"}}),
+                    headers={},
+                )
+        assert resp.status_code == 200
+
+    def test_valid_token_also_works_in_dev_mode(self, tmp_path):
+        """Even in dev mode, a real registered token is still accepted."""
+        app, dev_token = _make_transport_app(tmp_path)
+        with patch.dict(os.environ, {"KBF_ENV": "laptop"}):
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/mcp",
+                    json=_jsonrpc("tools/call", {"name": "echo", "arguments": {"message": "hello"}}),
+                    headers={"Authorization": f"Bearer {dev_token}"},
+                )
+        assert resp.status_code == 200
+        assert resp.json()["result"]["isError"] is False
+
+    def test_anon_consumer_returned_in_content(self, tmp_path):
+        """Tool result must come back successfully with anon consumer in dev mode."""
+        app, _ = _make_transport_app(tmp_path)
+        with patch.dict(os.environ, {"KBF_ENV": "laptop"}):
+            with TestClient(app) as client:
+                resp = client.post(
+                    "/mcp",
+                    json=_jsonrpc("tools/call", {"name": "echo", "arguments": {"message": "ping"}}),
+                    headers={},
+                )
+        data = json.loads(resp.json()["result"]["content"][0]["text"])
+        assert data["echoed"] == "ping"
 
 
 # ---------------------------------------------------------------------------
@@ -582,3 +689,43 @@ class TestParseError:
         body = resp.json()
         assert "error" in body
         assert body["error"]["code"] == -32600
+
+
+# ---------------------------------------------------------------------------
+# OAuth 2.0 Protected Resource Metadata discovery (RFC 9728)
+# ---------------------------------------------------------------------------
+
+
+class TestOauthDiscovery:
+    def test_discovery_returns_200(self, transport_client):
+        resp = transport_client.get("/.well-known/oauth-protected-resource")
+        assert resp.status_code == 200
+
+    def test_discovery_has_resource_field(self, transport_client):
+        resp = transport_client.get("/.well-known/oauth-protected-resource")
+        assert "resource" in resp.json()
+
+    def test_discovery_has_bearer_methods(self, transport_client):
+        resp = transport_client.get("/.well-known/oauth-protected-resource")
+        body = resp.json()
+        assert "bearer_methods_supported" in body
+        assert "header" in body["bearer_methods_supported"]
+
+    def test_discovery_has_scopes(self, transport_client):
+        resp = transport_client.get("/.well-known/oauth-protected-resource")
+        body = resp.json()
+        assert "scopes_supported" in body
+        assert isinstance(body["scopes_supported"], list)
+
+    def test_discovery_has_auth_hint(self, transport_client):
+        """Hint field guides users who read the discovery doc."""
+        resp = transport_client.get("/.well-known/oauth-protected-resource")
+        assert "kbf_auth_hint" in resp.json()
+
+    def test_discovery_no_auth_required(self, transport_client):
+        """Discovery endpoint must be public — no token needed."""
+        resp = transport_client.get(
+            "/.well-known/oauth-protected-resource",
+            headers={},  # no auth
+        )
+        assert resp.status_code == 200
