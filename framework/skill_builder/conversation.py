@@ -785,6 +785,7 @@ class SkillBuilderConversation:
 
     def _run_validate(self) -> ConversationTurn:
         from .validate_links import validate_workflow_links
+        import shutil
         import tempfile
         import os
 
@@ -795,6 +796,7 @@ class SkillBuilderConversation:
         # Fallback to filesystem path when skill_store is None (laptop/dev mode).
         wf_path_str: str | None = None
         _tmp_wf_file = None  # keep reference so tempfile survives the try block
+        _tmp_pb_dir: str | None = None  # merged persona-builders dir (may include in-session delta)
 
         if self._skill_store is not None:
             try:
@@ -832,17 +834,69 @@ class SkillBuilderConversation:
                 / self._data.persona / f"{self._data.skill_name}.yaml"
             )
 
+        # Build a merged persona-builders directory that supplements the
+        # filesystem builders with any in-session persona_builder_delta stored
+        # in ADB.  Without this, the validator fails with "unknown KB" for any
+        # KB that was authored in this session but not yet promoted to disk.
+        # (BUG-queue-6c173 — fixes validate step for new-KB skills.)
+        merged_pb_dir_str = str(pb_dir)
+        if self._skill_store is not None:
+            try:
+                delta_content = self._skill_store.read_artifact(
+                    persona=self._data.persona,
+                    skill_name=self._data.skill_name,
+                    artifact_type="persona_builder_delta",
+                )
+                if delta_content is not None:
+                    delta_entry = yaml.safe_load(delta_content) or {}
+                    # Wrap the single KB-entry dict in a full persona-builder YAML
+                    # so _build_kb_index() can parse it.
+                    synthetic_pb = {
+                        "persona": self._data.persona,
+                        "knowledge_bases": [delta_entry],
+                    }
+                    _tmp_pb_dir = tempfile.mkdtemp(prefix="kbf_validate_pb_")
+                    # Copy existing filesystem persona builders
+                    if pb_dir.exists():
+                        for fs_yaml in pb_dir.glob("*.yaml"):
+                            shutil.copy2(str(fs_yaml), _tmp_pb_dir)
+                    # Write the synthetic builder for the newly authored KB
+                    synth_pb_path = os.path.join(
+                        _tmp_pb_dir,
+                        f"insession_{self._data.persona}.yaml",
+                    )
+                    with open(synth_pb_path, "w", encoding="utf-8") as fp:
+                        yaml.safe_dump(
+                            synthetic_pb, fp, sort_keys=False, allow_unicode=True
+                        )
+                    merged_pb_dir_str = _tmp_pb_dir
+                    log.debug(
+                        "_run_validate: augmented pb_dir with in-session delta → %s",
+                        synth_pb_path,
+                    )
+            except Exception as exc:
+                log.warning(
+                    "_run_validate: could not load persona_builder_delta (%s) — "
+                    "validation will use filesystem persona builders only",
+                    exc,
+                )
+
         try:
-            errors = validate_workflow_links(wf_path_str, str(pb_dir))
+            errors = validate_workflow_links(wf_path_str, merged_pb_dir_str)
             result = {"passed": len(errors) == 0, "errors": errors}
         except Exception as e:
             log.warning("validation failed: %s", e)
             result = {"passed": False, "errors": [str(e)]}
         finally:
-            # Clean up tempfile if we created one
+            # Clean up temp files/dirs
             if _tmp_wf_file is not None:
                 try:
                     os.unlink(_tmp_wf_file.name)
+                except OSError:
+                    pass
+            if _tmp_pb_dir is not None:
+                try:
+                    shutil.rmtree(_tmp_pb_dir, ignore_errors=True)
                 except OSError:
                     pass
 

@@ -4,6 +4,10 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-12] dev | DECISION-008 + export-bugs CLI — ADB is the single source of truth for all bug records. pmo/bugs/*.md files become generated exports (not primary records). kb-cli export-bugs reads KBF_BUG_REPORTS + KBF_AUDIT_RUNS, writes YAML-frontmatter + <details>-expandable .md files + INDEX.md to pmo/bugs/. cmd_watch_bugs updated: dedup now checks queue_id in user_bugs.jsonl (not pmo/bugs/ file scan).
+
+## [2026-05-12] dev | BUG-009 fixed (BUG-queue-6c173) — VALIDATE step failed "workflow references unknown KB" for any newly authored skill. Root cause: _run_validate() built kb_index from filesystem persona_builders/*.yaml only; persona_builder_delta artifact (the new KB entry) was in ADB, not on disk (PROMOTE writes it to disk, not COMMIT). Fix: read persona_builder_delta from skill_store at validate time, wrap in synthetic persona-builder YAML, merge with filesystem builders in temp dir, pass to validate_workflow_links. 18 tests pass.
+
 ## [2026-05-12] backend-dev | extraction_schema added as 5th artifact type — closes filesystem durability gap. ARTIFACT_TYPES in _base.py + type-inference branch in conversation._write_artifacts() now cover framework/parsers/schemas/{persona}/{skill_name}/v1.json. migration-005 updated (for fresh installs). migration-006 created: ALTERs chk_ksa_artifact_type constraint to include extraction_schema on already-deployed DBs + creates KBF_AUDIT_RUNS table (ADR-023). All committed skill sessions now store 5 artifacts in ADB; nothing production-relevant is filesystem-only.
 
 ## [2026-05-12] architect | ADR-023 + DECISION-007 — kbf_ops persona + reviewSkillSession MCP tool. Option 2 chosen (LLM-powered qualitative review). Option 1 (deterministic checks) deferred to ADR-024. KbfOpsSessionLoader reads all synth_id data from ADB; KbfOpsReviewEngine critiques 7 dimensions with structured output; findings auto-filed to KBF_BUG_REPORTS. reviewSkillSession becomes 5th external MCP tool. Backend Dev implementing.

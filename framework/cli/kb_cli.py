@@ -649,6 +649,302 @@ def cmd_export_skills(args):
     return 0
 
 
+# ============================================================================
+# export-bugs — generate markdown snapshots from ADB bug stores (DECISION-008)
+# ============================================================================
+
+def cmd_export_bugs(args):
+    """Export bug records from ADB (KBF_BUG_REPORTS + KBF_AUDIT_RUNS) to markdown.
+
+    Reads from two ADB tables:
+      - KB_SHIM.KBF_BUG_REPORTS  — user-reported bugs (via reportBug MCP tool)
+      - KB_SHIM.KBF_AUDIT_RUNS   — critic-found audit findings (via reviewSkillSession)
+
+    Generates one .md file per record plus an INDEX.md summary table.
+    Files use YAML frontmatter for metadata and <details> blocks for full content,
+    so they render nicely in GitHub / IDE markdown viewers with expandable sections.
+
+    These files are READ-ONLY snapshots — ADB is the source of truth (DECISION-008).
+    Re-running overwrites previous exports.
+
+    Usage:
+        kb-cli export-bugs [--out-dir pmo/bugs] [--env laptop] [--status open]
+    """
+    import datetime as _dt
+
+    out_dir = Path(getattr(args, "out_dir", None) or (REPO_ROOT / "pmo" / "bugs")).resolve()
+    env = getattr(args, "env", "") or os.environ.get("KBF_ENV", "laptop")
+
+    # ── Build ADB pool ──────────────────────────────────────────────────────
+    config_path = REPO_ROOT / "framework" / "config" / f"{env}.yaml"
+    if not config_path.exists():
+        print(f"❌ Config not found: {config_path}", file=sys.stderr)
+        return 1
+
+    pool = None
+    try:
+        with open(config_path) as fh:
+            cfg = yaml.safe_load(fh)
+        adb_cfg = cfg.get("adb", {})
+        from ..core.adb_pool import create_adb_pool  # type: ignore[import]
+        pool = create_adb_pool({
+            "deployment_mode": cfg.get("deployment_mode", "laptop"),
+            "adb": {
+                "service_name":    adb_cfg.get("dsn") or adb_cfg.get("service_name", ""),
+                "wallet_path":     str(Path(adb_cfg.get("wallet_path", "")).expanduser()),
+                "user":            adb_cfg.get("admin_user", "Admin"),
+                "password":        _resolve_secret_cli(adb_cfg.get("admin_password_secret", "")),
+                "wallet_password": _resolve_secret_cli(adb_cfg.get("wallet_password_secret", "")),
+            },
+            "bastion": cfg.get("bastion", {}),
+        })
+    except Exception as exc:
+        print(f"❌ Failed to create ADB pool: {exc}", file=sys.stderr)
+        return 1
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Fetch user-reported bugs ────────────────────────────────────────────
+    user_bugs: list[dict] = []
+    try:
+        with pool.acquire() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT queue_id, request_id, timestamp_utc, tool, description, extra_json
+                       FROM KB_SHIM.KBF_BUG_REPORTS
+                       ORDER BY timestamp_utc DESC"""
+                )
+                cols = [d[0].lower() for d in cur.description]
+                for row in cur.fetchall():
+                    rec = dict(zip(cols, row))
+                    extra: dict = {}
+                    if rec.get("extra_json"):
+                        try:
+                            extra = json.loads(rec["extra_json"])
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    rec.update(extra)
+                    user_bugs.append(rec)
+        print(f"  Fetched {len(user_bugs)} user bug(s) from KBF_BUG_REPORTS")
+    except Exception as exc:
+        print(f"⚠ Could not read KBF_BUG_REPORTS: {exc}", file=sys.stderr)
+
+    # ── Fetch audit run findings ────────────────────────────────────────────
+    audit_runs: list[dict] = []
+    try:
+        with pool.acquire() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT review_id, synth_id, depth, overall_score, recommendation,
+                              bugs_filed, triggered_by, report_json, run_at
+                       FROM KB_SHIM.KBF_AUDIT_RUNS
+                       WHERE recommendation IN ('must-fix', 'should-fix', 'minor-issues')
+                       ORDER BY run_at DESC"""
+                )
+                cols = [d[0].lower() for d in cur.description]
+                for row in cur.fetchall():
+                    rec = dict(zip(cols, row))
+                    if rec.get("report_json"):
+                        try:
+                            rec["_report"] = json.loads(rec["report_json"])
+                        except (json.JSONDecodeError, TypeError):
+                            rec["_report"] = {}
+                    audit_runs.append(rec)
+        print(f"  Fetched {len(audit_runs)} audit run(s) from KBF_AUDIT_RUNS")
+    except Exception as exc:
+        print(f"⚠ Could not read KBF_AUDIT_RUNS: {exc}", file=sys.stderr)
+
+    _close_pool(pool)
+
+    # ── Write per-bug markdown files ────────────────────────────────────────
+    written_bugs: list[dict] = []
+
+    for bug in user_bugs:
+        qid = bug.get("queue_id") or bug.get("request_id", "unknown")
+        safe_id = qid.replace("/", "-").replace(" ", "-")
+        filename = f"{safe_id}.md"
+        filepath = out_dir / filename
+
+        ts = _fmt_ts(bug.get("timestamp_utc"))
+        tool = bug.get("tool", "unknown")
+        description = bug.get("description", "")
+        summary_line = description[:100] + ("…" if len(description) > 100 else "")
+
+        input_data = bug.get("input", bug.get("triggering_input", {}))
+        input_block = (
+            "```json\n" + json.dumps(input_data, indent=2) + "\n```"
+            if isinstance(input_data, dict) and input_data
+            else (str(input_data) if input_data else "_not recorded_")
+        )
+
+        md = f"""---
+queue_id: {qid}
+source: user_report
+tool: {tool}
+filed_at: {ts}
+status: open
+---
+
+# {qid}
+
+**Tool**: `{tool}` | **Filed**: {ts[:10] if ts else "unknown"} | **Status**: open
+
+{summary_line}
+
+<details>
+<summary>Full details</summary>
+
+**Description**:
+{description}
+
+**Triggering input**:
+{input_block}
+
+**User ID**: {bug.get("user_id", "_anon_")}
+**Request ID**: {bug.get("request_id", "_unknown_")}
+
+</details>
+"""
+        filepath.write_text(md, encoding="utf-8")
+        written_bugs.append({
+            "filename": filename, "id": qid,
+            "summary": summary_line, "filed_at": ts,
+            "source": "user_report", "tool": tool,
+        })
+        print(f"  ✓ {filename}")
+
+    # ── Write per-audit-run markdown files ──────────────────────────────────
+    written_audits: list[dict] = []
+
+    for run in audit_runs:
+        rid = str(run.get("review_id", "unknown"))
+        synth_id = run.get("synth_id", "unknown")
+        filename = f"audit-{rid.replace('/', '-')}.md"
+        filepath = out_dir / filename
+
+        ts = _fmt_ts(run.get("run_at"))
+        score = run.get("overall_score", "?")
+        rec = run.get("recommendation", "?")
+        bugs_filed = run.get("bugs_filed", 0)
+
+        report = run.get("_report", {})
+        dimensions = report.get("dimensions", [])
+        dim_lines = (
+            "| Dimension | Score | Verdict | Note |\n|---|---|---|---|\n"
+            + "\n".join(
+                f"| {d.get('name','?')} | {d.get('score','?')} | "
+                f"{d.get('verdict','?')} | {(d.get('note') or '')[:80]} |"
+                for d in dimensions
+            )
+        ) if dimensions else "_dimension data not available_"
+
+        issues = report.get("issues", [])
+        issues_block = (
+            "\n".join(
+                f"- **[{i.get('severity','?')}]** {i.get('description','')}"
+                for i in issues[:20]
+            ) if issues else "_none recorded_"
+        )
+        report_snippet = json.dumps(report, indent=2)[:4000]
+
+        md = f"""---
+review_id: {rid}
+synth_id: {synth_id}
+source: audit_run
+overall_score: {score}
+recommendation: {rec}
+bugs_filed: {bugs_filed}
+run_at: {ts}
+---
+
+# Audit: {synth_id}
+
+**Review ID**: `{rid}` | **Score**: {score}/1.0 | **Recommendation**: {rec} | **Run**: {ts[:10] if ts else "?"}
+
+{rec.upper()} — {bugs_filed} bug(s) filed by this review.
+
+<details>
+<summary>Dimension scores</summary>
+
+{dim_lines}
+
+</details>
+
+<details>
+<summary>Issues found ({len(issues)})</summary>
+
+{issues_block}
+
+</details>
+
+<details>
+<summary>Full JSON report</summary>
+
+```json
+{report_snippet}
+```
+
+</details>
+"""
+        filepath.write_text(md, encoding="utf-8")
+        written_audits.append({
+            "filename": filename, "id": rid,
+            "synth_id": synth_id,
+            "summary": f"{rec} — score {score}/1.0 — {bugs_filed} bug(s)",
+            "filed_at": ts, "source": "audit_run", "recommendation": rec,
+        })
+        print(f"  ✓ {filename}")
+
+    # ── Write INDEX.md ───────────────────────────────────────────────────────
+    now_str = _dt.datetime.now(tz=_dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    bug_rows = "\n".join(
+        f"| [{b['id']}]({b['filename']}) | {b['tool']} | {b['summary']} | {(b['filed_at'] or '')[:10]} |"
+        for b in written_bugs
+    ) or "_none_"
+
+    audit_rows = "\n".join(
+        f"| [{a['id']}]({a['filename']}) | [{a['synth_id']}]({a['filename']}) | {a['recommendation']} | {(a['filed_at'] or '')[:10]} |"
+        for a in written_audits
+    ) or "_none_"
+
+    index_md = f"""# KBF Bug Reports — {now_str}
+
+> **Source of truth**: ADB (`KBF_BUG_REPORTS` + `KBF_AUDIT_RUNS`). See DECISION-008.
+> Generated by `kb-cli export-bugs`. Re-run to refresh. **Do not edit these files manually.**
+
+## User-Reported Bugs ({len(written_bugs)})
+
+| ID | Tool | Description | Filed |
+|---|---|---|---|
+{bug_rows}
+
+## Audit Findings — must-fix / should-fix / minor-issues ({len(written_audits)})
+
+| Review ID | Session | Recommendation | Run |
+|---|---|---|---|
+{audit_rows}
+"""
+    (out_dir / "INDEX.md").write_text(index_md, encoding="utf-8")
+    print(f"  ✓ INDEX.md")
+    print(f"\n✓ export-bugs — {len(written_bugs)} user bug(s) + {len(written_audits)} audit run(s) → {out_dir}/")
+    return 0
+
+
+def _fmt_ts(ts_value) -> str:
+    """Format a timestamp value (datetime object or ISO string) to an ISO string."""
+    if ts_value is None:
+        return ""
+    if hasattr(ts_value, "isoformat"):
+        return ts_value.isoformat()
+    return str(ts_value)
+
+
+# ============================================================================
+# watch-bugs — fast local error watcher (reads JSONL hot-cache, not ADB)
+# For a full queryable view of all bugs use: kb-cli export-bugs
+# ============================================================================
+
 def cmd_watch_bugs(args):
     """Read errors.jsonl and user_bugs.jsonl, deduplicate, and print diagnosis blocks."""
     from datetime import datetime, timezone, timedelta
@@ -693,9 +989,17 @@ def cmd_watch_bugs(args):
         errors = [e for e in errors if _after_cutoff(e)]
         user_bugs = [b for b in user_bugs if _after_cutoff(b)]
 
-    # Index user_bugs by request_id for fast join
+    # Index user_bugs by request_id for fast join.
+    # A bug is "filed" (known) when it has a queue_id in user_bugs.jsonl —
+    # that means it was submitted via reportBug and written to KBF_BUG_REPORTS.
+    # We no longer check pmo/bugs/*.md files (DECISION-008: ADB is the source
+    # of truth; those files are generated exports, not primary records).
     bugs_by_request_id: dict[str, dict] = {
         bug["request_id"]: bug for bug in user_bugs if bug.get("request_id")
+    }
+    filed_request_ids: set[str] = {
+        bug["request_id"] for bug in user_bugs
+        if bug.get("request_id") and bug.get("queue_id")
     }
 
     # Group errors by (error_type, message[:80]) for fuzzy dedup
@@ -703,14 +1007,6 @@ def cmd_watch_bugs(args):
     for err in errors:
         key = (err.get("error_type", ""), (err.get("message") or "")[:80])
         groups[key].append(err)
-
-    # Load known bugs from pmo/bugs/ for dedup
-    bugs_dir = REPO_ROOT / "pmo" / "bugs"
-    known_bug_texts: list[tuple[str, str]] = []
-    if bugs_dir.exists():
-        for bug_file in sorted(bugs_dir.glob("BUG-*.md")):
-            content = bug_file.read_text(encoding="utf-8", errors="replace")
-            known_bug_texts.append((bug_file.stem, content))
 
     SEP = "━" * 40
     new_candidates = 0
@@ -732,13 +1028,12 @@ def cmd_watch_bugs(args):
         report_str = "NO"
         if user_report:
             desc = (user_report.get("description") or "")[:60]
-            report_str = f'YES — "{desc}"'
+            queue_id = user_report.get("queue_id", "")
+            report_str = f'YES ({queue_id}) — "{desc}"' if queue_id else f'YES — "{desc}"'
 
-        known_label = ""
-        for bug_stem, bug_content in known_bug_texts:
-            if message_prefix and message_prefix.lower() in bug_content.lower():
-                known_label = f"KNOWN — already filed as {bug_stem}"
-                break
+        # "Known" = this request_id was already user-filed (has a queue_id in KBF_BUG_REPORTS)
+        is_known = rid in filed_request_ids
+        known_label = f"FILED ({user_report.get('queue_id','')})" if is_known else ""
 
         if known_label:
             known_count += 1
@@ -755,7 +1050,8 @@ def cmd_watch_bugs(args):
         print(SEP)
 
     print()
-    print(f"{new_candidates} new candidates, {known_count} known bugs, {len(errors)} total errors")
+    print(f"{new_candidates} new candidate(s), {known_count} already filed, {len(errors)} total errors")
+    print("Tip: run `kb-cli export-bugs` for a full queryable view from ADB (DECISION-008)")
     return 0
 
 
@@ -827,6 +1123,22 @@ def main():
     pes.add_argument("--out-dir", default=".", help="output root directory (default: .)")
     pes.add_argument("--env", default=None, help="config env name (overrides KBF_ENV)")
     pes.set_defaults(fn=cmd_export_skills)
+
+    peb = sub.add_parser(
+        "export-bugs",
+        help="export bug records from ADB (KBF_BUG_REPORTS + KBF_AUDIT_RUNS) to markdown",
+    )
+    peb.add_argument(
+        "--out-dir",
+        default=None,
+        help="output directory for .md files (default: pmo/bugs/ under REPO_ROOT)",
+    )
+    peb.add_argument(
+        "--env",
+        default=None,
+        help="config env name (overrides KBF_ENV, default: laptop)",
+    )
+    peb.set_defaults(fn=cmd_export_bugs)
 
     args = p.parse_args()
     return args.fn(args)
