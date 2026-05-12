@@ -10,8 +10,29 @@ status: current
 
 # Knowledgebase — Dashboard
 
-**Current phase:** Phase 1-3 + V3 + laptop mode — MCP wire-protocol live
-**Updated:** 2026-05-12 by qa (BUG-003 filed + verified)
+**Current phase:** Phase 1-3 + V3 + laptop mode — MCP wire-protocol live + ADR-021 artifact upload
+**Updated:** 2026-05-12 by backend-dev (ADR-021 uploadArtifact implemented; DECISION-005 decided)
+
+## 🌅 Session update — 2026-05-12 afternoon (ADR-021 artifact upload + DECISION-005 decided)
+
+**ADR-021 `uploadArtifact` MCP tool fully implemented and merged to main.**
+
+New 4th MCP tool: `uploadArtifact` accepts base64 file bytes (≤10 MB, .pptx/.docx/.md/.txt) and returns an `artifactId`. Clients send `"artifact:<filename> id:<artifactId>"` in the next `authorSkill` turn; `_handle_analyze_artifact` resolves it via `ArtifactStore` and calls `analyze_artifact(local_path)` unchanged.
+
+**ArtifactStore: dual-mode**
+- `KBF_ENV=laptop` → `FilestoreArtifactStore` (local `~/.kbf/store/uploads/`)
+- `KBF_ENV=staging|production` → `OciArtifactStore` (OCI SDK, InstancePrincipals; CLI subprocess for laptop OCI override)
+- No lifecycle rule — application-driven `cleanup(synth_id)` on session DONE
+
+**DECISION-005 decided:** Option A — dedicated `kbf-uploads` bucket in `adp_faops_network` compartment, `eu-frankfurt-1`. No lifecycle rule. User needs to: (1) create bucket in OCI Console, (2) confirm tenancy namespace (`adpcpprod` profile returned `bmc_operator_access` operator namespace, not user-tenant), (3) populate `KBF_ARTIFACT_OCI_NAMESPACE` env var.
+
+**skill_prompt v1.2.0** — includes "Using local files as example artifacts" upload flow.
+
+**718 tests passing** (excluding pre-existing `test_code_wiki.py`).
+
+**Remaining before OCI path is live:** user creates `kbf-uploads` bucket + IAM statement + confirms namespace.
+
+---
 
 ## 🌅 Morning briefing — 2026-05-12 (MCP Streamable HTTP live + authorSkill end-to-end)
 
