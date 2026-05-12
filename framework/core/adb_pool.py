@@ -20,6 +20,7 @@ from __future__ import annotations
 import atexit
 import json
 import logging
+import os
 import socket
 import subprocess
 import time
@@ -90,6 +91,9 @@ class BastionConfig:
     oci_cli_path: str = "/opt/homebrew/bin/oci"
     connect_timeout_seconds: int = 30
     max_reconnect_attempts: int = 3
+    # Preferred reconnect path (ADR-019): delegate to adb-connect.sh
+    script_path: str = ""   # e.g. "framework/scripts/adb-connect.sh"
+    oci_profile: str = ""   # OCI CLI profile passed as OCI_PROFILE env var
 
     @classmethod
     def from_dict(cls, d: dict) -> BastionConfig:
@@ -103,6 +107,8 @@ class BastionConfig:
             oci_cli_path=d.get("oci_cli_path", "/opt/homebrew/bin/oci"),
             connect_timeout_seconds=int(d.get("connect_timeout_seconds", 30)),
             max_reconnect_attempts=int(d.get("max_reconnect_attempts", 3)),
+            script_path=d.get("script_path", ""),
+            oci_profile=d.get("oci_profile", ""),
         )
 
 
@@ -113,6 +119,7 @@ class AdbPoolConfig:
     wallet_path: str
     user: str
     password: str
+    wallet_password: str = ""   # mTLS wallet password (from env://WALLET_PASSWORD)
     min_connections: int = 1
     max_connections: int = 5
     bastion: BastionConfig | None = None
@@ -130,6 +137,7 @@ class AdbPoolConfig:
             wallet_path=adb.get("wallet_path", ""),
             user=adb.get("user", ""),
             password=adb.get("password", ""),
+            wallet_password=adb.get("wallet_password", ""),
             min_connections=int(adb.get("min_connections", 1)),
             max_connections=int(adb.get("max_connections", 5)),
             bastion=bastion_cfg,
@@ -246,9 +254,64 @@ class BastionReconnector:
         )
 
     def reconnect(self) -> None:
-        """Full reconnect cycle: create session → start tunnel → wait for port."""
-        ssh_command = self.create_session()
-        self.start_tunnel(ssh_command)
+        """Full reconnect cycle.
+
+        When ``bastion.script_path`` is configured (recommended for laptop mode),
+        delegates to ``adb-connect.sh`` which handles bastion session creation,
+        SSH tunnel, and wallet patching in one shot.
+
+        Falls back to the inline ``create_session()`` + ``start_tunnel()`` path
+        if ``script_path`` is not set (legacy / test path).
+        """
+        if self._cfg.script_path:
+            self._reconnect_via_script()
+        else:
+            ssh_command = self.create_session()
+            self.start_tunnel(ssh_command)
+            self.wait_for_port()
+
+    def _reconnect_via_script(self) -> None:
+        """Run adb-connect.sh to re-establish the OCI Bastion tunnel.
+
+        The script is run in its own subprocess.  ``WALLET_PASSWORD`` and
+        ``OCI_PROFILE`` are forwarded from the current process environment so
+        no secrets need to be passed on the command line.
+
+        Raises:
+            BastionReconnectError: if the script exits non-zero or the tunnel
+                port does not open within ``connect_timeout_seconds``.
+        """
+        script = Path(self._cfg.script_path).expanduser().resolve()
+        if not script.exists():
+            raise BastionReconnectError(
+                f"adb-connect.sh not found at {script}. "
+                "Check bastion.script_path in laptop.yaml."
+            )
+
+        env = os.environ.copy()
+        if self._cfg.oci_profile:
+            env["OCI_PROFILE"] = self._cfg.oci_profile
+
+        log.info(
+            "adb_pool: re-establishing tunnel via adb-connect.sh "
+            "(profile=%s, script=%s)",
+            self._cfg.oci_profile or "default",
+            script,
+        )
+        result = subprocess.run(
+            [str(script)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if result.returncode != 0:
+            snippet = (result.stderr or result.stdout)[-400:]
+            raise BastionReconnectError(
+                f"adb-connect.sh exited {result.returncode}: {snippet}"
+            )
+
+        log.info("adb_pool: adb-connect.sh succeeded; verifying tunnel port…")
         self.wait_for_port()
 
 # ---------------------------------------------------------------------------
@@ -401,7 +464,7 @@ def create_adb_pool(config: dict) -> Any:
         dsn=cfg.service_name,
         config_dir=cfg.wallet_path,
         wallet_location=cfg.wallet_path,
-        wallet_password=None,
+        wallet_password=cfg.wallet_password or None,
         min=cfg.min_connections,
         max=cfg.max_connections,
     )

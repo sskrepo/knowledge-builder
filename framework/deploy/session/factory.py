@@ -31,6 +31,11 @@ def build_session_store(pool=None) -> SessionStore:
     """
     backend = os.environ.get("KBF_STORE_BACKEND", "filestore").lower().strip()
 
+    # When a pool is explicitly provided and no backend override is set,
+    # infer ADB mode — callers that pass a pool want ADB session storage.
+    if pool is not None and backend == "filestore":
+        backend = "adb"
+
     if backend == "adb":
         from .adb_store import AdbSessionStore
         if pool is None:

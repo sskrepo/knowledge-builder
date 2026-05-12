@@ -189,6 +189,23 @@ class TestBastionConfigFromDict:
         assert cfg.oci_cli_path == "/opt/homebrew/bin/oci"
         assert cfg.connect_timeout_seconds == 30
         assert cfg.max_reconnect_attempts == 3
+        # New optional fields default to empty string
+        assert cfg.script_path == ""
+        assert cfg.oci_profile == ""
+
+    def test_script_path_and_oci_profile_parsed(self):
+        d = {
+            "bastion_ocid": "ocid",
+            "target_db_host": "10.0.0.1",
+            "target_db_port": 1521,
+            "local_tunnel_port": 15211,
+            "ssh_key_path": "~/.ssh/key",
+            "script_path": "framework/scripts/adb-connect.sh",
+            "oci_profile": "adpcpprod",
+        }
+        cfg = BastionConfig.from_dict(d)
+        assert cfg.script_path == "framework/scripts/adb-connect.sh"
+        assert cfg.oci_profile == "adpcpprod"
 
     def test_overrides_applied(self):
         d = {
@@ -227,6 +244,23 @@ class TestAdbPoolConfigFromDict:
         assert cfg.deployment_mode == "laptop"
         assert cfg.bastion is not None
         assert cfg.bastion.bastion_ocid == "ocid"
+
+    def test_wallet_password_parsed(self):
+        d = {
+            "deployment_mode": "laptop",
+            "adb": {
+                "service_name": "svc",
+                "wallet_path": "/w",
+                "wallet_password": "secret-pw",
+            },
+        }
+        cfg = AdbPoolConfig.from_dict(d)
+        assert cfg.wallet_password == "secret-pw"
+
+    def test_wallet_password_default_empty(self):
+        d = {"deployment_mode": "vm", "adb": {"service_name": "svc"}}
+        cfg = AdbPoolConfig.from_dict(d)
+        assert cfg.wallet_password == ""
 
     def test_laptop_mode_without_bastion_section(self):
         d = {"deployment_mode": "laptop", "adb": {}}
@@ -364,6 +398,106 @@ class TestBastionReconnector:
                 reconnector.wait_for_port()
 
         assert attempt["n"] == 3
+
+
+# ---------------------------------------------------------------------------
+# BastionReconnector — script-based reconnect (_reconnect_via_script)
+# ---------------------------------------------------------------------------
+
+
+class TestBastionReconnectorScript:
+    """Tests for the adb-connect.sh delegation path introduced in ADR-019."""
+
+    def _cfg_with_script(self, script_path: str, oci_profile: str = "adpcpprod") -> BastionConfig:
+        return _bastion_cfg(script_path=script_path, oci_profile=oci_profile)
+
+    def test_reconnect_dispatches_to_script_when_script_path_set(self, tmp_path):
+        """When script_path is set, reconnect() calls the script, not create_session."""
+        script = tmp_path / "adb-connect.sh"
+        script.write_text("#!/bin/bash\nexit 0\n")
+        script.chmod(0o755)
+
+        cfg = self._cfg_with_script(str(script), oci_profile="adpcpprod")
+        reconnector = BastionReconnector(cfg)
+
+        with patch.object(reconnector, "wait_for_port") as mock_wait:
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                reconnector.reconnect()
+
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args
+        # First positional arg is the command list
+        cmd = call_args[0][0]
+        assert str(script) in cmd[0]
+        mock_wait.assert_called_once()
+
+    def test_reconnect_falls_back_to_create_session_when_no_script_path(self):
+        """When script_path is empty, reconnect() uses create_session() + start_tunnel()."""
+        cfg = _bastion_cfg(script_path="")  # no script
+        reconnector = BastionReconnector(cfg)
+
+        ssh_cmd = "ssh user@bastion -N -L 15211:10.0.1.50:1521"
+        with patch.object(reconnector, "create_session", return_value=ssh_cmd) as mock_cs:
+            with patch.object(reconnector, "start_tunnel") as mock_st:
+                with patch.object(reconnector, "wait_for_port") as mock_wp:
+                    reconnector.reconnect()
+
+        mock_cs.assert_called_once()
+        mock_st.assert_called_once_with(ssh_cmd)
+        mock_wp.assert_called_once()
+
+    def test_script_oci_profile_forwarded_in_env(self, tmp_path):
+        """OCI_PROFILE env var must be set to bastion.oci_profile when running the script."""
+        script = tmp_path / "adb-connect.sh"
+        script.write_text("#!/bin/bash\nexit 0\n")
+        script.chmod(0o755)
+
+        cfg = self._cfg_with_script(str(script), oci_profile="my-test-profile")
+        reconnector = BastionReconnector(cfg)
+
+        with patch.object(reconnector, "wait_for_port"):
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                reconnector.reconnect()
+
+        env_passed = mock_run.call_args[1]["env"]
+        assert env_passed["OCI_PROFILE"] == "my-test-profile"
+
+    def test_script_nonzero_exit_raises_bastion_reconnect_error(self, tmp_path):
+        """A non-zero script exit must raise BastionReconnectError."""
+        script = tmp_path / "adb-connect.sh"
+        script.write_text("#!/bin/bash\necho 'tunnel failed' >&2\nexit 1\n")
+        script.chmod(0o755)
+
+        cfg = self._cfg_with_script(str(script))
+        reconnector = BastionReconnector(cfg)
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="tunnel failed")
+            with pytest.raises(BastionReconnectError, match="exited 1"):
+                reconnector.reconnect()
+
+    def test_missing_script_raises_bastion_reconnect_error(self):
+        """A script_path that does not exist must raise BastionReconnectError immediately."""
+        cfg = self._cfg_with_script("/nonexistent/path/adb-connect.sh")
+        reconnector = BastionReconnector(cfg)
+
+        with pytest.raises(BastionReconnectError, match="not found"):
+            reconnector.reconnect()
+
+    def test_script_timeout_propagates(self, tmp_path):
+        """subprocess.TimeoutExpired from the script is wrapped in BastionReconnectError."""
+        script = tmp_path / "adb-connect.sh"
+        script.write_text("#!/bin/bash\nsleep 999\n")
+        script.chmod(0o755)
+
+        cfg = self._cfg_with_script(str(script))
+        reconnector = BastionReconnector(cfg)
+
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="sh", timeout=180)):
+            with pytest.raises(subprocess.TimeoutExpired):
+                reconnector.reconnect()
 
 
 # ---------------------------------------------------------------------------
