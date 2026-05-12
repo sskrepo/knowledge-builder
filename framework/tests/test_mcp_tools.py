@@ -1,12 +1,13 @@
 """Tests for framework/deploy/mcp_tools.py.
 
 Coverage:
-  - build_external_tool_registry() returns exactly 2 tools
-  - Tool names are "askKnowledgeBase" and "authorSkill"
-  - EXTERNAL_TOOLS_SCHEMA has exactly 2 entries with correct names
+  - build_external_tool_registry() returns exactly 3 tools (Sprint 1: +reportBug)
+  - Tool names are "askKnowledgeBase", "authorSkill", and "reportBug"
+  - EXTERNAL_TOOLS_SCHEMA has exactly 3 entries with correct names
   - Each schema has an inputSchema with a required properties list
   - askKnowledgeBase schema requires "question"
   - authorSkill schema requires "input"
+  - reportBug schema requires "requestId", "tool", "description"
   - Handlers are callable (async functions)
   - _anonymous_consumer() returns a valid ConsumerManifest with expected defaults
   - askKnowledgeBase handler calls ContextBuilder.answer() and _build_ask_response()
@@ -51,12 +52,13 @@ def _run(coro):
 
 
 class TestExternalToolsSchema:
-    def test_exactly_two_entries(self):
-        assert len(EXTERNAL_TOOLS_SCHEMA) == 2
+    def test_exactly_three_entries(self):
+        # Sprint 1 added reportBug — now 3 tools
+        assert len(EXTERNAL_TOOLS_SCHEMA) == 3
 
     def test_names_are_correct(self):
         names = {t["name"] for t in EXTERNAL_TOOLS_SCHEMA}
-        assert names == {"askKnowledgeBase", "authorSkill"}
+        assert names == {"askKnowledgeBase", "authorSkill", "reportBug"}
 
     def test_each_entry_has_name_description_inputschema(self):
         for tool in EXTERNAL_TOOLS_SCHEMA:
@@ -96,6 +98,18 @@ class TestExternalToolsSchema:
         props = schema["inputSchema"]["properties"]
         assert props["input"].get("maxLength") == 4096
 
+    def test_report_bug_requires_request_id_tool_description(self):
+        schema = next(t for t in EXTERNAL_TOOLS_SCHEMA if t["name"] == "reportBug")
+        required = schema["inputSchema"].get("required", [])
+        assert "requestId" in required
+        assert "tool" in required
+        assert "description" in required
+
+    def test_report_bug_has_optional_input_property(self):
+        schema = next(t for t in EXTERNAL_TOOLS_SCHEMA if t["name"] == "reportBug")
+        props = schema["inputSchema"]["properties"]
+        assert "input" in props
+
     def test_input_schema_type_is_object(self):
         for tool in EXTERNAL_TOOLS_SCHEMA:
             assert tool["inputSchema"]["type"] == "object", (
@@ -114,15 +128,16 @@ class TestBuildExternalToolRegistry:
         registry = build_external_tool_registry(app)
         assert isinstance(registry, dict)
 
-    def test_exactly_two_tools(self):
+    def test_exactly_three_tools(self):
+        # Sprint 1 added reportBug — now 3 tools
         app = _make_mock_app()
         registry = build_external_tool_registry(app)
-        assert len(registry) == 2
+        assert len(registry) == 3
 
     def test_tool_names_match_schema(self):
         app = _make_mock_app()
         registry = build_external_tool_registry(app)
-        assert set(registry.keys()) == {"askKnowledgeBase", "authorSkill"}
+        assert set(registry.keys()) == {"askKnowledgeBase", "authorSkill", "reportBug"}
 
     def test_ask_handler_is_callable(self):
         app = _make_mock_app()
@@ -134,6 +149,11 @@ class TestBuildExternalToolRegistry:
         registry = build_external_tool_registry(app)
         assert callable(registry["authorSkill"])
 
+    def test_report_bug_handler_is_callable(self):
+        app = _make_mock_app()
+        registry = build_external_tool_registry(app)
+        assert callable(registry["reportBug"])
+
     def test_handlers_are_coroutine_functions(self):
         """Handlers must be async (awaitable) so the MCP dispatch can await them."""
         import inspect
@@ -144,6 +164,9 @@ class TestBuildExternalToolRegistry:
         )
         assert inspect.iscoroutinefunction(registry["authorSkill"]), (
             "authorSkill handler must be async"
+        )
+        assert inspect.iscoroutinefunction(registry["reportBug"]), (
+            "reportBug handler must be async"
         )
 
 
@@ -393,3 +416,111 @@ class TestAnonymousConsumer:
         consumer = _anonymous_consumer()
         assert consumer.token_budget_per_request > 0
         assert consumer.rpm_cap > 0
+
+
+# ---------------------------------------------------------------------------
+# reportBug handler behaviour (Sprint 1)
+# ---------------------------------------------------------------------------
+
+
+class TestReportBugHandler:
+    def _make_mock_app_with_error_store(self, tmp_path=None):
+        """Return a mock app with error_store attached."""
+        import tempfile
+        from pathlib import Path
+        from framework.deploy.error_store import ErrorStore
+
+        if tmp_path is None:
+            tmp_path = Path(tempfile.mkdtemp())
+
+        app = _make_mock_app()
+        app.state.error_store = ErrorStore(tmp_path)
+        return app, tmp_path
+
+    def test_happy_path_returns_queued_true(self, tmp_path):
+        app, _ = self._make_mock_app_with_error_store(tmp_path)
+        registry = build_external_tool_registry(app)
+        handler = registry["reportBug"]
+
+        result = _run(handler(
+            requestId="req-abc123",
+            tool="authorSkill",
+            description="Session failed on continue",
+        ))
+
+        assert result["queued"] is True
+
+    def test_happy_path_returns_queue_id(self, tmp_path):
+        app, _ = self._make_mock_app_with_error_store(tmp_path)
+        registry = build_external_tool_registry(app)
+        handler = registry["reportBug"]
+
+        result = _run(handler(
+            requestId="req-def456",
+            tool="askKnowledgeBase",
+            description="Query returned error",
+        ))
+
+        assert "queueId" in result
+        assert result["queueId"].startswith("BUG-queue-")
+
+    def test_returns_friendly_message(self, tmp_path):
+        app, _ = self._make_mock_app_with_error_store(tmp_path)
+        registry = build_external_tool_registry(app)
+        handler = registry["reportBug"]
+
+        result = _run(handler(
+            requestId="req-ghi789",
+            tool="authorSkill",
+            description="It broke",
+        ))
+
+        assert "message" in result
+        assert len(result["message"]) > 0
+
+    def test_writes_to_error_store(self, tmp_path):
+        from framework.deploy.error_store import ErrorStore
+
+        app, store_path = self._make_mock_app_with_error_store(tmp_path)
+        registry = build_external_tool_registry(app)
+        handler = registry["reportBug"]
+
+        _run(handler(
+            requestId="req-store-check",
+            tool="authorSkill",
+            description="storing bug",
+        ))
+
+        store = ErrorStore(store_path)
+        bugs = store.read_user_bugs()
+        assert len(bugs) == 1
+        assert bugs[0]["request_id"] == "req-store-check"
+
+    def test_no_error_store_does_not_raise(self):
+        """reportBug must not raise even when app.state.error_store is None."""
+        app = _make_mock_app()
+        app.state.error_store = None
+        registry = build_external_tool_registry(app)
+        handler = registry["reportBug"]
+
+        # Should not raise
+        result = _run(handler(
+            requestId="req-no-store",
+            tool="authorSkill",
+            description="test",
+        ))
+        assert result["queued"] is True
+
+    def test_optional_input_field_accepted(self, tmp_path):
+        app, _ = self._make_mock_app_with_error_store(tmp_path)
+        registry = build_external_tool_registry(app)
+        handler = registry["reportBug"]
+
+        result = _run(handler(
+            requestId="req-with-input",
+            tool="authorSkill",
+            description="tried to continue",
+            input={"synthId": "synth-abc", "input": "continue"},
+        ))
+
+        assert result["queued"] is True

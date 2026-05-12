@@ -19,6 +19,15 @@ object_storage:
   namespace: YOUR_TENANCY_NAMESPACE
   bucket: kb-raw-prod
   lifecycle_days: 365
+
+# ---- Artifact Store (uploadArtifact MCP tool; per ADR-021) -------------------
+artifact_store:
+  mode: oci
+  max_file_size_mb: 10
+  oci:
+    namespace: YOUR_TENANCY_NAMESPACE   # confirm via DECISION-005
+    bucket: kbf-uploads
+    region: eu-frankfurt-1
 streaming:
   stream_ocid: ocid1.stream.oc1.iad.YOUR_PROD_STREAM
   bootstrap_servers: cell-1.streaming.us-ashburn-1.oci.oraclecloud.com:9092

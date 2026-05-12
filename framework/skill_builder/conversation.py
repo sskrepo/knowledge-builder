@@ -112,9 +112,10 @@ class SkillBuilderConversation:
     replace the _* handlers while keeping the state machine intact.
     """
 
-    def __init__(self, persona: str = "", user_id: str = "", llm=None):
+    def __init__(self, persona: str = "", user_id: str = "", llm=None, artifact_store=None):
         self._persona = persona
         self._llm = llm
+        self._artifact_store = artifact_store
         self._state = "IDENTIFY_PERSONA"
         now = _now_iso()
         synth_id = _make_synth_id(persona, now)
@@ -228,11 +229,12 @@ class SkillBuilderConversation:
         return d
 
     @classmethod
-    def from_dict(cls, d: dict, llm=None) -> "SkillBuilderConversation":
+    def from_dict(cls, d: dict, llm=None, artifact_store=None) -> "SkillBuilderConversation":
         """Restore a session from a persisted dict."""
         obj = cls.__new__(cls)
         obj._persona = d.get("persona", "")
         obj._llm = llm
+        obj._artifact_store = artifact_store
         obj._state = d.get("state", "IDENTIFY_PERSONA")
         obj._data = _SessionData(
             intent_description=d.get("intent_description", ""),
@@ -343,6 +345,11 @@ class SkillBuilderConversation:
 
         path = user_input.strip()
 
+        # --- artifact: prefix path (uploadArtifact flow, ADR-021) ---
+        if path.startswith("artifact:"):
+            return self._handle_uploaded_artifact(path)
+
+        # --- Local filesystem path (laptop direct-path) ---
         if Path(path).exists() and Path(path).suffix in (".pptx", ".docx", ".md", ".txt"):
             fields, mapping = analyze_artifact(path)
             self._data.artifact_path = path
@@ -357,6 +364,74 @@ class SkillBuilderConversation:
 
         self._state = "REVIEW_FIELDS"
         return self._handle_review_fields_prompt(source)
+
+    def _handle_uploaded_artifact(self, user_input: str) -> ConversationTurn:
+        """Handle 'artifact:<filename> id:<artifact_id>' input (ADR-021).
+
+        Parses the artifact:/<filename> id:<artifact_id> syntax, resolves the
+        artifact via ArtifactStore, and calls analyze_artifact on the local path.
+
+        Falls back to generic field list if the artifact_store is not wired or
+        the artifact_id is not found.
+        """
+        from .analyze_artifact import analyze_artifact
+        import re
+
+        # Parse "artifact:<filename> id:<artifact_id>"
+        m = re.match(r"^artifact:(\S+)\s+id:(\S+)$", user_input.strip())
+        if not m:
+            # Malformed — treat as field-name input
+            log.warning(
+                "_handle_uploaded_artifact: could not parse %r — falling back to field list",
+                user_input,
+            )
+            fields, mapping = self._parse_fields_from_input(user_input)
+            self._data.fields = fields
+            self._data.slide_mapping = mapping
+            self._state = "REVIEW_FIELDS"
+            return self._handle_review_fields_prompt("your field list")
+
+        filename, artifact_id = m.group(1), m.group(2)
+
+        if self._artifact_store is None:
+            log.warning(
+                "_handle_uploaded_artifact: artifact_store not wired — fallback for %s",
+                artifact_id,
+            )
+            fields, mapping = self._parse_fields_from_input(filename)
+            self._data.fields = fields
+            self._data.slide_mapping = mapping
+            self._state = "REVIEW_FIELDS"
+            return self._handle_review_fields_prompt(f"filename '{filename}'")
+
+        local_path = self._artifact_store.resolve(artifact_id)
+
+        if local_path is None:
+            log.warning(
+                "_handle_uploaded_artifact: artifact_id=%s not found in store",
+                artifact_id,
+            )
+            self._state = "REVIEW_FIELDS"
+            fields, mapping = self._parse_fields_from_input(filename)
+            self._data.fields = fields
+            self._data.slide_mapping = mapping
+            return ConversationTurn(
+                state="REVIEW_FIELDS",
+                message=(
+                    f"⚠️ Could not find uploaded artifact '{artifact_id}' on the server. "
+                    "I'll derive fields from the filename instead — "
+                    "you can correct them in the next step.\n\n"
+                ) + self._handle_review_fields_prompt(f"filename '{filename}'").message,
+                options=["ok", "add <field>", "remove <field>", "rename <old> to <new>"],
+            )
+
+        fields, mapping = analyze_artifact(str(local_path))
+        self._data.artifact_path = str(local_path)
+        self._data.fields = fields
+        self._data.slide_mapping = mapping
+
+        self._state = "REVIEW_FIELDS"
+        return self._handle_review_fields_prompt(f"artifact '{filename}'")
 
     def _handle_review_fields_prompt(self, source: str) -> ConversationTurn:
         fields = self._data.fields

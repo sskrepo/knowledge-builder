@@ -54,6 +54,15 @@ object_storage:
   bucket: kb-raw-dev
   lifecycle_days: 90
 
+# ---- Artifact Store (uploadArtifact MCP tool; per ADR-021) -------------------
+artifact_store:
+  mode: filestore          # filestore | oci
+  max_file_size_mb: 10
+  oci:
+    namespace: YOUR_TENANCY_NAMESPACE   # same namespace as object_storage above
+    bucket: kbf-uploads                 # dedicated bucket (DECISION-005)
+    region: eu-frankfurt-1
+
 # ---- OCI Streaming (change-event fan-out for incremental ingest) -------------
 streaming:
   stream_ocid: ocid1.stream.oc1.iad.YOUR_STREAM_OCID

@@ -1,8 +1,9 @@
 ---
 id: DECISION-005
 title: OCI Object Storage configuration for artifact upload bucket
-status: pending
+status: decided
 created: 2026-05-12
+decided: 2026-05-12
 owner: architect
 tags: [oci, storage, deploy, skill-builder]
 related: [ADR-021]
@@ -55,59 +56,50 @@ Server generates a Pre-Authenticated Request URL for each upload; the MCP tool r
 
 ---
 
-## Recommendation
+## Decision
 
-**Option A — dedicated `kbf-uploads` bucket.**
+**Option A — dedicated `kbf-uploads` bucket. Decided 2026-05-12.**
 
-The 10-minute setup cost is worthwhile for clean lifecycle scoping and IAM separation. A single lifecycle rule deletes everything older than 7 days with no prefix complexity.
+User confirmation:
+- **Lifecycle rule**: None — no auto-cleanup. OCI Object Storage is cheap; cleanup is a v2 concern.
+- **Auth (laptop)**: OCI CLI subprocess (`--auth security_token --profile adpcpprod`).
+- **Auth (production)**: OCI Python SDK with instance principals.
+- **Compartment**: `adp_faops_network` compartment.
+- **Region**: `eu-frankfurt-1` (co-located with ADB + GenAI).
+- **Bucket name**: `kbf-uploads`.
 
----
-
-## What you need to supply
-
-Respond to this decision with:
-
-```
-DECISION-005: option A   (or option B)
-
-OCI answers:
-- tenancy_namespace:  <your tenancy namespace — e.g. "axyz1234abcd">
-- bucket_name:        kbf-uploads   (or your preferred name)
-- region:             eu-frankfurt-1   (or confirm different)
-```
-
-The tenancy namespace appears in the OCI Console under **Object Storage > Buckets > [any bucket]** in the "Namespace" field. It is also in `dev.yaml:object_storage.namespace`.
+**Tenancy namespace**: Needs to be confirmed by user via OCI Console → Object Storage → any bucket → "Namespace" field. The `adpcpprod` OCI CLI profile uses operator-access auth and returned namespace `bmc_operator_access`, which is the operator namespace — not the user-tenant namespace where `kbf-uploads` should be created. Once confirmed, populate `prod.yaml:artifact_store.oci.namespace` and `KBF_ARTIFACT_OCI_NAMESPACE` env var.
 
 ---
 
-## Setup steps (if Option A chosen — ~10 minutes)
+## Bucket creation steps (10 min, OCI Console or CLI from the OCI VM)
+
+See §Setup steps below. The bucket must be created in `adp_faops_network` compartment. IAM: add one policy statement allowing the MCP server's compute dynamic group to `manage objects` on `kbf-uploads`.
+
+---
+
+## Setup steps (~10 minutes, OCI Console)
 
 1. **Create the bucket**
    - OCI Console → Object Storage → Buckets → Create Bucket
-   - Name: `kbf-uploads` (or `kbf-uploads-prod` if you prefer env-suffixed)
-   - Compartment: same as existing `kb-raw-*` bucket
+   - Compartment: `adp_faops_network`
+   - Name: `kbf-uploads`
    - Visibility: Private
    - Versioning: Disabled (uploads are ephemeral, versioning adds cost)
+   - No lifecycle rule needed.
 
-2. **Add a lifecycle rule**
-   - Open the new bucket → Lifecycle Policy → Create Rule
-   - Rule name: `delete-stale-uploads`
-   - Object name filter: leave blank (applies to all objects in bucket)
-   - Action: Delete
-   - Number of days: 7
-
-3. **Add an IAM policy statement** (if using instance principal on VM)
+2. **Add an IAM policy statement** (instance principal on OCI VM)
    - Navigate to IAM → Policies → your existing KBF instance principal policy
    - Add one statement:
      ```
      Allow dynamic-group kbf-compute to manage objects
-       in compartment <your-compartment>
+       in compartment adp_faops_network
        where target.bucket.name = 'kbf-uploads'
      ```
 
-4. **Confirm namespace**
+3. **Confirm namespace**
    - OCI Console → Object Storage → any bucket → copy the "Namespace" value.
-   - This goes in `prod.yaml:artifact_store.oci.namespace`.
+   - Populate `prod.yaml:artifact_store.oci.namespace` and set `KBF_ARTIFACT_OCI_NAMESPACE` env var on the OCI VM.
 
 ---
 
@@ -141,7 +133,7 @@ All three commands succeed from the OCI VM (or from your laptop using `adpcpprod
 
 ## Deliver to agents
 
-Once decided and bucket is created, provide:
+Once bucket is created and namespace is confirmed, provide:
 
 ```
 KBF_ARTIFACT_OCI_NAMESPACE=<tenancy-namespace>
@@ -155,11 +147,12 @@ Or equivalently, in `prod.yaml`:
 artifact_store:
   mode: oci
   max_file_size_mb: 10
-  ttl_days: 7
   oci:
     namespace: <tenancy-namespace>
     bucket: kbf-uploads
     region: eu-frankfurt-1
 ```
 
-Backend Dev needs these values to wire `OciArtifactStore` and populate the staging + prod configs.
+Note: no `ttl_days` in prod.yaml — there is no lifecycle rule on the bucket. Cleanup is application-driven via `artifact_store.cleanup(synth_id)`.
+
+Backend Dev needs `namespace` confirmed to wire `OciArtifactStore` and populate the staging + prod configs.

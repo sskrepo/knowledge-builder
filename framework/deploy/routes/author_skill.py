@@ -71,6 +71,7 @@ async def author_skill_start_or_continue(req: Request):
     result = _start_or_continue_session(
         session_store=req.app.state.session_store,
         llm=getattr(req.app.state, "llm", None),
+        artifact_store=getattr(req.app.state, "artifact_store", None),
         user_id=consumer.user_id,
         synth_id=None,
         user_input=None,
@@ -186,6 +187,7 @@ def _start_or_continue_session(
     user_input: str | None,
     persona: str = "",
     intent_description: str = "",
+    artifact_store=None,
 ) -> dict:
     """Start a new authoring session or advance an existing one.
 
@@ -193,13 +195,15 @@ def _start_or_continue_session(
     Both REST routes and the MCP Track B tool call this function.
 
     Args:
-        session_store: A SessionStore instance.
-        llm: LLMClient or None (stub mode).
-        user_id: Stable user identifier from ConsumerManifest.
-        synth_id: If provided, load and continue this session. If None, create new.
-        user_input: Text to pass to ``conversation.respond()``. Ignored when starting.
-        persona: Persona hint for new sessions.
+        session_store:      A SessionStore instance.
+        llm:                LLMClient or None (stub mode).
+        user_id:            Stable user identifier from ConsumerManifest.
+        synth_id:           If provided, load and continue this session. If None, create new.
+        user_input:         Text to pass to ``conversation.respond()``. Ignored when starting.
+        persona:            Persona hint for new sessions.
         intent_description: Task description for new sessions.
+        artifact_store:     ArtifactStore or None. Threaded into SkillBuilderConversation
+                            so the ANALYZE_ARTIFACT state can resolve uploaded artifacts.
 
     Returns:
         A dict envelope with synth_id, state, message, data, options,
@@ -219,7 +223,9 @@ def _start_or_continue_session(
                 }
             }
 
-        conversation = SkillBuilderConversation.from_dict(session, llm=llm)
+        conversation = SkillBuilderConversation.from_dict(
+            session, llm=llm, artifact_store=artifact_store
+        )
         turn = conversation.respond(user_input or "")
     else:
         # Start new session
@@ -227,6 +233,7 @@ def _start_or_continue_session(
             persona=persona,
             user_id=user_id,
             llm=llm,
+            artifact_store=artifact_store,
         )
         turn = conversation.start(intent_description=intent_description)
         synth_id = turn.synth_id  # always stamped by _turn()
@@ -238,6 +245,15 @@ def _start_or_continue_session(
     # DB constraint CHK_ASS_STATUS allows: in_progress | completed | abandoned | expired.
     # "committed" is NOT a valid value — use "completed" for finished sessions (BUG-006).
     status = "completed" if turn.done else "in_progress"
+
+    # Clean up uploaded artifacts when the session completes (ADR-021)
+    if turn.done and artifact_store is not None:
+        try:
+            resolved_synth_id = turn.synth_id or (synth_id or "")
+            if resolved_synth_id:
+                artifact_store.cleanup(resolved_synth_id)
+        except Exception as exc:  # pylint: disable=broad-except
+            log.warning("artifact cleanup failed for synth_id=%s: %s", synth_id, exc)
 
     # Persist session dict with last_turn so GET can re-serve it
     session_dict = conversation.to_dict()
@@ -265,6 +281,7 @@ async def _handle_continue(req: Request, consumer, synth_id: str, user_input: st
     result = _start_or_continue_session(
         session_store=req.app.state.session_store,
         llm=getattr(req.app.state, "llm", None),
+        artifact_store=getattr(req.app.state, "artifact_store", None),
         user_id=consumer.user_id,
         synth_id=synth_id,
         user_input=user_input,

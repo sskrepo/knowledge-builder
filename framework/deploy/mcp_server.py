@@ -60,6 +60,7 @@ def _load_app():
     from .session.factory import build_session_store
     from .cost_store import CostStore
     from .error_store import ErrorStore
+    from .artifact_store import build_artifact_store
 
     # Sprint 3 — route modules
     from .routes.ask import router as ask_router
@@ -107,6 +108,7 @@ def _load_app():
         app.state.session_store = build_session_store(pool=adb_pool)
         app.state.cost_store = CostStore(store_root)
         app.state.error_store = ErrorStore(store_root)
+        app.state.artifact_store = build_artifact_store(pool=adb_pool, env=kbf_env)
         app.state.startup_time = time.time()
 
         # --- Shims + LLM ---

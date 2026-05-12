@@ -51,6 +51,7 @@
 - [ADR-018 — Skill suggestion loop](adr/ADR-018-skill-suggestion-loop.md)
 - [ADR-019 — Bastion auto-reconnect for Oracle ADB in laptop mode](adr/ADR-019-bastion-auto-reconnect.md)
 - [ADR-020 — Codex CLI as MCP transport for laptop mode](adr/ADR-020-codex-cli-mcp-transport.md)
+- [ADR-021 — Artifact upload for remote authorSkill sessions](adr/ADR-021-artifact-upload-oci.md)
 
 ## Engineering
 - 🚀 **[laptop-quickstart](engineering/laptop-quickstart.md)** — V2; run framework end-to-end on laptop with no provisioning (no ADB, no Vault, no OpenAI required)

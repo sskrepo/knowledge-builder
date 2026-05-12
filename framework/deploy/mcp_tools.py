@@ -116,6 +116,40 @@ EXTERNAL_TOOLS_SCHEMA = [
             },
         },
     },
+    {
+        "name": "uploadArtifact",
+        "description": (
+            "Upload a local file (PPT, DOCX, Markdown, text) to the server for "
+            "analysis during an authorSkill session. Call this BEFORE providing "
+            "an artifact reference in an authorSkill turn. "
+            "Returns an artifactId — include it in the next authorSkill input as: "
+            "'artifact:<filename> id:<artifactId>'"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["content", "filename", "synthId"],
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "Base64-encoded file bytes.",
+                },
+                "filename": {
+                    "type": "string",
+                    "description": (
+                        "Original filename including extension "
+                        "(e.g. q2.pptx). Extension selects the analyzer."
+                    ),
+                },
+                "synthId": {
+                    "type": "string",
+                    "description": (
+                        "The authorSkill session ID. "
+                        "Scopes the upload for cleanup when the session completes."
+                    ),
+                },
+            },
+        },
+    },
 ]
 
 
@@ -142,6 +176,7 @@ def build_external_tool_registry(app) -> dict[str, Any]:
         "reportBug": _make_report_bug_handler(app),
         "askKnowledgeBase": _make_ask_handler(app),
         "authorSkill": _make_author_skill_handler(app),
+        "uploadArtifact": _make_upload_artifact_handler(app),
     }
 
 
@@ -239,6 +274,7 @@ def _make_author_skill_handler(app):
 
         session_store = app.state.session_store
         llm = getattr(app.state, "llm", None)
+        artifact_store = getattr(app.state, "artifact_store", None)
 
         log.info(
             "mcp:authorSkill consumer=%s synth_id=%s",
@@ -248,6 +284,7 @@ def _make_author_skill_handler(app):
         result = _start_or_continue_session(
             session_store=session_store,
             llm=llm,
+            artifact_store=artifact_store,
             user_id=user_id,
             synth_id=synthId if synthId else None,
             user_input=input,
@@ -319,6 +356,124 @@ def _make_report_bug_handler(app):
         }
 
     return report_bug_handler
+
+
+def _make_upload_artifact_handler(app):
+    """Build the uploadArtifact MCP tool handler (ADR-021).
+
+    Accepts base64-encoded file bytes, validates the content, stores via the
+    ArtifactStore, and returns an artifactId for use in the next authorSkill turn.
+
+    Requires 'write' scope.
+    """
+    import asyncio
+    import base64
+    from datetime import datetime, timezone
+    from pathlib import Path
+    from uuid import uuid4
+
+    _ACCEPTED_SUFFIXES = {".pptx", ".docx", ".md", ".txt"}
+    _MAX_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
+
+    async def upload_artifact_handler(
+        *,
+        content: str,
+        filename: str,
+        synthId: str,
+        _consumer=None,
+    ) -> dict:
+        """MCP handler for uploadArtifact.
+
+        Args:
+            content:   Base64-encoded file bytes.
+            filename:  Original filename including extension.
+            synthId:   The authorSkill session ID.
+            _consumer: ConsumerManifest injected by MCP dispatch.
+        """
+        consumer = _consumer or _anonymous_consumer()
+
+        # Scope check
+        if "write" not in consumer.scopes:
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": "uploadArtifact requires write scope."}],
+            }
+
+        # Validate filename / extension
+        suffix = Path(filename).suffix.lower()
+        if suffix not in _ACCEPTED_SUFFIXES:
+            return {
+                "isError": True,
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        f"Unsupported file type '{suffix}'. "
+                        f"Accepted: {', '.join(sorted(_ACCEPTED_SUFFIXES))}"
+                    ),
+                }],
+            }
+
+        if not synthId:
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": "synthId is required."}],
+            }
+
+        # Decode base64
+        try:
+            data = base64.b64decode(content, validate=True)
+        except Exception:
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": "content must be valid base64."}],
+            }
+
+        # Size check (after decode)
+        if len(data) > _MAX_SIZE_BYTES:
+            return {
+                "isError": True,
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        f"File exceeds 10 MB limit "
+                        f"(got {len(data) / 1024 / 1024:.1f} MB)."
+                    ),
+                }],
+            }
+
+        artifact_id = f"art-{uuid4().hex[:8]}"
+        artifact_store = getattr(app.state, "artifact_store", None)
+
+        if artifact_store is None:
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": "Artifact store not available."}],
+            }
+
+        log.info(
+            "mcp:uploadArtifact synth_id=%s artifact_id=%s filename=%s size=%d consumer=%s",
+            synthId, artifact_id, filename, len(data), consumer.name,
+        )
+
+        # Run blocking I/O in a thread
+        await asyncio.to_thread(
+            artifact_store.upload,
+            synthId,
+            artifact_id,
+            filename,
+            data,
+        )
+
+        expires_at = datetime.now(tz=timezone.utc).replace(microsecond=0).isoformat()
+
+        return {
+            "artifactId": artifact_id,
+            "filename": filename,
+            "sizeBytes": len(data),
+            "expiresAt": expires_at,
+        }
+
+    return upload_artifact_handler
 
 
 # ---------------------------------------------------------------------------

@@ -49,7 +49,7 @@ Storage is dual-mode, mirroring the `SessionStore` pattern:
 - `KBF_ENV=laptop` (or `KBF_STORE_BACKEND=filestore`) → `FilestoreArtifactStore` writes under `~/.kbf/store/uploads/{synth_id}/{artifact_id}/`.
 - `KBF_ENV=staging|production` (or `KBF_STORE_BACKEND=oci`) → `OciArtifactStore` writes to OCI Object Storage with key prefix `kbf-uploads/{synth_id}/{artifact_id}/{filename}`.
 
-Cleanup is tied to session lifecycle: when a session reaches `DONE` or `committed` status, the framework calls `artifact_store.cleanup(synth_id)`. A 7-day OCI lifecycle rule provides a hard TTL backstop for any uploads that were orphaned before a clean session close.
+Cleanup is tied to session lifecycle: when a session reaches `DONE` or `committed` status, the framework calls `artifact_store.cleanup(synth_id)`. There is no OCI lifecycle rule — OCI Object Storage is cheap, and a systematic cleanup job is a v2 concern. The `cleanup(synth_id)` call on session DONE is the primary garbage-collection path.
 
 ---
 
@@ -352,7 +352,18 @@ Example: `kbf-uploads/synth-tpm-abc123/art-d4e5f6a7/q2-highlights.pptx`
 The `synth_id` prefix enables bulk cleanup via `ListObjects(prefix="kbf-uploads/{synth_id}/")`
 followed by `DeleteObject` per key.
 
-### OCI SDK calls
+### Auth strategy (two modes)
+
+`OciArtifactStore` selects its auth mechanism based on `KBF_ENV`:
+
+| `KBF_ENV` | Auth mechanism | Implementation |
+|---|---|---|
+| `staging` / `production` | OCI Python SDK, `InstancePrincipalsSecurityTokenSigner` | `oci.object_storage.ObjectStorageClient` (same as OCI GenAI in ADR-014) |
+| `laptop` (if OCI backend is forced via `KBF_ARTIFACT_STORE_BACKEND=oci`) | OCI CLI subprocess | `subprocess.run(["oci", "os", "object", ...])` with `--profile` + `--auth security_token` |
+
+The laptop path exists only as an escape hatch for developers who explicitly want to test the OCI backend. Normal laptop operation uses `FilestoreArtifactStore` (no OCI credentials required). The CLI subprocess approach avoids SDK session-auth wiring, which is noticeably more complex than the OCI CLI's built-in session-auth support.
+
+### OCI SDK calls (staging / production)
 
 | Operation | OCI SDK method |
 |---|---|
@@ -361,7 +372,14 @@ followed by `DeleteObject` per key.
 | List for cleanup | `ObjectStorageClient.list_objects(namespace, bucket, prefix="kbf-uploads/{synth_id}/")` |
 | Delete per key | `ObjectStorageClient.delete_object(namespace, bucket, object_name)` |
 
-The OCI SDK to use is `oci.object_storage.ObjectStorageClient` (Python package `oci`). Auth is `oci.auth.signers.InstancePrincipalsSecurityTokenSigner` on the VM (same as OCI GenAI in ADR-014). On laptop (if ever used), falls back to config-file signer from `~/.oci/config`.
+### OCI CLI subprocess calls (laptop OCI override)
+
+| Operation | CLI command |
+|---|---|
+| Upload | `oci os object put --namespace N --bucket-name B --name KEY --file PATH --auth security_token --profile P` |
+| Download (resolve) | `oci os object get --namespace N --bucket-name B --name KEY --file DEST --auth security_token --profile P` |
+| List for cleanup | `oci os object list --namespace N --bucket-name B --prefix PREFIX --auth security_token --profile P` |
+| Delete per key | `oci os object delete --namespace N --bucket-name B --name KEY --force --auth security_token --profile P` |
 
 ### Temp directory for resolve()
 
@@ -469,7 +487,7 @@ Important:
 | Session DONE / committed | `artifact_store.cleanup(synth_id)` called by `_start_or_continue_session` |
 | Session abandoned via DELETE | Same cleanup hook (add to `author_skill.py:author_skill_delete`) |
 | Session expired by TTL job | `cleanup_job.py` should also call `artifact_store.cleanup(synth_id)` for each expired session |
-| OCI lifecycle rule | Deletes any objects under `kbf-uploads/` prefix older than 7 days — catches orphaned uploads |
+| Orphaned uploads (no lifecycle rule) | No automatic OCI-side TTL. OCI Object Storage is cheap; a systematic cleanup sweep is a v2 concern. Uploads that survive past session DONE will persist until manually purged or a future cleanup job is added. |
 
 ---
 
@@ -499,6 +517,7 @@ Important:
 - A 10 MB PPT must be base64-encoded (13.3 MB over the wire) within the MCP text protocol. This is one-time per session, not per turn, but it is a noticeable payload.
 - OCI Object Storage adds a new SDK dependency (`oci.object_storage.ObjectStorageClient`) for the production path. On laptop, this dependency is never exercised.
 - The `OciArtifactStore.resolve()` call downloads the file to the VM's local temp area on each resolution. For the current single-instance deployment this is fine; multi-instance deployments would need shared storage or sticky sessions (not a concern for v1).
+- There is no server-side lifecycle rule on the `kbf-uploads` bucket. Orphaned uploads (sessions that never reach DONE) will persist in OCI until a cleanup job is added. OCI Object Storage pricing makes this acceptable for v1.
 - `SkillBuilderConversation` gains an `artifact_store` constructor parameter, increasing the constructor surface. This is a backward-compatible addition (default `None`).
 
 ### Reversibility
