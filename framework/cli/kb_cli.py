@@ -746,6 +746,10 @@ def cmd_export_bugs(args):
                 cols = [d[0].lower() for d in cur.description]
                 for row in cur.fetchall():
                     rec = dict(zip(cols, row))
+                    # Materialise any Oracle LOB values to str
+                    for k, v in rec.items():
+                        if hasattr(v, "read"):
+                            rec[k] = v.read()
                     extra: dict = {}
                     if rec.get("extra_json"):
                         try:
@@ -773,6 +777,10 @@ def cmd_export_bugs(args):
                 cols = [d[0].lower() for d in cur.description]
                 for row in cur.fetchall():
                     rec = dict(zip(cols, row))
+                    # Materialise any Oracle LOB values to str
+                    for k, v in rec.items():
+                        if hasattr(v, "read"):
+                            rec[k] = v.read()
                     if rec.get("report_json"):
                         try:
                             rec["_report"] = json.loads(rec["report_json"])
@@ -797,6 +805,10 @@ def cmd_export_bugs(args):
         ts = _fmt_ts(bug.get("timestamp_utc"))
         tool = bug.get("tool", "unknown")
         description = bug.get("description", "")
+        # Oracle CLOBs come back as LOB objects — materialise to str before slicing
+        if hasattr(description, "read"):
+            description = description.read()
+        description = str(description) if description else ""
         summary_line = description[:100] + ("…" if len(description) > 100 else "")
 
         input_data = bug.get("input", bug.get("triggering_input", {}))
