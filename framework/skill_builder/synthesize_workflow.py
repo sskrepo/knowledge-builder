@@ -123,7 +123,7 @@ def _build_requires_extractions(
     entries: list[dict] = []
 
     if gaps:
-        kb_name = f"{persona}.{skill_name}_data"
+        kb_name = f"{persona}.{skill_name}"
         entries.append({
             "kb": kb_name,
             "required_fields": gaps,
@@ -140,7 +140,7 @@ def _build_requires_extractions(
 
     if not entries and fields:
         entries.append({
-            "kb": f"{persona}.{skill_name}_data",
+            "kb": f"{persona}.{skill_name}",
             "required_fields": list(fields),
         })
 
