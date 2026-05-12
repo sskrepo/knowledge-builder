@@ -94,7 +94,7 @@ class AdbSessionStore(SessionStore):
 
     @staticmethod
     def _to_dt(value):
-        """Coerce an ISO-8601 string (or a datetime) into a timezone-aware datetime.
+        """Coerce an ISO-8601 string (or a datetime) into a datetime for binding.
 
         ``oracledb`` binds Python ``datetime`` values directly into TIMESTAMP
         columns; ISO strings trigger ORA-01843 because Oracle tries to parse
@@ -109,6 +109,25 @@ class AdbSessionStore(SessionStore):
         if isinstance(value, str) and value.endswith("Z"):
             value = value[:-1] + "+00:00"
         return datetime.fromisoformat(value)
+
+    @staticmethod
+    def _as_utc(dt) -> "datetime | None":
+        """Normalise a datetime to UTC-aware.
+
+        Oracle plain TIMESTAMP columns strip timezone on write and return
+        timezone-naive ``datetime`` objects on read.  We always store UTC, so
+        naive datetimes from Oracle are implicitly UTC — attach the tzinfo.
+        Aware datetimes are returned unchanged.  None is returned as-is.
+        """
+        if dt is None:
+            return None
+        if isinstance(dt, str):
+            if dt.endswith("Z"):
+                dt = dt[:-1] + "+00:00"
+            dt = datetime.fromisoformat(dt)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
 
     @staticmethod
     def _install_dict_rowfactory(cur) -> None:
@@ -197,13 +216,13 @@ class AdbSessionStore(SessionStore):
         session["updated_at"] = str(row["updated_at"])
 
         # Auto-expire check
+        # _as_utc() normalises both ISO strings and timezone-naive datetimes
+        # (Oracle plain TIMESTAMP strips tz on write) to UTC-aware datetimes
+        # so the comparison with datetime.now(tz=timezone.utc) never raises
+        # TypeError: can't compare offset-naive and offset-aware datetimes.
         expires_at_val = row["expires_at"]
         if expires_at_val and session.get("status") == "in_progress":
-            if isinstance(expires_at_val, str):
-                expires_dt = datetime.fromisoformat(expires_at_val)
-            else:
-                # oracledb may return a datetime object
-                expires_dt = expires_at_val
+            expires_dt = self._as_utc(expires_at_val)
             if expires_dt < datetime.now(tz=timezone.utc):
                 log.info(
                     "AdbSessionStore.load: session %s/%s expired — marking expired",
