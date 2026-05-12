@@ -61,6 +61,7 @@ def _load_app():
     from .cost_store import CostStore
     from .error_store import ErrorStore
     from .artifact_store import build_artifact_store
+    from .skill_store import build_skill_store
 
     # Sprint 3 — route modules
     from .routes.ask import router as ask_router
@@ -106,9 +107,19 @@ def _load_app():
 
         # build_session_store auto-selects ADB when pool is not None
         app.state.session_store = build_session_store(pool=adb_pool)
-        app.state.cost_store = CostStore(store_root)
-        app.state.error_store = ErrorStore(store_root)
         app.state.artifact_store = build_artifact_store(pool=adb_pool, env=kbf_env)
+        app.state.skill_store = build_skill_store(pool=adb_pool, env=kbf_env)
+
+        # Error + cost stores: ADB-backed when pool is available, else filesystem
+        if adb_pool:
+            from .error_store import AdbErrorStore
+            from .cost_store import AdbCostStore
+            app.state.error_store = AdbErrorStore(adb_pool, store_root)
+            app.state.cost_store = AdbCostStore(adb_pool, store_root)
+        else:
+            app.state.error_store = ErrorStore(store_root)
+            app.state.cost_store = CostStore(store_root)
+
         app.state.startup_time = time.time()
 
         # --- Shims + LLM ---

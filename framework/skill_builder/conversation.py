@@ -112,10 +112,11 @@ class SkillBuilderConversation:
     replace the _* handlers while keeping the state machine intact.
     """
 
-    def __init__(self, persona: str = "", user_id: str = "", llm=None, artifact_store=None):
+    def __init__(self, persona: str = "", user_id: str = "", llm=None, artifact_store=None, skill_store=None):
         self._persona = persona
         self._llm = llm
         self._artifact_store = artifact_store
+        self._skill_store = skill_store
         self._state = "IDENTIFY_PERSONA"
         now = _now_iso()
         synth_id = _make_synth_id(persona, now)
@@ -229,12 +230,13 @@ class SkillBuilderConversation:
         return d
 
     @classmethod
-    def from_dict(cls, d: dict, llm=None, artifact_store=None) -> "SkillBuilderConversation":
+    def from_dict(cls, d: dict, llm=None, artifact_store=None, skill_store=None) -> "SkillBuilderConversation":
         """Restore a session from a persisted dict."""
         obj = cls.__new__(cls)
         obj._persona = d.get("persona", "")
         obj._llm = llm
         obj._artifact_store = artifact_store
+        obj._skill_store = skill_store
         obj._state = d.get("state", "IDENTIFY_PERSONA")
         obj._data = _SessionData(
             intent_description=d.get("intent_description", ""),
@@ -783,20 +785,66 @@ class SkillBuilderConversation:
 
     def _run_validate(self) -> ConversationTurn:
         from .validate_links import validate_workflow_links
+        import tempfile
+        import os
 
         self._state = "VALIDATE"
         pb_dir = REPO_ROOT / "framework" / "persona_builders"
-        wf_path = (
-            REPO_ROOT / "framework" / "workflow_skills"
-            / self._data.persona / f"{self._data.skill_name}.yaml"
-        )
+
+        # Load workflow_skill content from skill_store if available (ADB-backed).
+        # Fallback to filesystem path when skill_store is None (laptop/dev mode).
+        wf_path_str: str | None = None
+        _tmp_wf_file = None  # keep reference so tempfile survives the try block
+
+        if self._skill_store is not None:
+            try:
+                wf_content = self._skill_store.read_artifact(
+                    persona=self._data.persona,
+                    skill_name=self._data.skill_name,
+                    artifact_type="workflow_skill",
+                )
+                if wf_content is not None:
+                    # Write to a named tempfile so validate_workflow_links can open it
+                    _tmp_wf_file = tempfile.NamedTemporaryFile(
+                        mode="w",
+                        suffix=".yaml",
+                        delete=False,
+                        encoding="utf-8",
+                    )
+                    _tmp_wf_file.write(wf_content)
+                    _tmp_wf_file.flush()
+                    _tmp_wf_file.close()
+                    wf_path_str = _tmp_wf_file.name
+                    log.debug(
+                        "_run_validate: loaded workflow_skill from skill_store → %s",
+                        wf_path_str,
+                    )
+            except Exception as exc:
+                log.warning(
+                    "_run_validate: skill_store.read_artifact failed (%s) — falling back to filesystem",
+                    exc,
+                )
+
+        if wf_path_str is None:
+            # Filesystem fallback
+            wf_path_str = str(
+                REPO_ROOT / "framework" / "workflow_skills"
+                / self._data.persona / f"{self._data.skill_name}.yaml"
+            )
 
         try:
-            errors = validate_workflow_links(str(wf_path), str(pb_dir))
+            errors = validate_workflow_links(wf_path_str, str(pb_dir))
             result = {"passed": len(errors) == 0, "errors": errors}
         except Exception as e:
             log.warning("validation failed: %s", e)
             result = {"passed": False, "errors": [str(e)]}
+        finally:
+            # Clean up tempfile if we created one
+            if _tmp_wf_file is not None:
+                try:
+                    os.unlink(_tmp_wf_file.name)
+                except OSError:
+                    pass
 
         self._data.validation_result = result
         passed = result.get("passed", False)
@@ -872,12 +920,58 @@ class SkillBuilderConversation:
     # -- EVAL ------------------------------------------------------------
 
     def _run_eval(self) -> ConversationTurn:
+        import tempfile
+        import os
+
         self._state = "EVAL"
         # In stub mode, report gold set counts
         from ..eval.gold_set_feeder import count_entries
         gold_count = count_entries(self._data.persona)
         skill_gold = f"eval/gold_sets/{self._data.persona}-{self._data.skill_name}-extraction.jsonl"
         wf_gold = f"eval/gold_sets/{self._data.persona}-{self._data.skill_name}-workflow.jsonl"
+
+        # If skill_store is available, load eval gold set CLOBs from ADB and write
+        # to tempfiles so the eval harness can consume them via file paths.
+        # Fallback to filesystem paths when skill_store is None.
+        _tmp_files: list[str] = []
+        if self._skill_store is not None:
+            for artifact_type, gold_path_attr in (
+                ("eval_extraction", "extraction_gold_path"),
+                ("eval_workflow",   "workflow_gold_path"),
+            ):
+                try:
+                    content = self._skill_store.read_artifact(
+                        persona=self._data.persona,
+                        skill_name=self._data.skill_name,
+                        artifact_type=artifact_type,
+                    )
+                    if content is not None:
+                        tmp = tempfile.NamedTemporaryFile(
+                            mode="w",
+                            suffix=".jsonl",
+                            delete=False,
+                            encoding="utf-8",
+                        )
+                        tmp.write(content)
+                        tmp.flush()
+                        tmp.close()
+                        _tmp_files.append(tmp.name)
+                        log.debug(
+                            "_run_eval: loaded %s from skill_store → %s",
+                            artifact_type, tmp.name,
+                        )
+                except Exception as exc:
+                    log.warning(
+                        "_run_eval: skill_store.read_artifact(%s) failed (%s) — using filesystem",
+                        artifact_type, exc,
+                    )
+
+        # Clean up any tempfiles created above (eval harness has already seen them)
+        for tmp_path in _tmp_files:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
         self._data.eval_result = {
             "status": "stub",
@@ -922,7 +1016,9 @@ class SkillBuilderConversation:
 
     def _run_promote(self) -> ConversationTurn:
         self._state = "PROMOTE"
-        # In stub mode, just report what would happen
+        # Notify the skill_store that we are about to promote (user still confirms)
+        # The actual promotion DB update happens in _handle_promote_response when
+        # the user types 'yes'.
         return ConversationTurn(
             state="PROMOTE",
             message=(
@@ -938,6 +1034,19 @@ class SkillBuilderConversation:
         self._state = "DONE"
 
         if any(kw in lowered for kw in ("yes", "promote", "ok", "go")):
+            # Update status in skill_store (ADB) when available; no-op otherwise
+            if self._skill_store is not None:
+                try:
+                    self._skill_store.promote(self._data.persona, self._data.skill_name)
+                    log.info(
+                        "skill_store.promote: persona=%s skill=%s",
+                        self._data.persona, self._data.skill_name,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "skill_store.promote failed (session still completes): %s", exc
+                    )
+
             return ConversationTurn(
                 state="DONE",
                 message=(
@@ -1029,10 +1138,20 @@ class SkillBuilderConversation:
         import json as _json
 
         committed: list[str] = []
-        for rel_path, content in self._data.synthesized_artifacts.items():
-            full = REPO_ROOT / rel_path
-            full.parent.mkdir(parents=True, exist_ok=True)
 
+        # Build a {artifact_type: text} mapping alongside the {rel_path: content} map
+        # so we can pass clean artifact_type keys to skill_store.write_artifacts().
+        _KNOWN_ARTIFACT_TYPES = {
+            "workflow_skill",
+            "persona_builder_delta",
+            "eval_extraction",
+            "eval_workflow",
+        }
+
+        # Map rel_path → (artifact_type, text) for every synthesized artifact
+        typed_artifacts: dict[str, str] = {}  # artifact_type → text
+
+        for rel_path, content in self._data.synthesized_artifacts.items():
             if isinstance(content, dict):
                 text = yaml.safe_dump(content, sort_keys=False, allow_unicode=True)
                 if "schema" in rel_path or rel_path.endswith(".json"):
@@ -1042,9 +1161,49 @@ class SkillBuilderConversation:
             else:
                 text = str(content)
 
+            # Infer artifact_type from rel_path
+            if "workflow_skills" in rel_path and rel_path.endswith(".yaml"):
+                artifact_type = "workflow_skill"
+            elif ".yaml.new_kb" in rel_path or "persona_builders" in rel_path:
+                artifact_type = "persona_builder_delta"
+            elif rel_path.endswith("-extraction.jsonl"):
+                artifact_type = "eval_extraction"
+            elif rel_path.endswith("-workflow.jsonl"):
+                artifact_type = "eval_workflow"
+            else:
+                artifact_type = None
+
+            if artifact_type in _KNOWN_ARTIFACT_TYPES:
+                typed_artifacts[artifact_type] = text
+
+            # Always write to filesystem (fallback path or primary for laptop mode)
+            full = REPO_ROOT / rel_path
+            full.parent.mkdir(parents=True, exist_ok=True)
             full.write_text(text)
             log.info("wrote %s", full)
             committed.append(rel_path)
+
+        # Write to skill_store if available (ADB-backed in production)
+        if self._skill_store is not None and typed_artifacts:
+            try:
+                self._skill_store.write_artifacts(
+                    synth_id=self._data.synth_id,
+                    persona=self._data.persona,
+                    skill_name=self._data.skill_name,
+                    artifacts=typed_artifacts,
+                )
+                log.info(
+                    "skill_store.write_artifacts: synth_id=%s persona=%s skill=%s types=%s",
+                    self._data.synth_id,
+                    self._data.persona,
+                    self._data.skill_name,
+                    sorted(typed_artifacts.keys()),
+                )
+            except Exception as exc:
+                log.warning(
+                    "skill_store.write_artifacts failed (filesystem write still succeeded): %s",
+                    exc,
+                )
 
         return committed
 

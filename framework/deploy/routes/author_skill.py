@@ -72,6 +72,7 @@ async def author_skill_start_or_continue(req: Request):
         session_store=req.app.state.session_store,
         llm=getattr(req.app.state, "llm", None),
         artifact_store=getattr(req.app.state, "artifact_store", None),
+        skill_store=getattr(req.app.state, "skill_store", None),
         user_id=consumer.user_id,
         synth_id=None,
         user_input=None,
@@ -188,6 +189,7 @@ def _start_or_continue_session(
     persona: str = "",
     intent_description: str = "",
     artifact_store=None,
+    skill_store=None,
 ) -> dict:
     """Start a new authoring session or advance an existing one.
 
@@ -204,6 +206,8 @@ def _start_or_continue_session(
         intent_description: Task description for new sessions.
         artifact_store:     ArtifactStore or None. Threaded into SkillBuilderConversation
                             so the ANALYZE_ARTIFACT state can resolve uploaded artifacts.
+        skill_store:        SkillStore or None. Threaded into SkillBuilderConversation
+                            so _write_artifacts writes to ADB in addition to filesystem.
 
     Returns:
         A dict envelope with synth_id, state, message, data, options,
@@ -224,7 +228,7 @@ def _start_or_continue_session(
             }
 
         conversation = SkillBuilderConversation.from_dict(
-            session, llm=llm, artifact_store=artifact_store
+            session, llm=llm, artifact_store=artifact_store, skill_store=skill_store
         )
         turn = conversation.respond(user_input or "")
     else:
@@ -234,6 +238,7 @@ def _start_or_continue_session(
             user_id=user_id,
             llm=llm,
             artifact_store=artifact_store,
+            skill_store=skill_store,
         )
         turn = conversation.start(intent_description=intent_description)
         synth_id = turn.synth_id  # always stamped by _turn()
@@ -282,6 +287,7 @@ async def _handle_continue(req: Request, consumer, synth_id: str, user_input: st
         session_store=req.app.state.session_store,
         llm=getattr(req.app.state, "llm", None),
         artifact_store=getattr(req.app.state, "artifact_store", None),
+        skill_store=getattr(req.app.state, "skill_store", None),
         user_id=consumer.user_id,
         synth_id=synth_id,
         user_input=user_input,

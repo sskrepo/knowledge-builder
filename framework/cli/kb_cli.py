@@ -531,6 +531,113 @@ def cmd_gold_feed(args):
 # watch-bugs — deduplicating error/bug watcher
 # ============================================================================
 
+def cmd_export_skills(args):
+    """Export skill artifacts from KBF_SKILL_ARTIFACTS (ADB) to the local filesystem.
+
+    For each skill (optionally filtered by --persona and/or --status), reads the
+    4 artifact CLOBs from the database and writes them to their canonical rel_path
+    under --out-dir (default: REPO_ROOT).
+
+    This is a read-only operation — the server never calls it.
+
+    Usage:
+        kb-cli export-skills [--persona tpm] [--status promoted] [--out-dir .]
+    """
+    persona_filter = getattr(args, "persona", None)
+    status_filter  = getattr(args, "status", None)
+    out_dir = Path(getattr(args, "out_dir", None) or ".").resolve()
+
+    # ── Build ADB pool ──────────────────────────────────────────────────────
+    env = getattr(args, "env", "") or os.environ.get("KBF_ENV", "")
+    config_path = REPO_ROOT / "framework" / "config" / f"{env}.yaml" if env else None
+
+    pool = None
+    if config_path and config_path.exists():
+        try:
+            with open(config_path) as fh:
+                cfg = yaml.safe_load(fh)
+            adb_cfg = cfg.get("adb", {})
+            from ..core.adb_pool import create_adb_pool  # type: ignore[import]
+            wallet_path = str(Path(adb_cfg.get("wallet_path", "")).expanduser())
+            wallet_password = _resolve_secret_cli(adb_cfg.get("wallet_password_secret", ""))
+            admin_user = adb_cfg.get("admin_user", "Admin")
+            admin_password = _resolve_secret_cli(adb_cfg.get("admin_password_secret", ""))
+            service_name = adb_cfg.get("dsn") or adb_cfg.get("service_name", "")
+            pool = create_adb_pool({
+                "deployment_mode": cfg.get("deployment_mode", "laptop"),
+                "adb": {
+                    "service_name":    service_name,
+                    "wallet_path":     wallet_path,
+                    "user":            admin_user,
+                    "password":        admin_password,
+                    "wallet_password": wallet_password,
+                },
+                "bastion": cfg.get("bastion", {}),
+            })
+        except Exception as exc:
+            print(f"❌ Failed to create ADB pool: {exc}", file=sys.stderr)
+            return 1
+    else:
+        print(
+            "⚠ No env config found — using filestore (ADB export skipped).",
+            file=sys.stderr,
+        )
+
+    from ..deploy.skill_store import build_skill_store
+    store = build_skill_store(pool=pool, env=env)
+
+    # ── List skills from store ──────────────────────────────────────────────
+    skills = store.list_skills(persona=persona_filter)
+
+    if status_filter:
+        skills = [s for s in skills if s.get("status") == status_filter]
+
+    if not skills:
+        print("No matching skills found.")
+        if pool is not None:
+            _close_pool(pool)
+        return 0
+
+    print(f"Exporting {len(skills)} skill(s) to {out_dir} …")
+    written_total = 0
+
+    from ..deploy.skill_store._base import ARTIFACT_TYPES
+
+    for skill in skills:
+        p = skill["persona"]
+        sn = skill["skill_name"]
+        skill_written = 0
+
+        for artifact_type in sorted(ARTIFACT_TYPES):
+            content = store.read_artifact(persona=p, skill_name=sn, artifact_type=artifact_type)
+            if content is None:
+                continue
+
+            # Compute destination path
+            rel_path_templates = {
+                "workflow_skill":         f"framework/workflow_skills/{p}/{sn}.yaml",
+                "persona_builder_delta":  f"framework/persona_builders/{p}.yaml.new_kb",
+                "eval_extraction":        f"eval/gold_sets/{p}-{sn}-extraction.jsonl",
+                "eval_workflow":          f"eval/gold_sets/{p}-{sn}-workflow.jsonl",
+            }
+            rel = rel_path_templates[artifact_type]
+            dest = out_dir / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content, encoding="utf-8")
+            print(f"  ✓ {rel}")
+            skill_written += 1
+            written_total += 1
+
+        print(f"  └─ {p}.{sn}: {skill_written} artifact(s)")
+
+    print(f"\n✓ export-skills complete — {written_total} file(s) written")
+
+    if pool is not None:
+        _close_pool(pool)
+
+    return 0
+
+
 def cmd_watch_bugs(args):
     """Read errors.jsonl and user_bugs.jsonl, deduplicate, and print diagnosis blocks."""
     from datetime import datetime, timezone, timedelta
@@ -699,6 +806,16 @@ def main():
     pwb.add_argument("--since", type=int, default=None, metavar="MINUTES",
                      help="only show errors from the last N minutes")
     pwb.set_defaults(fn=cmd_watch_bugs)
+
+    pes = sub.add_parser(
+        "export-skills",
+        help="export skill artifacts from ADB (KBF_SKILL_ARTIFACTS) to the filesystem",
+    )
+    pes.add_argument("--persona", default=None, help="filter by persona (e.g. tpm)")
+    pes.add_argument("--status", default=None, help="filter by status (e.g. promoted)")
+    pes.add_argument("--out-dir", default=".", help="output root directory (default: .)")
+    pes.add_argument("--env", default=None, help="config env name (overrides KBF_ENV)")
+    pes.set_defaults(fn=cmd_export_skills)
 
     args = p.parse_args()
     return args.fn(args)

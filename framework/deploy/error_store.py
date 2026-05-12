@@ -1,9 +1,12 @@
-"""Append-only JSONL store for two error streams.
+"""Append-only JSONL store for two error streams, plus ADB-backed variant.
 
   errors.jsonl     — server-side auto-captured errors (written by mcp_transport)
   user_bugs.jsonl  — user-reported bugs submitted via the reportBug MCP tool
 
 Both files live under {store_root}/ and are created on first write.
+
+``ErrorStore`` — pure filesystem (laptop/dev mode)
+``AdbErrorStore`` — dual-write: Oracle ADB primary + local JSONL for hot reads
 
 Usage:
     store = ErrorStore("~/.kbf/store")
@@ -21,9 +24,28 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# SQL templates for AdbErrorStore (Oracle syntax)
+# ---------------------------------------------------------------------------
+
+_SQL_INSERT_ERROR = """
+    INSERT INTO KB_SHIM.KBF_ERROR_LOG
+        (request_id, timestamp_utc, tool, error_type, message, stack_trace, extra_json)
+    VALUES
+        (:request_id, :timestamp_utc, :tool, :error_type, :message, :stack_trace, :extra_json)
+"""
+
+_SQL_INSERT_BUG = """
+    INSERT INTO KB_SHIM.KBF_BUG_REPORTS
+        (request_id, queue_id, timestamp_utc, tool, description, extra_json)
+    VALUES
+        (:request_id, :queue_id, :timestamp_utc, :tool, :description, :extra_json)
+"""
 
 
 class ErrorStore:
@@ -123,3 +145,110 @@ class ErrorStore:
         except OSError as exc:
             log.error("error_store: failed to read %s: %s", path.name, exc)
         return records
+
+
+# ---------------------------------------------------------------------------
+# ADB-backed implementation (DECISION-006 Option A)
+# ---------------------------------------------------------------------------
+
+
+class AdbErrorStore(ErrorStore):
+    """Dual-write error store: Oracle ADB primary + local JSONL for hot reads.
+
+    Writes to KB_SHIM.KBF_ERROR_LOG and KB_SHIM.KBF_BUG_REPORTS.
+    Also appends to local JSONL files so ``kb-cli watch-bugs`` can read
+    errors without needing a live ADB connection.
+
+    Args:
+        pool:       oracledb connection pool.  When None, falls back to pure
+                    filesystem writes (mirrors the parent class behaviour).
+        store_root: Path (or string) to the JSONL directory.
+    """
+
+    def __init__(self, pool, store_root: str | Path) -> None:
+        super().__init__(store_root)
+        self._pool = pool
+
+    @staticmethod
+    def _now_utc() -> datetime:
+        return datetime.now(tz=timezone.utc)
+
+    def record_error(self, entry: dict) -> None:
+        """Write to ADB + JSONL (dual-write).
+
+        Falls back to JSONL-only when pool is None.
+        """
+        # Always write to JSONL for hot-read tools (watch-bugs)
+        super().record_error(entry)
+
+        if self._pool is None:
+            return
+
+        ts_str = entry.get("timestamp", "")
+        try:
+            ts = datetime.fromisoformat(ts_str) if ts_str else self._now_utc()
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+        except ValueError:
+            ts = self._now_utc()
+
+        # Separate well-known fields from the rest (stored in extra_json)
+        known = {"request_id", "timestamp", "tool", "error_type", "message", "stack_trace"}
+        extra = {k: v for k, v in entry.items() if k not in known}
+
+        params = {
+            "request_id":  entry.get("request_id", ""),
+            "timestamp_utc": ts,
+            "tool":        entry.get("tool", ""),
+            "error_type":  entry.get("error_type", ""),
+            "message":     entry.get("message", ""),
+            "stack_trace": entry.get("stack_trace", ""),
+            "extra_json":  json.dumps(extra) if extra else None,
+        }
+
+        try:
+            with self._pool.acquire() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(_SQL_INSERT_ERROR, params)
+                conn.commit()
+        except Exception as exc:
+            log.warning("AdbErrorStore.record_error: ADB write failed: %s", exc)
+
+    def record_user_bug(self, entry: dict) -> None:
+        """Write to ADB + JSONL (dual-write).
+
+        Falls back to JSONL-only when pool is None.
+        """
+        # Always write to JSONL for hot-read tools (watch-bugs)
+        super().record_user_bug(entry)
+
+        if self._pool is None:
+            return
+
+        ts_str = entry.get("timestamp", "")
+        try:
+            ts = datetime.fromisoformat(ts_str) if ts_str else self._now_utc()
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+        except ValueError:
+            ts = self._now_utc()
+
+        known = {"request_id", "queue_id", "timestamp", "tool", "description"}
+        extra = {k: v for k, v in entry.items() if k not in known}
+
+        params = {
+            "request_id":  entry.get("request_id", ""),
+            "queue_id":    entry.get("queue_id", ""),
+            "timestamp_utc": ts,
+            "tool":        entry.get("tool", ""),
+            "description": entry.get("description", ""),
+            "extra_json":  json.dumps(extra) if extra else None,
+        }
+
+        try:
+            with self._pool.acquire() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(_SQL_INSERT_BUG, params)
+                conn.commit()
+        except Exception as exc:
+            log.warning("AdbErrorStore.record_user_bug: ADB write failed: %s", exc)

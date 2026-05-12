@@ -1,4 +1,5 @@
 """Append-only token usage log for LLM cost telemetry (PDD V3 Track F).
+Plus ADB-backed variant: ``AdbCostStore`` (DECISION-006 Option A).
 
 Each call to record() appends a single JSON line to {store_root}/cost_log.jsonl.
 query() reads the full log, applies optional filters, and aggregates.
@@ -222,3 +223,78 @@ def _parse_date_bound(date_str: str | None, end_of_day: bool = False) -> datetim
     except ValueError:
         log.warning("cost_store: cannot parse date bound '%s'", date_str)
         return None
+
+
+# ---------------------------------------------------------------------------
+# ADB-backed implementation (DECISION-006 Option A)
+# ---------------------------------------------------------------------------
+
+_SQL_INSERT_COST = """
+    INSERT INTO KB_SHIM.KBF_COST_LOG
+        (timestamp_utc, persona, operation, skill_name,
+         prompt_tokens, completion_tokens, total_tokens)
+    VALUES
+        (:timestamp_utc, :persona, :operation, :skill_name,
+         :prompt_tokens, :completion_tokens, :total_tokens)
+"""
+
+
+class AdbCostStore(CostStore):
+    """Dual-write cost store: Oracle ADB primary + local JSONL for endpoint cache.
+
+    Writes to KB_SHIM.KBF_COST_LOG and also appends to the local JSONL file
+    so the ``/api/v1/metrics/cost`` endpoint can serve cached aggregates without
+    querying ADB on every request.
+
+    Args:
+        pool:       oracledb connection pool.  When None, falls back to pure
+                    JSONL writes (mirrors parent class behaviour).
+        store_root: Path (or string) to the JSONL directory.
+    """
+
+    def __init__(self, pool, store_root: str | Path) -> None:
+        super().__init__(store_root)
+        self._pool = pool
+
+    def record(
+        self,
+        persona: str,
+        operation: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        skill_name: str = "",
+    ) -> None:
+        """Append to local JSONL and write to ADB (dual-write).
+
+        Falls back to JSONL-only when pool is None.
+        """
+        # Always write to JSONL for endpoint cache reads
+        super().record(
+            persona=persona,
+            operation=operation,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            skill_name=skill_name,
+        )
+
+        if self._pool is None:
+            return
+
+        now = datetime.now(tz=timezone.utc)
+        params = {
+            "timestamp_utc":     now,
+            "persona":           persona,
+            "operation":         operation,
+            "skill_name":        skill_name,
+            "prompt_tokens":     prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens":      prompt_tokens + completion_tokens,
+        }
+
+        try:
+            with self._pool.acquire() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(_SQL_INSERT_COST, params)
+                conn.commit()
+        except Exception as exc:
+            log.warning("AdbCostStore.record: ADB write failed: %s", exc)
