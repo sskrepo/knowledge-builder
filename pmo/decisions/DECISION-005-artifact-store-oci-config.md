@@ -1,9 +1,10 @@
 ---
 id: DECISION-005
 title: OCI Object Storage configuration for artifact upload bucket
-status: decided
+status: resolved
 created: 2026-05-12
 decided: 2026-05-12
+resolved: 2026-05-12
 owner: architect
 tags: [oci, storage, deploy, skill-builder]
 related: [ADR-021]
@@ -68,7 +69,21 @@ User confirmation:
 - **Region**: `eu-frankfurt-1` (co-located with ADB + GenAI).
 - **Bucket name**: `kbf-uploads`.
 
-**Tenancy namespace**: Needs to be confirmed by user via OCI Console → Object Storage → any bucket → "Namespace" field. The `adpcpprod` OCI CLI profile uses operator-access auth and returned namespace `bmc_operator_access`, which is the operator namespace — not the user-tenant namespace where `kbf-uploads` should be created. Once confirmed, populate `prod.yaml:artifact_store.oci.namespace` and `KBF_ARTIFACT_OCI_NAMESPACE` env var.
+**Tenancy namespace**: `axq4m61mcei3` — confirmed 2026-05-12 by user via OCI Console.
+
+**Bucket confirmed:**
+- Name: `kbf-uploads`
+- OCID: `ocid1.bucket.oc1.eu-frankfurt-1.aaaaaaaah3kxe5ldbr5sny5phrtidoaxgorfbusqxojdnicpf46lxe6ckqrq`
+- Namespace: `axq4m61mcei3`
+- Compartment OCID: `ocid1.compartment.oc1..aaaaaaaax7wbfdtfl7axhfae7q5lwvrmf2nlcdii3scarukqmuos7u5mokla`
+- Compartment name: `adp_faops_network`
+- Region: `eu-frankfurt-1`
+- Public access: None
+- Versioning: Disabled
+- Lifecycle rule: None (application-driven cleanup via `artifact_store.cleanup(synth_id)`)
+- Created by: `ssunkara`, 2026-05-12
+
+All three config files (`dev.yaml`, `staging.yaml`, `prod.yaml`) updated with real namespace + compartment OCID. `OciArtifactStore` updated to auto-discover namespace via SDK `get_namespace()` in production (InstancePrincipals) so the config value is a safe fallback, not a hard requirement.
 
 ---
 
@@ -109,50 +124,39 @@ The following can be verified by Backend Dev before implementing `OciArtifactSto
 
 ```bash
 oci os object put \
-  --namespace <namespace> \
+  --namespace axq4m61mcei3 \
   --bucket-name kbf-uploads \
   --name test-probe/probe.txt \
+  --profile adpcpprod --auth security_token \
   --file /dev/stdin <<< "probe"
 
 oci os object get \
-  --namespace <namespace> \
+  --namespace axq4m61mcei3 \
   --bucket-name kbf-uploads \
   --name test-probe/probe.txt \
+  --profile adpcpprod --auth security_token \
   --file /dev/stdout
 
 oci os object delete \
-  --namespace <namespace> \
+  --namespace axq4m61mcei3 \
   --bucket-name kbf-uploads \
   --name test-probe/probe.txt \
+  --profile adpcpprod --auth security_token \
   --force
 ```
 
-All three commands succeed from the OCI VM (or from your laptop using `adpcpprod` profile).
+**Status: ✅ RESOLVED** — bucket exists, namespace confirmed, configs updated.
 
 ---
 
 ## Deliver to agents
 
-Once bucket is created and namespace is confirmed, provide:
+**Resolved. Set these env vars on the OCI VM if you want to override the config:**
 
 ```
-KBF_ARTIFACT_OCI_NAMESPACE=<tenancy-namespace>
+KBF_ARTIFACT_OCI_NAMESPACE=axq4m61mcei3
 KBF_ARTIFACT_OCI_BUCKET=kbf-uploads
 KBF_ARTIFACT_OCI_REGION=eu-frankfurt-1
 ```
 
-Or equivalently, in `prod.yaml`:
-
-```yaml
-artifact_store:
-  mode: oci
-  max_file_size_mb: 10
-  oci:
-    namespace: <tenancy-namespace>
-    bucket: kbf-uploads
-    region: eu-frankfurt-1
-```
-
-Note: no `ttl_days` in prod.yaml — there is no lifecycle rule on the bucket. Cleanup is application-driven via `artifact_store.cleanup(synth_id)`.
-
-Backend Dev needs `namespace` confirmed to wire `OciArtifactStore` and populate the staging + prod configs.
+These are already populated in `prod.yaml` and `staging.yaml`. In production with InstancePrincipals, `OciArtifactStore` auto-discovers the namespace via `get_namespace()` as a fallback — env var / config takes precedence.

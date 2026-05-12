@@ -10,8 +10,22 @@ status: current
 
 # Knowledgebase — Dashboard
 
-**Current phase:** Phase 1-3 + V3 + laptop mode — MCP wire-protocol live + ADR-021 artifact upload
-**Updated:** 2026-05-12 by backend-dev (ADR-021 uploadArtifact implemented; DECISION-005 decided)
+**Current phase:** Phase 1-3 + V3 + laptop mode — MCP wire-protocol live + ADR-021 artifact upload + OCI bucket live
+**Updated:** 2026-05-12 by backend-dev (DECISION-005 resolved — OCI kbf-uploads bucket fully wired)
+
+## 🌅 Session update — 2026-05-12 evening (OCI kbf-uploads bucket wired + DECISION-005 resolved)
+
+**`kbf-uploads` OCI Object Storage bucket is live and fully wired.**
+
+- Bucket: `kbf-uploads` | Namespace: `axq4m61mcei3` | Region: `eu-frankfurt-1` | Compartment: `adp_faops_network`
+- OCID: `ocid1.bucket.oc1.eu-frankfurt-1.aaaaaaaah3kxe5ldbr5sny5phrtidoaxgorfbusqxojdnicpf46lxe6ckqrq`
+- PUT / GET / DELETE probe verified ✅
+- All three config files (`dev.yaml`, `staging.yaml`, `prod.yaml`) updated with real namespace + compartment OCID
+- `OciArtifactStore` now auto-discovers namespace via SDK `get_namespace()` in production (InstancePrincipals) — no manual config needed on OCI VMs
+- `KBF_ARTIFACT_OCI_NAMESPACE` and `KBF_ARTIFACT_OCI_PROFILE` env vars added as override path
+- **DECISION-005 status → resolved** ✅
+
+**DECISION-006 pending:** User to confirm option A (ADB only, no git-sync) for committed skill artifact durability + ADR-022 (error/bug/cost log ADB migration).
 
 ## 🌅 Session update — 2026-05-12 afternoon (ADR-021 artifact upload + DECISION-005 decided)
 
@@ -24,13 +38,7 @@ New 4th MCP tool: `uploadArtifact` accepts base64 file bytes (≤10 MB, .pptx/.d
 - `KBF_ENV=staging|production` → `OciArtifactStore` (OCI SDK, InstancePrincipals; CLI subprocess for laptop OCI override)
 - No lifecycle rule — application-driven `cleanup(synth_id)` on session DONE
 
-**DECISION-005 decided:** Option A — dedicated `kbf-uploads` bucket in `adp_faops_network` compartment, `eu-frankfurt-1`. No lifecycle rule. User needs to: (1) create bucket in OCI Console, (2) confirm tenancy namespace (`adpcpprod` profile returned `bmc_operator_access` operator namespace, not user-tenant), (3) populate `KBF_ARTIFACT_OCI_NAMESPACE` env var.
-
 **skill_prompt v1.2.0** — includes "Using local files as example artifacts" upload flow.
-
-**718 tests passing** (excluding pre-existing `test_code_wiki.py`).
-
-**Remaining before OCI path is live:** user creates `kbf-uploads` bucket + IAM statement + confirms namespace.
 
 ---
 

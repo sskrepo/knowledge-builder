@@ -17,7 +17,7 @@ vault:
   master_key_ocid: ocid1.key.oc1.iad.YOUR_STAGING_KEY
   compartment_ocid: ocid1.compartment.oc1..YOUR_STAGING_COMP
 object_storage:
-  namespace: YOUR_TENANCY_NAMESPACE
+  namespace: axq4m61mcei3
   bucket: kb-raw-staging
   lifecycle_days: 90
 
@@ -26,9 +26,10 @@ artifact_store:
   mode: oci
   max_file_size_mb: 10
   oci:
-    namespace: YOUR_TENANCY_NAMESPACE   # confirm via DECISION-005
-    bucket: kbf-uploads
+    namespace: axq4m61mcei3
+    bucket: kbf-uploads                 # OCID: ocid1.bucket.oc1.eu-frankfurt-1.aaaaaaaah3kxe5ldbr5sny5phrtidoaxgorfbusqxojdnicpf46lxe6ckqrq
     region: eu-frankfurt-1
+    compartment_ocid: ocid1.compartment.oc1..aaaaaaaax7wbfdtfl7axhfae7q5lwvrmf2nlcdii3scarukqmuos7u5mokla
 streaming:
   stream_ocid: ocid1.stream.oc1.iad.YOUR_STAGING_STREAM
   bootstrap_servers: cell-1.streaming.us-ashburn-1.oci.oraclecloud.com:9092

@@ -41,11 +41,21 @@ class OciArtifactStore(ArtifactStore):
     """
 
     def __init__(self, cfg: dict) -> None:
-        self._namespace = cfg["namespace"]
+        # Namespace can come from (highest priority first):
+        #   1. KBF_ARTIFACT_OCI_NAMESPACE env var
+        #   2. cfg["namespace"] (from yaml config)
+        #   3. auto-discovered via SDK get_namespace() (production/staging only)
+        self._namespace_cfg = (
+            os.environ.get("KBF_ARTIFACT_OCI_NAMESPACE")
+            or cfg.get("namespace", "")
+        )
         self._bucket = cfg["bucket"]
         self._region = cfg.get("region", "eu-frankfurt-1")
         self._store_root = Path(cfg.get("store_root", Path.home() / ".kbf" / "store"))
-        self._oci_profile = cfg.get("oci_profile", "adpcpprod")
+        self._oci_profile = (
+            os.environ.get("KBF_ARTIFACT_OCI_PROFILE")
+            or cfg.get("oci_profile", "adpcpprod")
+        )
         self._kbf_env = cfg.get("kbf_env", os.environ.get("KBF_ENV", "laptop"))
         self._use_sdk = self._kbf_env in _SUPPORTED_ENVS_SDK
 
@@ -55,11 +65,28 @@ class OciArtifactStore(ArtifactStore):
 
         if self._use_sdk:
             self._client = self._build_sdk_client()
+            # Auto-discover namespace from the tenancy if not explicitly configured.
+            # On an OCI VM with InstancePrincipals this is always correct.
+            if not self._namespace_cfg:
+                self._namespace = self._client.get_namespace().data
+                log.info(
+                    "OciArtifactStore: auto-discovered namespace=%s",
+                    self._namespace,
+                )
+            else:
+                self._namespace = self._namespace_cfg
         else:
             self._client = None
+            # CLI path — namespace must be known (either env var or config)
+            if not self._namespace_cfg:
+                raise ValueError(
+                    "OciArtifactStore (CLI mode): namespace not set. "
+                    "Set KBF_ARTIFACT_OCI_NAMESPACE or artifact_store.oci.namespace in config."
+                )
+            self._namespace = self._namespace_cfg
             log.info(
-                "OciArtifactStore: using OCI CLI subprocess (kbf_env=%s profile=%s)",
-                self._kbf_env, self._oci_profile,
+                "OciArtifactStore: using OCI CLI subprocess (kbf_env=%s profile=%s namespace=%s)",
+                self._kbf_env, self._oci_profile, self._namespace,
             )
 
     # ------------------------------------------------------------------

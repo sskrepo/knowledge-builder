@@ -50,7 +50,7 @@ vault:
 
 # ---- OCI Object Storage (raw dumps, audit, eval artifacts) -------------------
 object_storage:
-  namespace: YOUR_TENANCY_NAMESPACE
+  namespace: axq4m61mcei3
   bucket: kb-raw-dev
   lifecycle_days: 90
 
@@ -59,9 +59,11 @@ artifact_store:
   mode: filestore          # filestore | oci
   max_file_size_mb: 10
   oci:
-    namespace: YOUR_TENANCY_NAMESPACE   # same namespace as object_storage above
-    bucket: kbf-uploads                 # dedicated bucket (DECISION-005)
+    namespace: axq4m61mcei3
+    bucket: kbf-uploads                 # OCID: ocid1.bucket.oc1.eu-frankfurt-1.aaaaaaaah3kxe5ldbr5sny5phrtidoaxgorfbusqxojdnicpf46lxe6ckqrq
     region: eu-frankfurt-1
+    compartment_ocid: ocid1.compartment.oc1..aaaaaaaax7wbfdtfl7axhfae7q5lwvrmf2nlcdii3scarukqmuos7u5mokla
+    oci_profile: adpcpprod
 
 # ---- OCI Streaming (change-event fan-out for incremental ingest) -------------
 streaming:
