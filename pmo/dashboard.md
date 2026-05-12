@@ -10,8 +10,27 @@ status: current
 
 # Knowledgebase — Dashboard
 
-**Current phase:** Phase 1-3 + V3 + laptop mode code complete
-**Updated:** 2026-05-11 by qa (BUG-001 filed + verified)
+**Current phase:** Phase 1-3 + V3 + laptop mode — MCP wire-protocol live
+**Updated:** 2026-05-12 by qa (BUG-002 filed + verified)
+
+## 🌅 Morning briefing — 2026-05-12 (MCP Streamable HTTP live + authorSkill end-to-end)
+
+**MCP Streamable HTTP transport (`POST /mcp`) is live and wired into the server.**
+Full JSON-RPC 2.0 protocol: `initialize`, `tools/list`, `tools/call`, SSE streaming.
+Any MCP client connects without configuration in laptop mode (`KBF_ENV=laptop` bypasses auth — anonymous consumer returned automatically). Production auth failures return HTTP 401 with `WWW-Authenticate` header and exact `.mcp.json` snippet in the body.
+
+**Two MCP bugs found and fixed end-to-end during live user testing:**
+- BUG-001 (prior): `AdbSessionStore` called `Connection.execute()` (wrong API). Fixed `d36d46b`.
+- BUG-002 (today): `authorSkill` start worked, continuation failed — Oracle 23ai `oracledb` auto-deserialises `CLOB IS JSON` columns to Python `dict`; `json.loads(dict)` raised `TypeError`. Fixed `7cee283` with `isinstance` guard.
+
+**What works end-to-end via `/mcp` today:**
+- `tools/list` — tool discovery
+- `authorSkill` start → `synth_id` returned, session persisted to ADB
+- `authorSkill` continuation — pass `synthId` + `input`, session advances state machine
+
+**Test gap (both bugs share the same root):** `AdbSessionStore` pool-attached path has zero unit test coverage. `test_session_store.py` only exercises stub mode (`pool=None`). Next QA action: add `TestAdbSessionStorePoolPath` using a thin oracledb cursor fake covering both `dict` and `str` return shapes for `session_data`.
+
+---
 
 ## 🌅 Morning briefing — 2026-05-11 (Laptop mode: bastion + Codex CLI transport)
 
@@ -166,8 +185,9 @@ python -m framework.cli.kb_cli promote framework/persona_builders/ops-eng.yaml -
 | # | Title | Severity | Status | Fixed in |
 |---|-------|----------|--------|----------|
 | [BUG-001](bugs/BUG-001-adb-session-store-conn-execute.md) | AdbSessionStore called non-existent `Connection.execute/fetchone/fetchall`; ISO strings bound to TIMESTAMP cols triggered ORA-01843 | blocker | verified | d36d46b |
+| [BUG-002](bugs/BUG-002-oracle-json-clob-auto-deserialise.md) | `authorSkill` continuation fails — Oracle 23ai `oracledb` auto-deserialises `CLOB IS JSON` → `dict`; `json.loads(dict)` raises `TypeError` in `load()` and `list_for_user()` | blocker | verified | 7cee283 |
 
-> Test gap exposed by BUG-001: `framework/tests/test_session_store.py` covers only stub mode (`pool=None`) for `AdbSessionStore`. The pool-attached path has zero coverage. **QA action**: add an integration test using either a thin oracledb fake (mocks the cursor surface) or Oracle Free in a container, exercising save/load/list_for_user/abandon/expire_stale.
+> Test gap exposed by BUG-001 and BUG-002 (same root cause): `framework/tests/test_session_store.py` covers only stub mode (`pool=None`) for `AdbSessionStore`. The pool-attached path has zero coverage. **QA action**: add `TestAdbSessionStorePoolPath` using a thin oracledb cursor fake — exercise `save → load` round-trip with both `dict` (Oracle 23ai auto-parse) and `str` (older driver) return shapes for `session_data` and `progress_json`.
 
 ## ✅ Done (Phases 0-3 + V3 + laptop mode)
 - DECISIONs 001–004 filed and decided
