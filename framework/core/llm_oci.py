@@ -122,6 +122,59 @@ class OciGenAiLLMClient:
             return None
 
     # ------------------------------------------------------------------
+    # Token expiry helpers (security_token profiles only)
+    # ------------------------------------------------------------------
+
+    def _token_expires_in(self) -> float:
+        """Return seconds until the on-disk security token expires.
+
+        Returns ``float('inf')`` for non-security-token auth modes.
+        Returns ``0.0`` on any read/parse error (treat as expired).
+        """
+        if self.auth != "config_file":
+            return float("inf")
+        try:
+            import os as _os, base64 as _b64, json as _json, time as _time
+            import oci as _oci  # type: ignore
+            cfg = _oci.config.from_file(profile_name=self.config_profile)
+            if "security_token_file" not in cfg:
+                return float("inf")
+            token_path = _os.path.expanduser(cfg["security_token_file"])
+            with open(token_path) as fh:
+                token = fh.read().strip()
+            parts = token.split(".")
+            payload = parts[1] + "==" * (4 - len(parts[1]) % 4)
+            data = _json.loads(_b64.urlsafe_b64decode(payload))
+            return max(0.0, float(data["exp"]) - _time.time())
+        except Exception:
+            return 0.0
+
+    def _ensure_client_valid(self) -> None:
+        """Rebuild the OCI client signer if the security token is near expiry.
+
+        The macOS LaunchAgent refreshes the token file every 5 minutes.
+        This method picks up the new file contents before the current
+        in-memory token expires (<60 s remaining).
+        """
+        if self._client is None:
+            return  # already in stub mode — nothing to do
+        remaining = self._token_expires_in()
+        if remaining == float("inf"):
+            return  # not a security_token profile
+        if remaining > 60:
+            return  # still healthy
+        log.info(
+            "OciGenAiLLMClient: token expires in %.0fs — rebuilding from refreshed file",
+            remaining,
+        )
+        new_client = self._build_client()
+        if new_client is not None:
+            self._client = new_client
+            log.info("OciGenAiLLMClient: signer refreshed successfully")
+        else:
+            log.warning("OciGenAiLLMClient: signer rebuild failed — keeping stale client")
+
+    # ------------------------------------------------------------------
     # chat()
     # ------------------------------------------------------------------
     def chat(
@@ -140,6 +193,7 @@ class OciGenAiLLMClient:
           - framework keys: "gpt-4o" / "synthesis" / "eval_judge"
           - OCI model id direct: "openai.gpt-4o"
         """
+        self._ensure_client_valid()
         if self._client is None:
             return {"text": '{"_stub": true}', "tokens_in": 0, "tokens_out": 0}
 
@@ -237,6 +291,7 @@ class OciGenAiLLMClient:
         timeout_s: int | None = None,
     ) -> list[list[float]]:
         """Returns list[list[float]] (one per input)."""
+        self._ensure_client_valid()
         if self._client is None:
             return [[0.0] * 3072 for _ in input]
 
