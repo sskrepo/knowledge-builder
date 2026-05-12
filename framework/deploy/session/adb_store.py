@@ -183,8 +183,11 @@ class AdbSessionStore(SessionStore):
         if row is None:
             return None
 
-        # Deserialize the full session dict from the session_data JSON column
-        session: dict = json.loads(row["session_data"])
+        # Deserialize the full session dict from the session_data JSON column.
+        # Oracle 23ai oracledb returns JSON-constrained CLOBs as Python dicts
+        # automatically; guard against that so json.loads() isn't called on a dict.
+        raw = row["session_data"]
+        session: dict = raw if isinstance(raw, dict) else json.loads(raw)
 
         # Overlay top-level metadata columns — they are authoritative and may
         # differ from session_data if an update occurred outside the session dict
@@ -234,7 +237,8 @@ class AdbSessionStore(SessionStore):
                 "updated_at": str(row["updated_at"]),
                 "expires_at": str(row["expires_at"]) if row["expires_at"] else None,
                 "status":     row["status"],
-                "progress":   json.loads(row["progress_json"]) if row["progress_json"] else {},
+                "progress":   (row["progress_json"] if isinstance(row["progress_json"], dict)
+                               else json.loads(row["progress_json"])) if row["progress_json"] else {},
             })
         return sessions
 
