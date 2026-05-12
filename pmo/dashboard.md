@@ -11,7 +11,7 @@ status: current
 # Knowledgebase — Dashboard
 
 **Current phase:** Phase 1-3 + V3 + laptop mode code complete
-**Updated:** 2026-05-11 by tpm
+**Updated:** 2026-05-11 by qa (BUG-001 filed + verified)
 
 ## 🌅 Morning briefing — 2026-05-11 (Laptop mode: bastion + Codex CLI transport)
 
@@ -161,6 +161,14 @@ python -m framework.cli.kb_cli promote framework/persona_builders/ops-eng.yaml -
 
 (none)
 
+## 🐞 Bugs
+
+| # | Title | Severity | Status | Fixed in |
+|---|-------|----------|--------|----------|
+| [BUG-001](bugs/BUG-001-adb-session-store-conn-execute.md) | AdbSessionStore called non-existent `Connection.execute/fetchone/fetchall`; ISO strings bound to TIMESTAMP cols triggered ORA-01843 | blocker | verified | d36d46b |
+
+> Test gap exposed by BUG-001: `framework/tests/test_session_store.py` covers only stub mode (`pool=None`) for `AdbSessionStore`. The pool-attached path has zero coverage. **QA action**: add an integration test using either a thin oracledb fake (mocks the cursor surface) or Oracle Free in a container, exercising save/load/list_for_user/abandon/expire_stale.
+
 ## ✅ Done (Phases 0-3 + V3 + laptop mode)
 - DECISIONs 001–004 filed and decided
 - ADRs 001–020 authored (including amendments to 006/007/011)
@@ -193,7 +201,7 @@ python -m framework.cli.kb_cli promote framework/persona_builders/ops-eng.yaml -
 - **Integration testing** — requires external provisioning (Oracle ADB, API keys). All dev work is complete against stubs.
 
 ## ⚠️ Risks / contradictions (from lint)
-- **Stub-only testing** — all 176 Python files run against filestore + stub LLM. Real-world behavior (vector similarity, LLM synthesis quality, API rate limits) is untested until provisioning arrives. Mitigated: code is structured for easy swap via env vars.
+- **Stub-only testing** — all 176 Python files run against filestore + stub LLM. Real-world behavior (vector similarity, LLM synthesis quality, API rate limits) is untested until provisioning arrives. Mitigated: code is structured for easy swap via env vars. **Evidence this matters: BUG-001** — the pool-attached `AdbSessionStore` was a complete blocker on laptop mode, but `test_session_store.py` only exercised stub mode (`pool=None`), so the bug shipped. Any module that has a "real backend" + "stub backend" split needs at least one fake-backed test of the real path.
 
 ## Next milestones
 - Schedule persona authoring workshops (workshop guide ready at `pmo/workshops/persona-authoring-workshop.md`)
