@@ -1,8 +1,9 @@
 ---
 id: DECISION-006
 title: Durable storage for committed skill artifacts — ADB vs git-sync
-status: pending
+status: decided
 created: 2026-05-12
+decided: 2026-05-12
 owner: architect
 tags: [adb, storage, skill-builder, git, durability]
 related: [ADR-010, ADR-015, ADR-021, DECISION-005]
@@ -178,12 +179,16 @@ conflict alone disqualify this option.
    the working tree for commit.  This is a deliberate, auditable action —
    better than a background sync whose last run time you have to check.
 
-### When to revisit
+### When to revisit (→ ADR-023: git-sync for skill promotion)
 
-Revisit Option B when **any of** the following become true:
-- The team establishes a formal skill PR review process
-- CI needs a push-event trigger (not satisfied by webhook or scheduled job)
-- ADB is being decommissioned (unlikely given OCI commitment)
+**Decided 2026-05-12: Option B deferred.** The PR-review benefit only materialises when author ≠ approver (separation of duties). Today one user does the full authoring flow and PROMOTE is already the review gate. The KB framework owner has no domain knowledge to review skill YAML. ADB `authored_by + authored_at + synth_id` covers the audit-trail requirement without a sync job.
+
+File **ADR-023 — git-sync for skill promotion** when **any of** the following become true:
+- The team introduces a role-separated approval model (author ≠ approver)
+- CI requires a git push-event trigger that cannot be satisfied by a post-PROMOTE webhook
+- ADB is being decommissioned
+
+Until then, `kb-cli export-skills` provides on-demand git export for any manual PR or audit request.
 
 ---
 
@@ -339,15 +344,15 @@ The following can be verified after implementation:
 
 ---
 
-## What you need to supply
+## Decision
 
-```
-DECISION-006: option A   (or option B)
-```
+**Option A — ADB only, no git-sync. Decided 2026-05-12.**
 
-Once decided, Backend Dev will:
-1. Write and run the Oracle DDL migration (4 tables above).
-2. Add `AdbSkillStore` (dual-write: ADB in prod, filesystem in laptop).
+Future git-sync work tracked as ADR-023 (deferred — see "When to revisit" above).
+
+Backend Dev to implement:
+1. Oracle DDL migration — 4 tables (`KBF_SKILL_ARTIFACTS`, `KBF_ERROR_LOG`, `KBF_BUG_REPORTS`, `KBF_COST_LOG`).
+2. `AdbSkillStore` — dual-write: ADB in prod, filesystem fallback in laptop mode.
 3. Update `_write_artifacts()`, `_run_validate()`, `_run_eval()`, `_run_promote()`.
 4. Replace `ErrorStore` + `CostStore` with ADB-backed versions (ADR-022).
-5. Add `kb-cli export-skills` command for on-demand git export.
+5. `kb-cli export-skills` — on-demand SQL → filesystem dump for manual PR or audit.

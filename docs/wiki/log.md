@@ -4,6 +4,8 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-12] architect+backend-dev | DECISION-006 decided: Option A (ADB only, no git-sync). Git-sync deferred to ADR-023 — PR review only valuable when author≠approver (not current model; PROMOTE is already the review gate). Backend Dev implementing AdbSkillStore + AdbErrorStore + AdbCostStore + KBF_* DDL migration + kb-cli export-skills.
+
 ## [2026-05-12] backend-dev | OCI kbf-uploads bucket wired — namespace axq4m61mcei3 confirmed, compartment adp_faops_network (ocid1.compartment.oc1..aaaaaaaax7wbfdtfl7axhfae7q5lwvrmf2nlcdii3scarukqmuos7u5mokla). All 3 config files updated. OciArtifactStore now auto-discovers namespace via SDK get_namespace() in production (eliminating hard-coded requirement). KBF_ARTIFACT_OCI_NAMESPACE + KBF_ARTIFACT_OCI_PROFILE env var overrides added. PUT/GET/DELETE probe verified against live bucket. DECISION-005 → resolved.
 
 ## [2026-05-12] backend-dev | ADR-021 implemented — uploadArtifact MCP tool + ArtifactStore. FilestoreArtifactStore (laptop), OciArtifactStore (staging/prod: SDK InstancePrincipals; laptop CLI subprocess). uploadArtifact: base64 content, 10 MB cap, .pptx/.docx/.md/.txt, write scope required. _handle_analyze_artifact now detects "artifact:<file> id:<id>" prefix, resolves via ArtifactStore, calls analyze_artifact(local_path). artifact_store.cleanup(synth_id) called on DONE. skill_prompt v1.2.0 with upload instructions. DECISION-005 marked decided (Option A, no lifecycle rule, adp_faops_network, eu-frankfurt-1). ADR-021 updated: no lifecycle rule, OCI CLI auth for laptop, OCI SDK for prod. artifact_store: sections added to dev/staging/prod.yaml. 718 tests passing.

@@ -25,7 +25,7 @@ status: current
 - `KBF_ARTIFACT_OCI_NAMESPACE` and `KBF_ARTIFACT_OCI_PROFILE` env vars added as override path
 - **DECISION-005 status → resolved** ✅
 
-**DECISION-006 pending:** User to confirm option A (ADB only, no git-sync) for committed skill artifact durability + ADR-022 (error/bug/cost log ADB migration).
+**DECISION-006 decided: Option A** — ADB only, no git-sync. Option B (git-sync) deferred to ADR-023 when/if author≠approver separation of duties is introduced. Backend Dev implementing now: `KBF_SKILL_ARTIFACTS` + `KBF_ERROR_LOG` + `KBF_BUG_REPORTS` + `KBF_COST_LOG` DDL migration, `AdbSkillStore`, `AdbErrorStore`, `AdbCostStore`, `kb-cli export-skills`.
 
 ## 🌅 Session update — 2026-05-12 afternoon (ADR-021 artifact upload + DECISION-005 decided)
 

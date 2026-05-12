@@ -13,6 +13,12 @@ import json
 import logging
 from datetime import datetime, timezone, timedelta
 
+try:
+    import oracledb
+    _ORACLEDB_AVAILABLE = True
+except ImportError:
+    _ORACLEDB_AVAILABLE = False
+
 from ._base import SessionStore
 
 log = logging.getLogger(__name__)
@@ -180,6 +186,15 @@ class AdbSessionStore(SessionStore):
 
         with self._pool.acquire() as conn:
             with conn.cursor() as cur:
+                # Both intent and session_data are CLOB columns. The oracledb
+                # thin driver binds Python strings as VARCHAR2 by default, which
+                # overflows at 32 KB (ORA-03146). Explicitly declare CLOB type
+                # so the driver routes these through the LOB binding protocol.
+                if _ORACLEDB_AVAILABLE:
+                    cur.setinputsizes(
+                        session_data=oracledb.DB_TYPE_CLOB,
+                        intent=oracledb.DB_TYPE_CLOB,
+                    )
                 cur.execute(_SQL_UPSERT, params)
             conn.commit()
 
