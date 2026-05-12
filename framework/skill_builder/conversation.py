@@ -30,6 +30,33 @@ log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+_ANALYZE_ARTIFACT_PROMPT = """\
+You are a Knowledge Builder Framework schema engineer. An artifact has been parsed \
+and its structural sections identified.
+
+Persona: {persona}
+Intent: "{intent}"
+Artifact type: {artifact_type}
+
+Sections / slides found in the artifact:
+{field_contexts}
+
+For EACH field listed above, decide:
+1. The most appropriate JSON Schema type ("string", "integer", "boolean", "array").
+   Use "array" only for genuinely multi-valued list fields. Default to "string".
+2. A precise 1–2 sentence extraction instruction that tells the LLM parser exactly
+   what content to look for and how to format the output.
+
+Return ONLY a JSON object mapping field_name → object with "type" and "description":
+{{
+  "schedule_health": {{
+    "type": "string",
+    "description": "RAG status (Red/Amber/Green) for the schedule, with a 1–2 sentence \
+justification citing specific milestone dates or blockers from the slide."
+  }}
+}}
+"""
+
 STATES = [
     "IDENTIFY_PERSONA",
     "ANALYZE_ARTIFACT",
@@ -81,6 +108,7 @@ class _SessionData:
     fields: list[str] = field(default_factory=list)
     field_specs: dict[str, dict] = field(default_factory=dict)
     slide_mapping: dict | None = None
+    llm_suggested_specs: dict[str, dict] = field(default_factory=dict)  # LLM read at ANALYZE_ARTIFACT
     reuse_result: dict = field(default_factory=lambda: {"covered": {}, "gaps": []})
     sources: list[dict] = field(default_factory=list)
     trigger: dict = field(default_factory=lambda: {"on_request": True})
@@ -227,6 +255,8 @@ class SkillBuilderConversation:
         d["synthesized_artifacts"] = dict(self._data.synthesized_artifacts)
         if self._data.slide_mapping is not None:
             d["slide_mapping"] = dict(self._data.slide_mapping)
+        if self._data.llm_suggested_specs:
+            d["llm_suggested_specs"] = dict(self._data.llm_suggested_specs)
         return d
 
     @classmethod
@@ -244,6 +274,7 @@ class SkillBuilderConversation:
             fields=list(d.get("fields", [])),
             field_specs=dict(d.get("field_specs", {})),
             slide_mapping=d.get("slide_mapping"),
+            llm_suggested_specs=dict(d.get("llm_suggested_specs", {})),
             reuse_result=dict(d.get("reuse", {"covered": {}, "gaps": []})),
             sources=list(d.get("sources", [])),
             trigger=dict(d.get("trigger", {"on_request": True})),
@@ -342,6 +373,91 @@ class SkillBuilderConversation:
             ],
         )
 
+    def _llm_analyze_artifact(
+        self,
+        fields: list[str],
+        mapping: dict | None,
+    ) -> dict[str, dict]:
+        """Call the LLM to suggest type + extraction description for every field.
+
+        Called immediately after analyze_artifact() at ANALYZE_ARTIFACT state.
+        Returns {field_name: {"type": ..., "description": ...}}.
+        Returns {} when no LLM is wired or on any failure (graceful degradation).
+        """
+        if self._llm is None or not fields:
+            return {}
+
+        try:
+            # Determine artifact type label from mapping kinds
+            artifact_type = "document"
+            if mapping:
+                kinds = {v.get("kind", "") for v in mapping.values()}
+                if "slide_title" in kinds:
+                    artifact_type = "PowerPoint presentation"
+
+            # Build per-field context lines (raw section title + sample body text)
+            context_lines: list[str] = []
+            for f in fields:
+                m = (mapping or {}).get(f, {})
+                raw_label = m.get("raw_title") or m.get("raw_heading") or f
+                body = m.get("body_text", "").strip()
+                location = ""
+                if "slide" in m:
+                    location = f"slide {m['slide'] + 1}"
+                elif "line_number" in m:
+                    location = f"line {m['line_number']}"
+                ctx = f"- {f}: section/slide titled '{raw_label}'"
+                if location:
+                    ctx += f" ({location})"
+                if body:
+                    ctx += f"\n  Sample content: {body[:200]}"
+                context_lines.append(ctx)
+
+            prompt = _ANALYZE_ARTIFACT_PROMPT.format(
+                persona=self._data.persona or "unknown",
+                intent=self._data.intent_description or "",
+                artifact_type=artifact_type,
+                field_contexts="\n".join(context_lines),
+            )
+
+            result = self._llm.chat(
+                model="synthesis",
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                max_tokens=2048,
+            )
+            raw = result["text"] if isinstance(result, dict) else str(result)
+
+            import re as _re
+            raw_clean = _re.sub(r"```(?:json)?\n?(.*?)\n?```", r"\1", raw, flags=_re.S).strip()
+            data = json.loads(raw_clean)
+
+            # Validate and normalise — only keep entries with a usable description
+            specs: dict[str, dict] = {}
+            valid_types = {"string", "integer", "number", "boolean", "array"}
+            for f in fields:
+                entry = data.get(f)
+                if not isinstance(entry, dict):
+                    continue
+                desc = str(entry.get("description", "")).strip()
+                if not desc:
+                    continue
+                t = str(entry.get("type", "string"))
+                if t not in valid_types:
+                    t = "string"
+                specs[f] = {"type": t, "description": desc}
+
+            log.info(
+                "_llm_analyze_artifact: got specs for %d/%d fields",
+                len(specs),
+                len(fields),
+            )
+            return specs
+
+        except Exception as exc:
+            log.warning("_llm_analyze_artifact: LLM call failed (%s) — skipping", exc)
+            return {}
+
     def _handle_analyze_artifact(self, user_input: str) -> ConversationTurn:
         from .analyze_artifact import analyze_artifact
 
@@ -357,6 +473,7 @@ class SkillBuilderConversation:
             self._data.artifact_path = path
             self._data.fields = fields
             self._data.slide_mapping = mapping
+            self._data.llm_suggested_specs = self._llm_analyze_artifact(fields, mapping)
             source = f"artifact at {path!r}"
         else:
             fields, mapping = self._parse_fields_from_input(user_input)
@@ -431,6 +548,7 @@ class SkillBuilderConversation:
         self._data.artifact_path = str(local_path)
         self._data.fields = fields
         self._data.slide_mapping = mapping
+        self._data.llm_suggested_specs = self._llm_analyze_artifact(fields, mapping)
 
         self._state = "REVIEW_FIELDS"
         return self._handle_review_fields_prompt(f"artifact '{filename}'")
@@ -485,35 +603,79 @@ class SkillBuilderConversation:
     def _advance_to_review_schema(self) -> ConversationTurn:
         """Generate field specs (type + description) and present for review.
 
-        Synthesizes extraction descriptions from artifact context (raw_title +
-        body_text from slide_mapping) using the LLM when available. Falls back
-        to raw_title hint or heuristic when no LLM is wired up.
+        Two-pass approach:
+        1. Fields covered by llm_suggested_specs (from ANALYZE_ARTIFACT LLM call):
+           apply the LLM's type + description directly — these will be high quality.
+        2. User-added fields NOT in llm_suggested_specs (delta fields):
+           call synthesize_field_descriptions() for a targeted LLM description
+           using raw_title + body_text context from the slide_mapping.
+        Falls back to heuristic when no LLM is wired up.
         """
         from .synthesize_schema import _infer_field_spec, synthesize_field_descriptions
 
-        # Fields that don't have specs yet — synthesize descriptions for them.
         new_fields = [f for f in self._data.fields if f not in self._data.field_specs]
-        if new_fields:
+        if not new_fields:
+            self._state = "REVIEW_SCHEMA"
+            return self._prompt_review_schema()
+
+        # Pass 1 — LLM suggestions from ANALYZE_ARTIFACT (high-quality, no extra call)
+        llm_specs = self._data.llm_suggested_specs
+        delta_fields: list[str] = []
+        for f in new_fields:
+            if f in llm_specs:
+                base_spec = _infer_field_spec(f)
+                # Override type and description from LLM suggestion
+                base_spec["type"] = llm_specs[f].get("type", base_spec.get("type", "string"))
+                base_spec["description"] = llm_specs[f]["description"]
+                self._data.field_specs[f] = base_spec
+            else:
+                delta_fields.append(f)
+
+        # Pass 2 — delta fields (user added after ANALYZE_ARTIFACT, or LLM missed them)
+        if delta_fields:
             descriptions = synthesize_field_descriptions(
-                fields=new_fields,
+                fields=delta_fields,
                 mapping=self._data.slide_mapping,
                 intent=self._data.intent_description or "",
                 persona=self._data.persona or "",
                 llm=self._llm,
             )
-            for f in new_fields:
+            for f in delta_fields:
                 base_spec = _infer_field_spec(f)
                 base_spec["description"] = descriptions.get(f, base_spec["description"])
                 self._data.field_specs[f] = base_spec
 
         self._state = "REVIEW_SCHEMA"
-        return self._prompt_review_schema()
+        return self._prompt_review_schema(delta_fields=delta_fields if delta_fields else None)
 
-    def _prompt_review_schema(self) -> ConversationTurn:
+    def _prompt_review_schema(self, delta_fields: list[str] | None = None) -> ConversationTurn:
+        # Build delta note when user added fields not in original LLM analysis
+        delta_note = ""
+        if delta_fields:
+            delta_note = (
+                f"\n⚠️ {len(delta_fields)} field(s) were added after the artifact analysis "
+                f"({', '.join(delta_fields)}) — their descriptions were synthesised from "
+                "context and may need more refinement than the rest.\n"
+            )
+
+        # Build removed note: fields the LLM originally found but user dropped
+        original_fields = set(self._data.llm_suggested_specs.keys())
+        if original_fields:
+            removed = original_fields - set(self._data.fields)
+            if removed:
+                delta_note += (
+                    f"ℹ️ {len(removed)} field(s) identified in the artifact were removed "
+                    f"({', '.join(sorted(removed))}) — remove them only if they're truly not needed.\n"
+                )
+
         lines = [
             "These extraction instructions tell the parser what to look for in each field.",
-            "The description is the most important part — it controls extraction quality.\n",
+            "The description is the most important part — it controls extraction quality.",
         ]
+        if delta_note:
+            lines.append(delta_note)
+        else:
+            lines.append("")
         for f in self._data.fields:
             spec = self._data.field_specs.get(f, {})
             t = spec.get("type", "string")

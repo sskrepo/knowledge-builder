@@ -469,3 +469,274 @@ class TestReviewSchemaBulkEdits:
         assert "✓ Applied 1 edit(s)" in turn.message
         assert "⚠ 1 line(s) not recognised" in turn.message
         assert "nonexistent_field" in turn.message
+
+
+# ---------------------------------------------------------------------------
+# ANALYZE_ARTIFACT — LLM analysis wiring
+# ---------------------------------------------------------------------------
+
+class TestLlmAnalyzeArtifact:
+    """Tests for _llm_analyze_artifact: LLM call at ANALYZE_ARTIFACT state."""
+
+    def _make_mock_llm(self, response_json: dict) -> MagicMock:
+        llm = MagicMock()
+        llm.chat.return_value = {"text": json.dumps(response_json), "tokens_in": 10, "tokens_out": 50}
+        return llm
+
+    def _make_conv(self, llm=None) -> SkillBuilderConversation:
+        conv = SkillBuilderConversation(persona="tpm", llm=llm)
+        conv._data.intent_description = "Weekly exec review PPT"
+        return conv
+
+    def test_returns_empty_when_no_llm(self):
+        conv = self._make_conv(llm=None)
+        result = conv._llm_analyze_artifact(["title", "summary"], None)
+        assert result == {}
+
+    def test_returns_empty_for_empty_field_list(self):
+        llm = self._make_mock_llm({})
+        conv = self._make_conv(llm=llm)
+        result = conv._llm_analyze_artifact([], None)
+        assert result == {}
+        llm.chat.assert_not_called()
+
+    def test_calls_llm_once_with_synthesis_model(self):
+        llm = self._make_mock_llm({
+            "title": {"type": "string", "description": "Slide title of the presentation."},
+            "summary": {"type": "string", "description": "Executive summary paragraph."},
+        })
+        conv = self._make_conv(llm=llm)
+        result = conv._llm_analyze_artifact(["title", "summary"], None)
+        llm.chat.assert_called_once()
+        call_kwargs = llm.chat.call_args
+        assert call_kwargs.kwargs.get("model") == "synthesis" or call_kwargs.args[0] == "synthesis"
+        assert "title" in result
+        assert "summary" in result
+
+    def test_returns_type_and_description_for_each_field(self):
+        llm = self._make_mock_llm({
+            "schedule_health": {
+                "type": "string",
+                "description": "RAG status (Red/Amber/Green) for the project schedule.",
+            },
+            "blockers": {
+                "type": "array",
+                "description": "List of current blockers with owner and ETA.",
+            },
+        })
+        conv = self._make_conv(llm=llm)
+        result = conv._llm_analyze_artifact(["schedule_health", "blockers"], None)
+        assert result["schedule_health"]["type"] == "string"
+        assert "RAG" in result["schedule_health"]["description"]
+        assert result["blockers"]["type"] == "array"
+
+    def test_invalid_type_coerced_to_string(self):
+        llm = self._make_mock_llm({
+            "weird_field": {"type": "object", "description": "Some description."},
+        })
+        conv = self._make_conv(llm=llm)
+        result = conv._llm_analyze_artifact(["weird_field"], None)
+        assert result["weird_field"]["type"] == "string"
+
+    def test_missing_description_entry_skipped(self):
+        llm = self._make_mock_llm({
+            "good_field": {"type": "string", "description": "Good description."},
+            "bad_field": {"type": "string"},  # No description key
+        })
+        conv = self._make_conv(llm=llm)
+        result = conv._llm_analyze_artifact(["good_field", "bad_field"], None)
+        assert "good_field" in result
+        assert "bad_field" not in result
+
+    def test_llm_failure_returns_empty_dict(self):
+        llm = MagicMock()
+        llm.chat.side_effect = RuntimeError("timeout")
+        conv = self._make_conv(llm=llm)
+        result = conv._llm_analyze_artifact(["title"], None)
+        assert result == {}
+
+    def test_body_text_included_in_prompt_context(self):
+        llm = self._make_mock_llm({
+            "schedule_health": {"type": "string", "description": "Schedule RAG status."},
+        })
+        conv = self._make_conv(llm=llm)
+        mapping = {
+            "schedule_health": {
+                "kind": "slide_title",
+                "slide": 2,
+                "raw_title": "Schedule Health",
+                "body_text": "On track for Q3 milestone",
+            }
+        }
+        conv._llm_analyze_artifact(["schedule_health"], mapping)
+        prompt_sent = llm.chat.call_args.kwargs["messages"][0]["content"]
+        assert "Schedule Health" in prompt_sent
+        assert "On track for Q3" in prompt_sent
+
+    def test_pptx_mapping_detected_as_powerpoint_artifact_type(self):
+        llm = self._make_mock_llm({
+            "title": {"type": "string", "description": "Title slide text."},
+        })
+        conv = self._make_conv(llm=llm)
+        mapping = {"title": {"kind": "slide_title", "slide": 0, "raw_title": "Title"}}
+        conv._llm_analyze_artifact(["title"], mapping)
+        prompt_sent = llm.chat.call_args.kwargs["messages"][0]["content"]
+        assert "PowerPoint" in prompt_sent
+
+
+class TestAdvanceToReviewSchemaWithLlmSpecs:
+    """Tests for two-pass _advance_to_review_schema using llm_suggested_specs."""
+
+    def _make_conv(self, fields=None, llm_specs=None, llm=None) -> SkillBuilderConversation:
+        conv = SkillBuilderConversation(persona="tpm", llm=llm)
+        conv._state = "REVIEW_FIELDS"
+        conv._data.intent_description = "Weekly exec review"
+        conv._data.fields = fields or ["schedule_health", "key_accomplishments"]
+        conv._data.llm_suggested_specs = llm_specs or {}
+        return conv
+
+    def test_llm_suggested_specs_applied_directly_no_extra_llm_call(self):
+        """Pass 1: LLM specs from ANALYZE_ARTIFACT used without a second LLM call."""
+        llm_specs = {
+            "schedule_health": {"type": "string", "description": "RAG status for schedule."},
+            "key_accomplishments": {"type": "array", "description": "Top 3-5 achievements."},
+        }
+        conv = self._make_conv(
+            fields=["schedule_health", "key_accomplishments"],
+            llm_specs=llm_specs,
+        )
+        turn = conv._advance_to_review_schema()
+        assert turn.state == "REVIEW_SCHEMA"
+        assert conv._data.field_specs["schedule_health"]["description"] == "RAG status for schedule."
+        assert conv._data.field_specs["schedule_health"]["type"] == "string"
+        assert conv._data.field_specs["key_accomplishments"]["type"] == "array"
+
+    def test_user_added_delta_field_gets_synthesized_description(self):
+        """Pass 2: a field added by user (not in llm_suggested_specs) falls back to synthesize."""
+        llm_specs = {
+            "schedule_health": {"type": "string", "description": "RAG status."},
+        }
+        # user also added "extra_notes" which LLM never saw
+        conv = self._make_conv(
+            fields=["schedule_health", "extra_notes"],
+            llm_specs=llm_specs,
+        )
+        turn = conv._advance_to_review_schema()
+        # Both fields should have specs
+        assert "schedule_health" in conv._data.field_specs
+        assert "extra_notes" in conv._data.field_specs
+        # extra_notes was delta — should show a delta note in the prompt
+        assert "extra_notes" in turn.message
+
+    def test_removed_field_note_shown_when_user_dropped_llm_field(self):
+        """Delta note shows removed fields if LLM originally found them."""
+        llm_specs = {
+            "schedule_health": {"type": "string", "description": "RAG status."},
+            "budget_health": {"type": "string", "description": "Budget RAG."},
+        }
+        # User dropped budget_health
+        conv = self._make_conv(
+            fields=["schedule_health"],
+            llm_specs=llm_specs,
+        )
+        turn = conv._advance_to_review_schema()
+        assert "budget_health" in turn.message  # removed note
+
+    def test_no_delta_note_when_fields_match_llm_suggestions(self):
+        """No delta note when user accepted all LLM fields unchanged."""
+        llm_specs = {
+            "title": {"type": "string", "description": "Slide deck title."},
+            "summary": {"type": "string", "description": "Executive summary."},
+        }
+        conv = self._make_conv(fields=["title", "summary"], llm_specs=llm_specs)
+        turn = conv._advance_to_review_schema()
+        assert "⚠️" not in turn.message
+        assert "ℹ️" not in turn.message
+
+    def test_no_llm_specs_falls_back_to_heuristic(self):
+        """When llm_suggested_specs is empty, heuristic is used for all fields."""
+        conv = self._make_conv(
+            fields=["rag_status", "meeting_minutes"],
+            llm_specs={},
+        )
+        turn = conv._advance_to_review_schema()
+        assert turn.state == "REVIEW_SCHEMA"
+        # Heuristic gives enum for rag_status
+        assert conv._data.field_specs["rag_status"]["type"] == "string"
+        assert "rag_status" in conv._data.field_specs
+        assert "meeting_minutes" in conv._data.field_specs
+
+    def test_already_has_specs_not_overwritten(self):
+        """Fields already in field_specs are not touched."""
+        llm_specs = {
+            "schedule_health": {"type": "string", "description": "LLM description."},
+        }
+        conv = self._make_conv(
+            fields=["schedule_health"],
+            llm_specs=llm_specs,
+        )
+        # Pre-set a custom spec (simulates user already edited it)
+        conv._data.field_specs["schedule_health"] = {
+            "type": "string",
+            "description": "User-customised description.",
+        }
+        conv._advance_to_review_schema()
+        # User's spec should be preserved
+        assert conv._data.field_specs["schedule_health"]["description"] == \
+            "User-customised description."
+
+
+class TestLlmSuggestedSpecsPersistence:
+    """Tests for to_dict / from_dict round-trip of llm_suggested_specs."""
+
+    def test_to_dict_includes_llm_suggested_specs_when_non_empty(self):
+        conv = SkillBuilderConversation(persona="tpm")
+        conv._data.llm_suggested_specs = {
+            "title": {"type": "string", "description": "Slide title."}
+        }
+        d = conv.to_dict()
+        assert "llm_suggested_specs" in d
+        assert d["llm_suggested_specs"]["title"]["description"] == "Slide title."
+
+    def test_to_dict_omits_llm_suggested_specs_when_empty(self):
+        conv = SkillBuilderConversation(persona="tpm")
+        conv._data.llm_suggested_specs = {}
+        d = conv.to_dict()
+        assert "llm_suggested_specs" not in d
+
+    def test_from_dict_restores_llm_suggested_specs(self):
+        original = SkillBuilderConversation(persona="tpm")
+        original._data.llm_suggested_specs = {
+            "schedule_health": {"type": "string", "description": "RAG status."}
+        }
+        d = original.to_dict()
+        restored = SkillBuilderConversation.from_dict(d)
+        assert restored._data.llm_suggested_specs == {
+            "schedule_health": {"type": "string", "description": "RAG status."}
+        }
+
+    def test_from_dict_defaults_to_empty_when_key_missing(self):
+        """Backward-compat: old sessions without llm_suggested_specs key still load."""
+        d = {
+            "state": "REVIEW_SCHEMA",
+            "persona": "tpm",
+            "synth_id": "synth-x",
+            "intent_description": "test",
+            "artifact_path": "",
+            "fields": ["title"],
+            "field_specs": {},
+            "reuse": {"covered": {}, "gaps": []},
+            "sources": [],
+            "trigger": {"on_request": True},
+            "output_format": "markdown",
+            "skill_name": "test_skill",
+            "user_id": "",
+            "committed_paths": [],
+            "validation_result": None,
+            "ingest_result": None,
+            "eval_result": None,
+            "created_at": "",
+            "updated_at": "",
+        }
+        conv = SkillBuilderConversation.from_dict(d)
+        assert conv._data.llm_suggested_specs == {}
