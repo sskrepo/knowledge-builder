@@ -34,8 +34,8 @@ class TestSkillPromptConstants:
             f"Expected semver, got: {SKILL_PROMPT_VERSION!r}"
         )
 
-    def test_version_is_1_1_0(self):
-        assert SKILL_PROMPT_VERSION == "1.1.0"
+    def test_version_is_1_2_0(self):
+        assert SKILL_PROMPT_VERSION == "1.2.0"
 
 
 class TestGetSkillPromptMessages:

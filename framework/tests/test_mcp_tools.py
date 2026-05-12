@@ -52,13 +52,13 @@ def _run(coro):
 
 
 class TestExternalToolsSchema:
-    def test_exactly_three_entries(self):
-        # Sprint 1 added reportBug — now 3 tools
-        assert len(EXTERNAL_TOOLS_SCHEMA) == 3
+    def test_exactly_four_entries(self):
+        # ADR-021 added uploadArtifact — now 4 tools
+        assert len(EXTERNAL_TOOLS_SCHEMA) == 4
 
     def test_names_are_correct(self):
         names = {t["name"] for t in EXTERNAL_TOOLS_SCHEMA}
-        assert names == {"askKnowledgeBase", "authorSkill", "reportBug"}
+        assert names == {"askKnowledgeBase", "authorSkill", "reportBug", "uploadArtifact"}
 
     def test_each_entry_has_name_description_inputschema(self):
         for tool in EXTERNAL_TOOLS_SCHEMA:
@@ -128,16 +128,16 @@ class TestBuildExternalToolRegistry:
         registry = build_external_tool_registry(app)
         assert isinstance(registry, dict)
 
-    def test_exactly_three_tools(self):
-        # Sprint 1 added reportBug — now 3 tools
+    def test_exactly_four_tools(self):
+        # ADR-021 added uploadArtifact — now 4 tools
         app = _make_mock_app()
         registry = build_external_tool_registry(app)
-        assert len(registry) == 3
+        assert len(registry) == 4
 
     def test_tool_names_match_schema(self):
         app = _make_mock_app()
         registry = build_external_tool_registry(app)
-        assert set(registry.keys()) == {"askKnowledgeBase", "authorSkill", "reportBug"}
+        assert set(registry.keys()) == {"askKnowledgeBase", "authorSkill", "reportBug", "uploadArtifact"}
 
     def test_ask_handler_is_callable(self):
         app = _make_mock_app()

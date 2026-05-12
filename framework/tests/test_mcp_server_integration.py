@@ -178,15 +178,15 @@ class TestMcpToolsList:
         resp = integration_client.post("/mcp/tools/list", headers=_auth_headers(integration_client))
         assert resp.status_code == 200
 
-    def test_returns_exactly_two_tools(self, integration_client):
+    def test_returns_exactly_four_tools(self, integration_client):
         resp = integration_client.post("/mcp/tools/list", headers=_auth_headers(integration_client))
         tools = resp.json()["tools"]
-        assert len(tools) == 2
+        assert len(tools) == 4
 
     def test_tool_names_are_correct(self, integration_client):
         resp = integration_client.post("/mcp/tools/list", headers=_auth_headers(integration_client))
         names = {t["name"] for t in resp.json()["tools"]}
-        assert names == {"askKnowledgeBase", "authorSkill"}
+        assert names == {"askKnowledgeBase", "authorSkill", "reportBug", "uploadArtifact"}
 
     def test_each_tool_has_input_schema(self, integration_client):
         resp = integration_client.post("/mcp/tools/list", headers=_auth_headers(integration_client))
