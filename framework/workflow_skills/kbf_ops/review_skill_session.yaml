@@ -1,0 +1,62 @@
+workflow_skill: review_skill_session
+persona: kbf_ops
+status: draft
+trigger:
+  on_request:
+    enabled: true
+    inputs:
+      - name: synth_id
+        type: string
+        description: The synth_id of the session to review
+        required: true
+      - name: depth
+        type: string
+        enum: [structural, semantic, full]
+        default: full
+      - name: file_bugs
+        type: boolean
+        default: true
+    output_format: json
+skill_card:
+  summary: Comprehensive LLM-powered quality review of an authorSkill session
+  use_when: User asks to review, audit, critique, or quality-check an authorSkill session by synth_id
+  example_invocations:
+    - "review session synth-tpm-ec2fad6d"
+    - "audit the skill quality for synth-ops-abc123"
+    - "do a comprehensive review of this synth id"
+    - "check the quality of what was produced in this authoring session"
+    - "critique the artifacts for synth-pm-xyz789"
+requires_extractions:
+  - kb: kbf_ops.session_data
+    required_fields:
+      - synth_id
+      - persona
+      - skill_names
+      - intent_description
+      - conversation_history
+      - state_progression
+      - status
+  - kb: kbf_ops.skill_artifacts
+    required_fields:
+      - workflow_yaml
+      - persona_builder_delta
+      - eval_extraction
+      - eval_workflow
+synthesis:
+  output_format: json
+  schema: framework/parsers/schemas/kbf_ops/review_skill_session/v1.json
+  dimensions:
+    - intentFidelity
+    - schemaCompleteness
+    - kbWiring
+    - routingDescriptors
+    - evalQuality
+    - artifactConsistency
+    - askKbRoutingSimulation
+delivery:
+  kind: json_response
+eval:
+  gold_set: eval/gold_sets/kbf_ops-review_skill_session-workflow.jsonl
+  exit_criteria:
+    field_accuracy: 0.90
+    delivery_success_rate: 0.99

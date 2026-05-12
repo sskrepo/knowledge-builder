@@ -105,11 +105,26 @@ userId: integration-test-user
     # Wire up state before route registration
     @app.on_event("startup")
     async def _startup():
+        from unittest.mock import MagicMock as _MagicMock
+        from framework.deploy.skill_store.filestore import FilestoreSkillStore
+        from framework.retrievers.kbf_ops.session_loader import KbfOpsSessionLoader
+
         app.state.consumer_registry = ConsumerRegistry(manifests_dir)
         app.state.session_store = FilestoreSessionStore(store_root=str(store_dir))
+        app.state.skill_store = FilestoreSkillStore(repo_root=str(store_dir))
+        app.state.artifact_store = None
+        app.state.adb_pool = None
         app.state.cost_store = CostStore(str(store_dir))
         app.state.llm = None
         app.state.context_builder = ctx_builder
+
+        # kbf_ops session loader (ADR-023) — pool=None for integration tests
+        app.state.kbf_ops_loader = KbfOpsSessionLoader(
+            pool=None,
+            session_store=app.state.session_store,
+            skill_store=app.state.skill_store,
+            artifact_store=None,
+        )
 
         # Wire external MCP tools
         external_registry = build_external_tool_registry(app)
@@ -178,15 +193,18 @@ class TestMcpToolsList:
         resp = integration_client.post("/mcp/tools/list", headers=_auth_headers(integration_client))
         assert resp.status_code == 200
 
-    def test_returns_exactly_four_tools(self, integration_client):
+    def test_returns_exactly_five_tools(self, integration_client):
         resp = integration_client.post("/mcp/tools/list", headers=_auth_headers(integration_client))
         tools = resp.json()["tools"]
-        assert len(tools) == 4
+        assert len(tools) == 5
 
     def test_tool_names_are_correct(self, integration_client):
         resp = integration_client.post("/mcp/tools/list", headers=_auth_headers(integration_client))
         names = {t["name"] for t in resp.json()["tools"]}
-        assert names == {"askKnowledgeBase", "authorSkill", "reportBug", "uploadArtifact"}
+        assert names == {
+            "askKnowledgeBase", "authorSkill", "reportBug",
+            "uploadArtifact", "reviewSkillSession",
+        }
 
     def test_each_tool_has_input_schema(self, integration_client):
         resp = integration_client.post("/mcp/tools/list", headers=_auth_headers(integration_client))

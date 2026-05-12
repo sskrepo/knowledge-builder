@@ -1,9 +1,9 @@
 """Tests for framework/deploy/mcp_tools.py.
 
 Coverage:
-  - build_external_tool_registry() returns exactly 3 tools (Sprint 1: +reportBug)
-  - Tool names are "askKnowledgeBase", "authorSkill", and "reportBug"
-  - EXTERNAL_TOOLS_SCHEMA has exactly 3 entries with correct names
+  - build_external_tool_registry() returns exactly 5 tools (ADR-023: +reviewSkillSession)
+  - Tool names are "askKnowledgeBase", "authorSkill", "reportBug", "uploadArtifact", "reviewSkillSession"
+  - EXTERNAL_TOOLS_SCHEMA has exactly 5 entries with correct names
   - Each schema has an inputSchema with a required properties list
   - askKnowledgeBase schema requires "question"
   - authorSkill schema requires "input"
@@ -52,13 +52,16 @@ def _run(coro):
 
 
 class TestExternalToolsSchema:
-    def test_exactly_four_entries(self):
-        # ADR-021 added uploadArtifact — now 4 tools
-        assert len(EXTERNAL_TOOLS_SCHEMA) == 4
+    def test_exactly_five_entries(self):
+        # ADR-023 added reviewSkillSession — now 5 tools
+        assert len(EXTERNAL_TOOLS_SCHEMA) == 5
 
     def test_names_are_correct(self):
         names = {t["name"] for t in EXTERNAL_TOOLS_SCHEMA}
-        assert names == {"askKnowledgeBase", "authorSkill", "reportBug", "uploadArtifact"}
+        assert names == {
+            "askKnowledgeBase", "authorSkill", "reportBug",
+            "uploadArtifact", "reviewSkillSession",
+        }
 
     def test_each_entry_has_name_description_inputschema(self):
         for tool in EXTERNAL_TOOLS_SCHEMA:
@@ -128,16 +131,19 @@ class TestBuildExternalToolRegistry:
         registry = build_external_tool_registry(app)
         assert isinstance(registry, dict)
 
-    def test_exactly_four_tools(self):
-        # ADR-021 added uploadArtifact — now 4 tools
+    def test_exactly_five_tools(self):
+        # ADR-023 added reviewSkillSession — now 5 tools
         app = _make_mock_app()
         registry = build_external_tool_registry(app)
-        assert len(registry) == 4
+        assert len(registry) == 5
 
     def test_tool_names_match_schema(self):
         app = _make_mock_app()
         registry = build_external_tool_registry(app)
-        assert set(registry.keys()) == {"askKnowledgeBase", "authorSkill", "reportBug", "uploadArtifact"}
+        assert set(registry.keys()) == {
+            "askKnowledgeBase", "authorSkill", "reportBug",
+            "uploadArtifact", "reviewSkillSession",
+        }
 
     def test_ask_handler_is_callable(self):
         app = _make_mock_app()

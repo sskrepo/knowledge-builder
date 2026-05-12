@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["synthId", "reviewId", "persona", "skillNames", "overallScore", "recommendation", "dimensions", "bugsToFile"],
+  "properties": {
+    "synthId": { "type": "string" },
+    "reviewId": { "type": "string" },
+    "persona": { "type": "string" },
+    "skillNames": { "type": "array", "items": { "type": "string" } },
+    "status": { "type": "string" },
+    "overallScore": { "type": "number", "minimum": 0, "maximum": 10 },
+    "recommendation": { "type": "string", "enum": ["do_not_promote", "promote_with_fixes", "promote"] },
+    "dimensions": {
+      "type": "object",
+      "properties": {
+        "intentFidelity":         { "$ref": "#/$defs/dimension" },
+        "schemaCompleteness":     { "$ref": "#/$defs/dimension" },
+        "kbWiring":               { "$ref": "#/$defs/dimension" },
+        "routingDescriptors":     { "$ref": "#/$defs/dimension" },
+        "evalQuality":            { "$ref": "#/$defs/dimension" },
+        "artifactConsistency":    { "$ref": "#/$defs/dimension" },
+        "askKbRoutingSimulation": { "$ref": "#/$defs/dimension" }
+      }
+    },
+    "bugsToFile": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["checkName", "severity", "detail", "suggestedFix"],
+        "properties": {
+          "checkName":    { "type": "string" },
+          "severity":     { "type": "string", "enum": ["critical", "major", "minor"] },
+          "detail":       { "type": "string" },
+          "suggestedFix": { "type": "string" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "dimension": {
+      "type": "object",
+      "required": ["score", "findings"],
+      "properties": {
+        "score":    { "type": "number", "minimum": 0, "maximum": 10 },
+        "findings": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

@@ -25,6 +25,41 @@ log = logging.getLogger(__name__)
 
 EXTERNAL_TOOLS_SCHEMA = [
     {
+        "name": "reviewSkillSession",
+        "description": (
+            "Comprehensive LLM-powered quality review of an authorSkill session. "
+            "Reads all committed artifacts for the given synth_id, cross-checks them "
+            "for gaps across 7 dimensions (intent fidelity, schema completeness, "
+            "KB wiring, routing descriptors, eval quality, artifact consistency, "
+            "ASK-KB routing simulation), and files structured bug reports. "
+            "Requires admin or write scope."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["synthId"],
+            "properties": {
+                "synthId": {
+                    "type": "string",
+                    "description": "The synth_id of the authorSkill session to review",
+                },
+                "depth": {
+                    "type": "string",
+                    "enum": ["structural", "semantic", "full"],
+                    "default": "full",
+                    "description": (
+                        "Review depth: 'structural' = deterministic checks only (no LLM); "
+                        "'semantic' / 'full' = structural + LLM critique"
+                    ),
+                },
+                "fileBugs": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Whether to write findings to KBF_BUG_REPORTS",
+                },
+            },
+        },
+    },
+    {
         "name": "reportBug",
         "description": (
             "Report an error you received from any KBF tool. "
@@ -173,6 +208,7 @@ def build_external_tool_registry(app) -> dict[str, Any]:
         dict mapping tool name → async callable.
     """
     return {
+        "reviewSkillSession": _make_review_skill_session_handler(app),
         "reportBug": _make_report_bug_handler(app),
         "askKnowledgeBase": _make_ask_handler(app),
         "authorSkill": _make_author_skill_handler(app),
@@ -474,6 +510,194 @@ def _make_upload_artifact_handler(app):
         }
 
     return upload_artifact_handler
+
+
+def _make_review_skill_session_handler(app):
+    """Build the reviewSkillSession MCP tool handler (ADR-023).
+
+    Performs a comprehensive quality review of an authorSkill session:
+      1. Loads all committed artifacts via KbfOpsSessionLoader.
+      2. Runs KbfOpsReviewEngine to score 7 quality dimensions.
+      3. Optionally files each finding as a bug report to KBF_BUG_REPORTS.
+      4. Persists a row in KBF_AUDIT_RUNS for operational tracking.
+      5. Returns the full QualityReport as a JSON-serialisable dict.
+
+    Requires 'admin' or 'write' scope.
+    """
+    import json as _json
+    from dataclasses import asdict
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
+    async def review_skill_session_handler(
+        *,
+        synthId: str,
+        depth: str = "full",
+        fileBugs: bool = True,
+        _consumer=None,
+    ) -> dict:
+        consumer = _consumer or _anonymous_consumer()
+
+        if not ({"admin", "write"} & set(consumer.scopes)):
+            return {
+                "isError": True,
+                "content": [{
+                    "type": "text",
+                    "text": "reviewSkillSession requires admin or write scope.",
+                }],
+            }
+
+        if not synthId:
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": "synthId is required."}],
+            }
+
+        log.info(
+            "mcp:reviewSkillSession synth_id=%s depth=%s file_bugs=%s consumer=%s",
+            synthId, depth, fileBugs, consumer.name,
+        )
+
+        loader = getattr(app.state, "kbf_ops_loader", None)
+        if loader is None:
+            from ..retrievers.kbf_ops.session_loader import KbfOpsSessionLoader
+            pool = getattr(app.state, "adb_pool", None)
+            session_store = getattr(app.state, "session_store", None)
+            skill_store = getattr(app.state, "skill_store", None)
+            artifact_store = getattr(app.state, "artifact_store", None)
+            loader = KbfOpsSessionLoader(
+                pool=pool,
+                session_store=session_store,
+                skill_store=skill_store,
+                artifact_store=artifact_store,
+            )
+
+        bundle = loader.load(synthId)
+        if bundle is None:
+            return {
+                "isError": True,
+                "content": [{
+                    "type": "text",
+                    "text": f"Session '{synthId}' not found.",
+                }],
+            }
+
+        llm = getattr(app.state, "llm", None)
+        if llm is None and depth != "structural":
+            return {
+                "isError": True,
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        "LLM not configured — "
+                        "use depth='structural' for deterministic checks only"
+                    ),
+                }],
+            }
+
+        from .ops.review_engine import KbfOpsReviewEngine
+        engine = KbfOpsReviewEngine(llm=llm)
+        report = engine.review(bundle, depth=depth)
+
+        bugs_filed = 0
+        if fileBugs and report.bugs_to_file:
+            error_store = getattr(app.state, "error_store", None)
+            if error_store is not None:
+                now_iso = datetime.now(tz=timezone.utc).isoformat()
+                for bug in report.bugs_to_file:
+                    entry = {
+                        "request_id":    f"ops-{report.review_id}-{uuid4().hex[:6]}",
+                        "queue_id":      f"OPS-{uuid4().hex[:8].upper()}",
+                        "timestamp":     now_iso,
+                        "tool":          "reviewSkillSession",
+                        "description":   bug.detail,
+                        "source":        "ops_skill_auditor",
+                        "check_name":    bug.check_name,
+                        "severity":      bug.severity,
+                        "suggested_fix": bug.suggested_fix,
+                        "synth_id":      synthId,
+                        "review_id":     report.review_id,
+                    }
+                    error_store.record_user_bug(entry)
+                    bugs_filed += 1
+
+        pool = getattr(app.state, "adb_pool", None)
+        if pool is not None:
+            _persist_audit_run(
+                pool=pool,
+                review_id=report.review_id,
+                synth_id=synthId,
+                depth=depth,
+                overall_score=report.overall_score,
+                recommendation=report.recommendation,
+                bugs_filed=bugs_filed,
+                triggered_by=consumer.name,
+                report=report,
+            )
+
+        return _report_to_dict(report, bugs_filed=bugs_filed)
+
+    return review_skill_session_handler
+
+
+def _persist_audit_run(
+    pool, review_id, synth_id, depth, overall_score, recommendation,
+    bugs_filed, triggered_by, report
+) -> None:
+    """Insert a row into KBF_AUDIT_RUNS.  Silently ignores errors."""
+    import json as _json
+
+    _SQL_INSERT = """
+        INSERT INTO KB_SHIM.KBF_AUDIT_RUNS
+            (review_id, synth_id, depth, overall_score, recommendation,
+             bugs_filed, triggered_by, report_json)
+        VALUES
+            (:review_id, :synth_id, :depth, :overall_score, :recommendation,
+             :bugs_filed, :triggered_by, :report_json)
+    """
+    try:
+        report_json = _json.dumps(_report_to_dict(report, bugs_filed=bugs_filed))
+        params = {
+            "review_id":      review_id,
+            "synth_id":       synth_id,
+            "depth":          depth,
+            "overall_score":  overall_score,
+            "recommendation": recommendation,
+            "bugs_filed":     bugs_filed,
+            "triggered_by":   triggered_by,
+            "report_json":    report_json,
+        }
+        with pool.acquire() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_SQL_INSERT, params)
+            conn.commit()
+        log.info(
+            "audit_run persisted: review_id=%s synth_id=%s score=%.1f",
+            review_id, synth_id, overall_score,
+        )
+    except Exception as exc:
+        log.warning("failed to persist audit run: %s", exc)
+
+
+def _report_to_dict(report, bugs_filed: int = 0) -> dict:
+    """Convert a QualityReport to a JSON-serialisable dict."""
+    from dataclasses import asdict
+    d = asdict(report)
+    d["synthId"] = d.pop("synth_id")
+    d["reviewId"] = d.pop("review_id")
+    d["skillNames"] = d.pop("skill_names")
+    d["overallScore"] = d.pop("overall_score")
+    d["bugsToFile"] = [
+        {
+            "checkName":    b["check_name"],
+            "severity":     b["severity"],
+            "detail":       b["detail"],
+            "suggestedFix": b["suggested_fix"],
+        }
+        for b in d.pop("bugs_to_file")
+    ]
+    d["bugsFiledCount"] = bugs_filed
+    return d
 
 
 # ---------------------------------------------------------------------------

@@ -220,7 +220,16 @@ def _load_app():
         state["context_builder"] = ctx_builder
         app.state.context_builder = ctx_builder
 
-        # --- External MCP tool registry (2 tools, PDD V3 §7) ---
+        # --- kbf_ops session loader (ADR-023) ---
+        from ..retrievers.kbf_ops.session_loader import KbfOpsSessionLoader
+        app.state.kbf_ops_loader = KbfOpsSessionLoader(
+            pool=adb_pool,
+            session_store=app.state.session_store,
+            skill_store=app.state.skill_store,
+            artifact_store=getattr(app.state, "artifact_store", None),
+        )
+
+        # --- External MCP tool registry (5 tools, including reviewSkillSession) ---
         from .mcp_tools import build_external_tool_registry, EXTERNAL_TOOLS_SCHEMA
         state["external_registry"] = build_external_tool_registry(app)
         state["external_tools_schema"] = EXTERNAL_TOOLS_SCHEMA
