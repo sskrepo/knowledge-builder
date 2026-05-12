@@ -43,13 +43,14 @@ python -m framework.cli.kb_cli promote framework/persona_builders/ops-eng.yaml -
 
 ## What gates integration testing
 
-External provisioning (ask once, when ready):
-1. Oracle 23ai ADB (dev instance)
-2. OCI Vault + secrets
-3. OpenAI API key or OCI GenAI URL
-4. Confluence API token + space keys
-5. Jira API token + project keys
-6. AIRA team's 50 query/citation pairs (for eval gold set)
+| Item | Status |
+|---|---|
+| Oracle 23ai ADB | ✅ **CONNECTED** — `aira_genai_agent_db_Sravan` (Oracle AI DB 26ai, EU Frankfurt). Tunnel via `./framework/scripts/adb-connect.sh`. Config in `framework/config/laptop.yaml` (gitignored). |
+| OCI Vault + secrets | ⏳ Pending — using env vars in laptop mode for now |
+| OpenAI API key or OCI GenAI URL | ⏳ Pending |
+| Confluence API token | ✅ Via `codex_proxy` mode (Codex OAuth) |
+| Jira API token | ✅ Via `codex_proxy` mode (Codex OAuth) |
+| AIRA team's 50 query/citation pairs | ⏳ Pending |
 
 ## Recent decisions
 - **DECISION-001–004** (2026-05-04) — all decided (Oracle stack, converged DB, OpenAI, PM/TPM/Aira personas)

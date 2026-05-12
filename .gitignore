@@ -46,6 +46,7 @@ eval/baselines/
 # Local secrets file for laptop dev — must NEVER be committed
 framework/.secrets.local.yaml
 framework/.secrets.yaml
+framework/config/laptop.yaml
 .kbf/
 secrets/
 
