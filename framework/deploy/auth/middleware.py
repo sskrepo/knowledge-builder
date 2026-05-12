@@ -34,7 +34,11 @@ from .registry import ConsumerRegistry
 log = logging.getLogger(__name__)
 
 # Paths that bypass authentication (security: [] in openapi.yaml)
-_AUTH_SKIP_PATHS = frozenset({"/healthz", "/api/v1/version"})
+# /mcp is skipped here because the MCP Streamable HTTP transport (mcp_transport.py)
+# handles auth internally — only tools/call requires a token, all other MCP methods
+# (initialize, ping, tools/list, prompts/list, resources/list) are intentionally
+# public per the MCP spec 2025-03-26.
+_AUTH_SKIP_PATHS = frozenset({"/healthz", "/api/v1/version", "/mcp"})
 
 # In-memory sliding-window RPM counters: consumer_name → list[timestamp]
 _rpm_counters: dict[str, list[float]] = defaultdict(list)
