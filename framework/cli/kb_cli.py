@@ -275,6 +275,17 @@ def cmd_migrate(args):
             _run_sql_ddl(pool, sql_dir / "kb_shim.sql")
             print("  ✓ kb_shim: OK")
 
+            # Apply numbered incremental migrations (framework/db/migrations/*.sql),
+            # sorted by filename so they run in order (001, 002, … 005, 006, …).
+            # All migration files are idempotent — safe to re-run.
+            migrations_dir = REPO_ROOT / "framework" / "db" / "migrations"
+            if migrations_dir.exists():
+                migration_files = sorted(migrations_dir.glob("*.sql"))
+                for mf in migration_files:
+                    print(f"  Applying {mf.name} …")
+                    _run_sql_ddl(pool, mf)
+                    print(f"  ✓ {mf.name}: OK")
+
         if schema not in ("kb_incidents", "kb_shim", "all"):
             print(f"❌ Unknown schema '{schema}'. Valid: kb_incidents | kb_shim | all",
                   file=sys.stderr)
