@@ -528,6 +528,120 @@ def cmd_gold_feed(args):
 
 
 # ============================================================================
+# watch-bugs — deduplicating error/bug watcher
+# ============================================================================
+
+def cmd_watch_bugs(args):
+    """Read errors.jsonl and user_bugs.jsonl, deduplicate, and print diagnosis blocks."""
+    from datetime import datetime, timezone, timedelta
+    from collections import defaultdict
+
+    store_root = Path(
+        args.store_root
+        or os.environ.get("KBF_STORE_ROOT", str(Path.home() / ".kbf" / "store"))
+    )
+
+    def _read_jsonl(path: Path) -> list[dict]:
+        if not path.exists():
+            return []
+        records: list[dict] = []
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    try:
+                        records.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        pass
+        return records
+
+    errors = _read_jsonl(store_root / "errors.jsonl")
+    user_bugs = _read_jsonl(store_root / "user_bugs.jsonl")
+
+    # Optional: filter by --since MINUTES
+    if args.since:
+        cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=args.since)
+        def _after_cutoff(rec: dict) -> bool:
+            ts_str = rec.get("timestamp", "")
+            if not ts_str:
+                return True
+            try:
+                ts = datetime.fromisoformat(ts_str)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                return ts >= cutoff
+            except ValueError:
+                return True
+        errors = [e for e in errors if _after_cutoff(e)]
+        user_bugs = [b for b in user_bugs if _after_cutoff(b)]
+
+    # Index user_bugs by request_id for fast join
+    bugs_by_request_id: dict[str, dict] = {
+        bug["request_id"]: bug for bug in user_bugs if bug.get("request_id")
+    }
+
+    # Group errors by (error_type, message[:80]) for fuzzy dedup
+    groups: dict[tuple, list[dict]] = defaultdict(list)
+    for err in errors:
+        key = (err.get("error_type", ""), (err.get("message") or "")[:80])
+        groups[key].append(err)
+
+    # Load known bugs from pmo/bugs/ for dedup
+    bugs_dir = REPO_ROOT / "pmo" / "bugs"
+    known_bug_texts: list[tuple[str, str]] = []
+    if bugs_dir.exists():
+        for bug_file in sorted(bugs_dir.glob("BUG-*.md")):
+            content = bug_file.read_text(encoding="utf-8", errors="replace")
+            known_bug_texts.append((bug_file.stem, content))
+
+    SEP = "━" * 40
+    new_candidates = 0
+    known_count = 0
+
+    for (error_type, message_prefix), group_errors in sorted(
+        groups.items(),
+        key=lambda kv: min(e.get("timestamp", "") for e in kv[1]),
+    ):
+        rep = min(group_errors, key=lambda e: e.get("timestamp", ""))
+        rid = rep.get("request_id", "?")
+        tool = rep.get("tool", "?")
+        first_seen = rep.get("timestamp", "?")
+        count = len(group_errors)
+        full_message = rep.get("message", message_prefix)
+        display_error = f"{error_type} — {full_message}" if error_type else full_message
+
+        user_report = bugs_by_request_id.get(rid)
+        report_str = "NO"
+        if user_report:
+            desc = (user_report.get("description") or "")[:60]
+            report_str = f'YES — "{desc}"'
+
+        known_label = ""
+        for bug_stem, bug_content in known_bug_texts:
+            if message_prefix and message_prefix.lower() in bug_content.lower():
+                known_label = f"KNOWN — already filed as {bug_stem}"
+                break
+
+        if known_label:
+            known_count += 1
+        else:
+            new_candidates += 1
+
+        print(SEP)
+        status_tag = known_label if known_label else "[BUG-candidate]"
+        print(f"{status_tag} {rid}  ({count} occurrence{'s' if count != 1 else ''})")
+        print(f"Tool:       {tool}")
+        print(f"Error:      {display_error}")
+        print(f"First seen: {first_seen}")
+        print(f"User report: {report_str}")
+        print(SEP)
+
+    print()
+    print(f"{new_candidates} new candidates, {known_count} known bugs, {len(errors)} total errors")
+    return 0
+
+
+# ============================================================================
 # main
 # ============================================================================
 def main():
@@ -578,6 +692,13 @@ def main():
     pgf.add_argument("--persona", required=True, help="persona id (e.g. ops_eng)")
     pgf.add_argument("--skill", default="", help="skill / KB name (e.g. incident_summary)")
     pgf.set_defaults(fn=cmd_gold_feed)
+
+    pwb = sub.add_parser("watch-bugs", help="deduplicate and diagnose error/bug reports")
+    pwb.add_argument("--store-root", default=None,
+                     help="path to the KBF store root (default: $KBF_STORE_ROOT or ~/.kbf/store)")
+    pwb.add_argument("--since", type=int, default=None, metavar="MINUTES",
+                     help="only show errors from the last N minutes")
+    pwb.set_defaults(fn=cmd_watch_bugs)
 
     args = p.parse_args()
     return args.fn(args)

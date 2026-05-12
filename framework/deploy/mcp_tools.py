@@ -25,6 +25,36 @@ log = logging.getLogger(__name__)
 
 EXTERNAL_TOOLS_SCHEMA = [
     {
+        "name": "reportBug",
+        "description": (
+            "Report an error you received from any KBF tool. "
+            "Include the requestId from the error response. "
+            "The server will investigate."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["requestId", "tool", "description"],
+            "properties": {
+                "requestId": {
+                    "type": "string",
+                    "description": "The requestId field from the isError response",
+                },
+                "tool": {
+                    "type": "string",
+                    "description": "Which tool failed (e.g. authorSkill)",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "What you were trying to do when the error occurred",
+                },
+                "input": {
+                    "type": "object",
+                    "description": "The input you passed to the failing tool (optional)",
+                },
+            },
+        },
+    },
+    {
         "name": "askKnowledgeBase",
         "description": (
             "Single entry point for all knowledge queries. Routes through four-tier system: "
@@ -109,6 +139,7 @@ def build_external_tool_registry(app) -> dict[str, Any]:
         dict mapping tool name → async callable.
     """
     return {
+        "reportBug": _make_report_bug_handler(app),
         "askKnowledgeBase": _make_ask_handler(app),
         "authorSkill": _make_author_skill_handler(app),
     }
@@ -225,6 +256,69 @@ def _make_author_skill_handler(app):
         return result
 
     return author_skill_handler
+
+
+def _make_report_bug_handler(app):
+    """Build the reportBug MCP tool handler.
+
+    reportBug does NOT require write scope — it is callable by any consumer
+    including anonymous (dev mode).  The handler:
+      1. Generates a queue_id for the report.
+      2. Writes to error_store.record_user_bug().
+      3. Returns a confirmation dict.
+    """
+    from datetime import datetime, timezone
+    from uuid import uuid4
+
+    async def report_bug_handler(
+        *,
+        requestId: str,
+        tool: str,
+        description: str,
+        input: dict | None = None,
+        _consumer=None,
+    ) -> dict:
+        """MCP handler for reportBug.
+
+        Args:
+            requestId:   The requestId from the isError response.
+            tool:        Name of the tool that failed.
+            description: Brief description of what the user was trying to do.
+            input:       Optional — the input passed to the failing tool.
+            _consumer:   ConsumerManifest injected by MCP dispatch.
+        """
+        consumer = _consumer or _anonymous_consumer()
+        user_id = consumer.user_id if consumer.user_id else "anon"
+
+        queue_id = f"BUG-queue-{uuid4().hex[:5]}"
+
+        log.info(
+            "mcp:reportBug request_id=%s tool=%s queue_id=%s consumer=%s",
+            requestId, tool, queue_id, consumer.name,
+        )
+
+        error_store = getattr(app.state, "error_store", None)
+        if error_store:
+            entry = {
+                "request_id": requestId,
+                "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+                "tool": tool,
+                "description": description,
+                "input": input or {},
+                "user_id": user_id,
+                "queue_id": queue_id,
+            }
+            error_store.record_user_bug(entry)
+
+        return {
+            "queued": True,
+            "queueId": queue_id,
+            "message": (
+                "Bug report received. The team has been notified and will investigate."
+            ),
+        }
+
+    return report_bug_handler
 
 
 # ---------------------------------------------------------------------------

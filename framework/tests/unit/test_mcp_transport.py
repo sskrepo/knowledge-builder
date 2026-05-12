@@ -254,14 +254,34 @@ class TestToolsList:
 
 
 class TestPromptsList:
-    def test_returns_empty_prompts(self, transport_client):
+    def test_returns_kbf_skill_prompt(self, transport_client):
         resp = _post(transport_client, _jsonrpc("prompts/list"))
         assert resp.status_code == 200
-        assert resp.json()["result"]["prompts"] == []
+        prompts = resp.json()["result"]["prompts"]
+        assert len(prompts) == 1
+        assert prompts[0]["name"] == "kbf-skill-prompt"
+        assert "version" in prompts[0]
 
     def test_no_auth_required(self, transport_client):
         resp = _post(transport_client, _jsonrpc("prompts/list"), headers={})
         assert "error" not in resp.json()
+
+    def test_prompts_get_returns_messages(self, transport_client):
+        resp = _post(transport_client, _jsonrpc("prompts/get", {"name": "kbf-skill-prompt"}))
+        assert resp.status_code == 200
+        result = resp.json()["result"]
+        assert "messages" in result
+        messages = result["messages"]
+        assert len(messages) == 1
+        assert messages[0]["role"] == "user"
+        text = messages[0]["content"]["text"]
+        assert "reportBug" in text
+        assert "requestId" in text
+
+    def test_prompts_get_unknown_name_returns_invalid_params(self, transport_client):
+        resp = _post(transport_client, _jsonrpc("prompts/get", {"name": "nonexistent"}))
+        assert resp.status_code == 200
+        assert resp.json()["error"]["code"] == -32602
 
 
 # ---------------------------------------------------------------------------

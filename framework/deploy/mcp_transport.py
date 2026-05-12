@@ -36,7 +36,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import traceback
 from typing import Any
+from uuid import uuid4
 
 log = logging.getLogger(__name__)
 
@@ -245,6 +247,9 @@ def register_mcp_transport(app, state: dict) -> None:
           - Production: tools/call requires Bearer token; all other methods are public.
           - Auth failure returns HTTP 401 + WWW-Authenticate + setup instructions.
         """
+        # Assign a unique request ID for tracing — included in all error responses
+        request_id = f"req-{uuid4().hex[:8]}"
+
         # Parse body
         try:
             body = await req.json()
@@ -258,6 +263,8 @@ def register_mcp_transport(app, state: dict) -> None:
         params = body.get("params") or {}
         req_id = body.get("id")
 
+        log.info("mcp request request_id=%s method=%s", request_id, method or "(none)")
+
         # Notifications (no id) — acknowledge silently
         if "id" not in body:
             log.debug("mcp_transport: notification method=%s", method)
@@ -266,14 +273,14 @@ def register_mcp_transport(app, state: dict) -> None:
         if not method:
             return _respond(_err(req_id, _INVALID_REQUEST, "method is required"), req)
 
-        log.debug("mcp_transport: method=%s id=%s", method, req_id)
+        log.debug("mcp_transport: method=%s id=%s request_id=%s", method, req_id, request_id)
 
         # tools/call: auth check happens here — failure returns HTTP 401 directly
         if method == "tools/call":
             consumer, auth_err = _authenticate(req)
             if auth_err is not None:
                 return auth_err   # HTTP 401, not a JSON-RPC response
-            response = await _dispatch_tool_call(params, req_id, consumer, state)
+            response = await _dispatch_tool_call(params, req_id, consumer, state, req, request_id)
             return _respond(response, req)
 
         # All other methods
@@ -309,7 +316,20 @@ async def _dispatch(method: str, params: dict, req_id: Any, state: dict) -> dict
         return _ok(req_id, {"tools": tools})
 
     if method == "prompts/list":
-        return _ok(req_id, {"prompts": []})
+        from .skill_prompt import SKILL_PROMPT_NAME, SKILL_PROMPT_DESCRIPTION, SKILL_PROMPT_VERSION
+        return _ok(req_id, {
+            "prompts": [
+                {"name": SKILL_PROMPT_NAME, "description": SKILL_PROMPT_DESCRIPTION, "version": SKILL_PROMPT_VERSION}
+            ]
+        })
+
+    if method == "prompts/get":
+        from .skill_prompt import SKILL_PROMPT_NAME, SKILL_PROMPT_DESCRIPTION, get_skill_prompt_messages
+        prompt_name = params.get("name") if isinstance(params, dict) else None
+        if prompt_name != SKILL_PROMPT_NAME:
+            return _err(req_id, _INVALID_PARAMS,
+                        f"Unknown prompt: {prompt_name!r}. Available: {SKILL_PROMPT_NAME!r}")
+        return _ok(req_id, {"description": SKILL_PROMPT_DESCRIPTION, "messages": get_skill_prompt_messages()})
 
     if method == "resources/list":
         return _ok(req_id, {"resources": []})
@@ -322,8 +342,15 @@ async def _dispatch_tool_call(
     req_id: Any,
     consumer,
     state: dict,
+    req: "Request",
+    request_id: str,
 ) -> dict:
-    """Execute a tools/call request.  Consumer is already authenticated."""
+    """Execute a tools/call request.  Consumer is already authenticated.
+
+    On error, writes a structured record to error_store (if available) and
+    includes ``requestId`` in the isError content item so the LLM client
+    can call ``reportBug`` with the correct ID.
+    """
     tool_name = params.get("name") if isinstance(params, dict) else None
     arguments = params.get("arguments", {}) if isinstance(params, dict) else {}
 
@@ -334,23 +361,33 @@ async def _dispatch_tool_call(
     handler = external_registry.get(tool_name)
 
     if handler is None:
-        # Per MCP spec, unknown tool → isError=true in content (not a protocol error)
         return _ok(req_id, {
-            "content": [{"type": "text", "text": f"Unknown tool: {tool_name!r}"}],
+            "content": [{"type": "text", "text": f"Unknown tool: {tool_name!r}", "requestId": request_id}],
             "isError": True,
         })
+
+    error_store = getattr(req.app.state, "error_store", None)
+    user_id = getattr(consumer, "user_id", "anon") or "anon"
+    synth_id = arguments.get("synthId", "") if isinstance(arguments, dict) else ""
 
     try:
         result = await handler(**arguments, _consumer=consumer)
     except TypeError as exc:
+        tb = traceback.format_exc()
+        log.warning("mcp_transport: tools/call %s bad arguments request_id=%s: %s", tool_name, request_id, exc)
+        if error_store:
+            _write_error_record(error_store, request_id, tool_name, synth_id, user_id, exc, tb, arguments)
         return _ok(req_id, {
-            "content": [{"type": "text", "text": f"Invalid arguments: {exc}"}],
+            "content": [{"type": "text", "text": f"Invalid arguments: {exc}", "requestId": request_id}],
             "isError": True,
         })
     except Exception as exc:
-        log.exception("mcp_transport: tools/call %s raised %s", tool_name, exc)
+        tb = traceback.format_exc()
+        log.exception("mcp_transport: tools/call %s raised %s request_id=%s", tool_name, type(exc).__name__, request_id)
+        if error_store:
+            _write_error_record(error_store, request_id, tool_name, synth_id, user_id, exc, tb, arguments)
         return _ok(req_id, {
-            "content": [{"type": "text", "text": f"Tool execution error: {exc}"}],
+            "content": [{"type": "text", "text": f"Tool execution error: {exc}", "requestId": request_id}],
             "isError": True,
         })
 
@@ -358,6 +395,33 @@ async def _dispatch_tool_call(
         "content": [{"type": "text", "text": json.dumps(_serialize(result))}],
         "isError": False,
     })
+
+
+def _write_error_record(error_store, request_id, tool_name, synth_id, user_id, exc, tb, arguments):
+    """Write a structured error record to the error store."""
+    from datetime import datetime, timezone
+    try:
+        error_store.record_error({
+            "request_id": request_id,
+            "timestamp": datetime.now(tz=timezone.utc).isoformat(),
+            "tool": tool_name,
+            "synth_id": synth_id,
+            "user_id": user_id,
+            "error_type": type(exc).__name__,
+            "message": str(exc),
+            "traceback": tb,
+            "input_snapshot": _sanitise_input(arguments),
+        })
+    except Exception as store_exc:
+        log.error("mcp_transport: failed to write to error_store: %s", store_exc)
+
+
+def _sanitise_input(arguments: dict) -> dict:
+    """Strip sensitive keys (token, password) from input before storing."""
+    if not isinstance(arguments, dict):
+        return {}
+    sensitive = ("token", "password")
+    return {k: v for k, v in arguments.items() if not any(s in k.lower() for s in sensitive)}
 
 
 # ---------------------------------------------------------------------------

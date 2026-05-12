@@ -59,6 +59,7 @@ def _load_app():
     from .auth.registry import ConsumerRegistry
     from .session.factory import build_session_store
     from .cost_store import CostStore
+    from .error_store import ErrorStore
 
     # Sprint 3 — route modules
     from .routes.ask import router as ask_router
@@ -105,6 +106,7 @@ def _load_app():
         # build_session_store auto-selects ADB when pool is not None
         app.state.session_store = build_session_store(pool=adb_pool)
         app.state.cost_store = CostStore(store_root)
+        app.state.error_store = ErrorStore(store_root)
         app.state.startup_time = time.time()
 
         # --- Shims + LLM ---
