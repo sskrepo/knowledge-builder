@@ -211,8 +211,21 @@ class SkillBuilderConversation:
         }
 
     def to_dict(self) -> dict:
-        """Serialize entire session for DB persistence."""
-        return {"state": self._state, "persona": self._persona, **self.get_state()}
+        """Serialize entire session for DB persistence.
+
+        NOTE: get_state() intentionally omits synthesized_artifacts and
+        slide_mapping to keep the GET-endpoint snapshot lean (artifact content
+        can be several KB of YAML/JSON).  We add them back here so that the
+        PREVIEW → COMMIT and ANALYZE_ARTIFACT → REVIEW_SCHEMA transitions work
+        correctly when a session is saved and resumed across separate MCP calls.
+        Without this, _write_artifacts() iterates an empty dict and commits 0
+        artifacts (BUG-004).
+        """
+        d = {"state": self._state, "persona": self._persona, **self.get_state()}
+        d["synthesized_artifacts"] = dict(self._data.synthesized_artifacts)
+        if self._data.slide_mapping is not None:
+            d["slide_mapping"] = dict(self._data.slide_mapping)
+        return d
 
     @classmethod
     def from_dict(cls, d: dict, llm=None) -> "SkillBuilderConversation":
