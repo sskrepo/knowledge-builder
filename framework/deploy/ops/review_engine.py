@@ -605,7 +605,13 @@ class KbfOpsReviewEngine:
         prompt = self._build_prompt(bundle, review_id)
 
         try:
-            raw_response = self._llm.complete(prompt)
+            result = self._llm.chat(
+                model="eval_judge",
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                max_tokens=4096,
+            )
+            raw_response = result["text"] if isinstance(result, dict) else str(result)
         except Exception as exc:
             log.warning("KbfOpsReviewEngine: LLM call failed: %s", exc)
             # Return structural-only report with an error note.

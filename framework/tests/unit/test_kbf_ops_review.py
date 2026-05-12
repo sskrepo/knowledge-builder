@@ -336,18 +336,19 @@ class TestLLMReview:
         # The easiest approach: make the LLM return a response with a placeholder
         # review_id that the engine replaces internally via _parse_llm_response.
         # Actually the engine passes review_id into the prompt and expects it back;
-        # intercept at complete() level.
+        # intercept at chat() level.
         captured_review_id: list[str] = []
 
-        def _fake_complete(prompt: str) -> str:
-            # Extract reviewId from the prompt or use a fixed one.
+        def _fake_chat(model, messages, **kwargs) -> dict:
+            # Extract reviewId from the user message content or use a fixed one.
             import re
+            prompt = messages[-1]["content"] if messages else ""
             m = re.search(r'"reviewId"\s*:\s*"([^"]+)"', prompt)
             rev_id = m.group(1) if m else "rev-mockreviewid"
             captured_review_id.append(rev_id)
-            return _make_valid_llm_response("synth-tpm-abc", rev_id)
+            return {"text": _make_valid_llm_response("synth-tpm-abc", rev_id), "tokens_in": 0, "tokens_out": 0}
 
-        mock_llm.complete.side_effect = _fake_complete
+        mock_llm.chat.side_effect = _fake_chat
 
         engine = KbfOpsReviewEngine(llm=mock_llm)
         report = engine.review(_make_bundle(), depth="full")
@@ -373,7 +374,7 @@ class TestLLMReview:
         from framework.deploy.ops.review_engine import KbfOpsReviewEngine
 
         mock_llm = MagicMock()
-        mock_llm.complete.return_value = "This is NOT valid JSON at all {{{]]}"
+        mock_llm.chat.return_value = {"text": "This is NOT valid JSON at all {{{]]}", "tokens_in": 0, "tokens_out": 0}
 
         engine = KbfOpsReviewEngine(llm=mock_llm)
         # Must not raise.
@@ -394,7 +395,7 @@ class TestLLMReview:
         engine = KbfOpsReviewEngine(llm=mock_llm)
         engine.review(_make_bundle(), depth="structural")
 
-        mock_llm.complete.assert_not_called()
+        mock_llm.chat.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
