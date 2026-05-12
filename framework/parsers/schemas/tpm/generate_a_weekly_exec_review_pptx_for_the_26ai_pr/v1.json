@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/tpm/generate_a_weekly_exec_review_pptx_for_the_26ai_pr/v1.json",
+  "title": "tpm \u2014 generate_a_weekly_exec_review_pptx_for_the_26ai_pr \u2014 v1",
+  "description": "Synthesized by skill_builder for persona=tpm, kb=generate_a_weekly_exec_review_pptx_for_the_26ai_pr. Refine before promoting.",
+  "type": "object",
+  "required": [
+    "project_name",
+    "overall_rag",
+    "executive_summary",
+    "key_accomplishments",
+    "upcoming_milestones",
+    "schedule_health",
+    "scope_health",
+    "resource_health",
+    "top_risks",
+    "metrics_snapshot",
+    "workstream_status"
+  ],
+  "properties": {
+    "project_name": {
+      "type": "string",
+      "description": "Program/project name being reported on, typically '26ai",
+      "maxLength": 500
+    },
+    "overall_rag": {
+      "type": "string",
+      "enum": [
+        "red",
+        "amber",
+        "green"
+      ],
+      "description": "Overall project RAG (red/amber/green) reflecting combined schedule, scope and resource health"
+    },
+    "executive_summary": {
+      "type": "string",
+      "description": "3-5 sentence narrative for execs covering what shipped this week, what slipped, and the single biggest signal they need to know",
+      "maxLength": 1000
+    },
+    "key_accomplishments": {
+      "type": "array",
+      "description": "List of concrete deliverables completed this week, each phrased as an outcome with owner (e.g. 'GPU capacity provisioned in PHX \u2014 Infra')",
+      "maxLength": 500
+    },
+    "upcoming_milestones": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Next 2-4 weeks of milestones, each formatted 'YYYY-MM-DD \u2014 milestone \u2014 owner"
+    },
+    "schedule_health": {
+      "type": "string",
+      "description": "RAG status for the schedule dimension with a 1-2 sentence justification referencing committed milestone dates",
+      "maxLength": 500
+    },
+    "scope_health": {
+      "type": "string",
+      "description": "RAG status for scope with 1-2 sentence justification noting any in-flight scope changes or descopes",
+      "maxLength": 500
+    },
+    "resource_health": {
+      "type": "string",
+      "description": "RAG status for staffing/resources with 1-2 sentence justification noting hiring gaps, contractor ramp, or attrition",
+      "maxLength": 500
+    },
+    "top_risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Top 3-5 program risks, each formatted 'risk \u2014 impact \u2014 mitigation \u2014 owner"
+    },
+    "metrics_snapshot": {
+      "type": "string",
+      "description": "Key program KPIs vs targets (e.g. burn-up %, story-point velocity, defect counts open/closed, environment readiness %, capacity %), one metric per line as 'metric: value (target X, delta Y)",
+      "maxLength": 500
+    },
+    "workstream_status": {
+      "type": "array",
+      "description": "Per-workstream RAG roll-up (e.g. Modeling, Data, Eval, Infra, Safety, GTM), each formatted 'workstream \u2014 RAG \u2014 one-line note",
+      "maxLength": 50
+    }
+  },
+  "additionalProperties": false
+}

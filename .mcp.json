@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "kbf": {
+      "type": "http",
+      "url": "http://localhost:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer dev-only-token-replace-me"
+      }
+    }
+  }
+}
