@@ -89,7 +89,14 @@ async def ask_knowledge_base(req: Request):
         consumer.name, len(question), max_results,
     )
 
-    result = ctx.answer(query=question, budget=budget)
+    result = ctx.answer(
+        query=question,
+        budget=budget,
+        persona_hint=body.get("persona", ""),
+        service_id_hint=body.get("serviceId", ""),
+        func_area_hint=body.get("functionalArea", ""),
+        max_results=max_results,
+    )
 
     response = _build_ask_response(result, consumer)
     return to_camel_response(response)

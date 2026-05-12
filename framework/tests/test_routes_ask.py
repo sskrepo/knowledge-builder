@@ -292,7 +292,7 @@ class TestAskBudget:
         max_tokens_in matches the consumer's token_budget_per_request."""
         captured_budgets: list = []
 
-        def fake_answer(query: str, budget=None):
+        def fake_answer(query: str, budget=None, **kwargs):
             captured_budgets.append(budget)
             return _canned_result()
 

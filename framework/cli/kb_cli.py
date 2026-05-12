@@ -156,10 +156,149 @@ def cmd_promote(args):
     return 0
 
 
+def _resolve_secret_cli(ref: str) -> str:
+    """Resolve env:// secret references (same logic as mcp_server._resolve_secret)."""
+    if ref and ref.startswith("env://"):
+        var = ref[6:]
+        val = os.environ.get(var, "")
+        if not val:
+            raise RuntimeError(f"Secret env var not set: {var}")
+        return val
+    return ref or ""
+
+
+def _run_sql_ddl(pool, sql_path: Path) -> None:
+    """Execute a DDL script against *pool*, splitting on `;` and PL/SQL `/` blocks.
+
+    Swallows ORA-00955 (object already exists) and ORA-01920 (user already
+    exists) for idempotent re-runs.  All other errors propagate.
+    """
+    from ..stores.incident_vector_store import IncidentVectorStore
+
+    sql = sql_path.read_text()
+    with pool.acquire() as conn:
+        with conn.cursor() as cur:
+            for stmt in IncidentVectorStore._split_sql(sql):
+                stmt = stmt.strip()
+                if not stmt:
+                    continue
+                try:
+                    cur.execute(stmt)
+                except Exception as exc:
+                    msg = str(exc)
+                    # ORA-00955: name already used by existing object
+                    # ORA-01408: such column list already indexed
+                    # ORA-01920: user name already exists
+                    if any(code in msg for code in ("ORA-00955", "ORA-01408", "ORA-01920")):
+                        log.debug("migrate: ignored existing-object: %s", msg.split("\n")[0])
+                    else:
+                        log.error("migrate: failing stmt:\n%s\n%s", stmt[:200], msg)
+                        raise
+        conn.commit()
+
+
 def cmd_migrate(args):
-    print(f"▶ migrate schema={args.schema} env={args.env}")
-    print("  [needs real ADB connection]")
+    """Apply DDL migrations to the configured Oracle ADB.
+
+    Usage:
+      kb-cli migrate --schema kb_incidents --env laptop
+      kb-cli migrate --schema kb_shim --env laptop
+      kb-cli migrate --schema all --env laptop
+    """
+    schema = args.schema
+    env = args.env
+
+    print(f"▶ migrate schema={schema} env={env}")
+
+    # ── Load environment config ────────────────────────────────────────────
+    config_path = REPO_ROOT / "framework" / "config" / f"{env}.yaml"
+    if not config_path.exists():
+        print(f"❌ config not found: {config_path}", file=sys.stderr)
+        return 1
+
+    with open(config_path) as fh:
+        cfg = yaml.safe_load(fh)
+
+    adb_cfg = cfg.get("adb", {})
+    bastion_cfg_dict = cfg.get("bastion", {})
+
+    # ── Build ADB pool ─────────────────────────────────────────────────────
+    # create_adb_pool() takes a raw dict and calls AdbPoolConfig.from_dict()
+    # internally.  We resolve env:// secrets here, then pass the normalised
+    # dict so field names match what from_dict() expects.
+    try:
+        from ..core.adb_pool import create_adb_pool
+
+        wallet_path = str(Path(adb_cfg.get("wallet_path", "")).expanduser())
+        wallet_password = _resolve_secret_cli(adb_cfg.get("wallet_password_secret", ""))
+        admin_user = adb_cfg.get("admin_user", "Admin")
+        admin_password = _resolve_secret_cli(adb_cfg.get("admin_password_secret", ""))
+        service_name = adb_cfg.get("dsn") or adb_cfg.get("service_name", "")
+
+        pool_dict = {
+            "deployment_mode": cfg.get("deployment_mode", "laptop"),
+            "adb": {
+                "service_name":   service_name,
+                "wallet_path":    wallet_path,
+                "user":           admin_user,
+                "password":       admin_password,
+                "wallet_password": wallet_password,
+            },
+            "bastion": bastion_cfg_dict,   # passed through as-is; from_dict handles it
+        }
+
+        print(f"  Connecting to ADB ({service_name} @ localhost:{adb_cfg.get('port', 1522)}) …")
+        pool = create_adb_pool(pool_dict)
+        print("  ✓ ADB pool ready")
+
+    except Exception as exc:
+        print(f"❌ Failed to create ADB pool: {exc}", file=sys.stderr)
+        return 1
+
+    # ── Run migrations ─────────────────────────────────────────────────────
+    run_all = (schema == "all")
+    sql_dir = REPO_ROOT / "framework" / "stores" / "sql"
+
+    try:
+        if run_all or schema == "kb_incidents":
+            from ..stores.incident_vector_store import IncidentVectorStore
+            from ..core.llm import LLMClient
+
+            print("  Running kb_incidents migration …")
+            llm = LLMClient()   # stub — LLM not needed for DDL
+            store = IncidentVectorStore(adb_pool=pool, llm=llm)
+            store.migrate()
+            print("  ✓ kb_incidents: OK")
+
+        if run_all or schema == "kb_shim":
+            print("  Running kb_shim migration …")
+            _run_sql_ddl(pool, sql_dir / "kb_shim.sql")
+            print("  ✓ kb_shim: OK")
+
+        if schema not in ("kb_incidents", "kb_shim", "all"):
+            print(f"❌ Unknown schema '{schema}'. Valid: kb_incidents | kb_shim | all",
+                  file=sys.stderr)
+            _close_pool(pool)
+            return 1
+
+    except Exception as exc:
+        print(f"❌ Migration failed: {exc}", file=sys.stderr)
+        _close_pool(pool)
+        return 1
+
+    _close_pool(pool)
+    print("✓ migrate complete")
     return 0
+
+
+def _close_pool(pool) -> None:
+    """Close an oracledb pool, unwrapping RetryWrapper if needed."""
+    underlying = getattr(pool, "_pool", pool)
+    if hasattr(underlying, "close"):
+        try:
+            underlying.close()
+        except Exception:
+            pass
 
 
 # ============================================================================

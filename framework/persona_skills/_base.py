@@ -10,16 +10,20 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 import yaml
 
+from ..core.interfaces import Result
 from ..core.llm import LLMClient
 from ..orchestrator.budget import Budget
 from ..orchestrator.intent_classifier import IntentSignal, IntentFilter
 from ..orchestrator.shim_kb import ShimKb
+
+_INCIDENT_ID_RE = re.compile(r"\bINC-[\w-]+\b", re.IGNORECASE)
 
 log = logging.getLogger(__name__)
 
@@ -191,8 +195,71 @@ Rules:
                             persona=self.persona,
                         )
                     elif tool_name == "get_incident_summary":
-                        # extract incident id from query if present
-                        results = []
+                        m = _INCIDENT_ID_RE.search(query)
+                        if m:
+                            results = tool(incident_id=m.group())
+                        else:
+                            results = tool(incident_id=query)
+                    elif tool_name == "search_wiki":
+                        results = tool(query=query, persona=self.persona, max_results=10)
+                    elif tool_name == "read_wiki_page":
+                        raw = tool(path=kb_name)
+                        results = [raw] if raw is not None else []
+                    elif tool_name == "query_fleet":
+                        raw_list = tool(resource_type="pod", filters=None, limit=10)
+                        results = [
+                            Result(
+                                content_id=d.get("pod_id") or d.get("node_id") or "",
+                                chunk_id=None,
+                                text=json.dumps(d),
+                                score=1.0,
+                                citation_url=d.get("citation_url", ""),
+                                metadata=d,
+                            )
+                            for d in raw_list
+                        ]
+                    elif tool_name == "text_to_sql":
+                        try:
+                            raw_result = tool(nl_query=query, limit=100)
+                            results = [
+                                Result(
+                                    content_id="sql-result",
+                                    chunk_id=None,
+                                    text=json.dumps(raw_result.get("results", [])),
+                                    score=1.0,
+                                    citation_url=raw_result.get("citation", "udap://fleet"),
+                                    metadata={"sql": raw_result.get("sql", ""),
+                                              "view": raw_result.get("view", "")},
+                                )
+                            ] if raw_result.get("results") else []
+                        except NotImplementedError:
+                            log.info("text_to_sql LLM path not yet implemented; skipping")
+                            results = []
+                    elif tool_name == "find_symbol":
+                        raw_list = tool(symbol_name=query, limit=20)
+                        results = [
+                            Result(
+                                content_id=d.get("file", "") + "#" + d.get("symbol", ""),
+                                chunk_id=None,
+                                text=d.get("signature", d.get("symbol", "")),
+                                score=1.0,
+                                citation_url=d.get("citation_url", ""),
+                                metadata=d,
+                            )
+                            for d in raw_list
+                        ]
+                    elif tool_name == "read_code_page":
+                        raw = tool(module_path=kb_name)
+                        results = [
+                            Result(
+                                content_id=raw.get("file", kb_name),
+                                chunk_id=None,
+                                text=raw.get("summary", ""),
+                                score=1.0,
+                                citation_url=raw.get("citation_url", f"code://{kb_name}"),
+                                metadata=raw,
+                            )
+                        ] if raw else []
                     elif tool_name == "list_sources":
                         results = []
                     else:

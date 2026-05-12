@@ -87,7 +87,7 @@ fi
 OCI="oci --profile $OCI_PROFILE --auth security_token"
 
 if ! $WALLET_ONLY; then
-  # ---- Kill stale tunnel ----
+  # ---- Kill stale tunnel process (port may or may not be bound) ----
   STALE=$(lsof -ti tcp:"$LOCAL_PORT" 2>/dev/null || true)
   if [[ -n "$STALE" ]]; then
     warn "Killing stale process on port $LOCAL_PORT: $STALE"
@@ -95,41 +95,67 @@ if ! $WALLET_ONLY; then
     sleep 1
   fi
 
-  # ---- Create bastion session ----
-  log "Creating bastion port-forwarding session..."
-  SESSION_JSON=$($OCI bastion session create-port-forwarding \
-    --bastion-id "$BASTION_OCID" \
-    --display-name "kbf-adb-$(date +%Y%m%d-%H%M%S)" \
-    --key-type PUB \
-    --ssh-public-key-file "${SSH_KEY}.pub" \
-    --target-private-ip "$ADB_PRIVATE_IP" \
-    --target-port "$ADB_PORT" \
-    --session-ttl "$SESSION_TTL" 2>&1)
-
-  SESSION_ID=$(echo "$SESSION_JSON" | python3 -c \
-    "import sys,json; print(json.load(sys.stdin)['data']['id'])" 2>/dev/null)
+  # ---- Reuse existing bastion session if still ACTIVE (fast path) ----
+  # The SSH process can die while the OCI session lives on for its full 3-hour TTL.
+  # Re-opening SSH against the existing session takes ~3s vs 60-90s for a new session.
+  SESSION_ID=""
+  if [[ -f /tmp/adb-session.id ]]; then
+    EXISTING_ID=$(cat /tmp/adb-session.id)
+    EXISTING_STATE=$($OCI bastion session get \
+      --session-id "$EXISTING_ID" \
+      --query 'data."lifecycle-state"' \
+      --raw-output 2>/dev/null || echo "UNKNOWN")
+    if [[ "$EXISTING_STATE" == "ACTIVE" ]]; then
+      log "Reusing existing ACTIVE bastion session (skipping 60-90s provisioning)"
+      SESSION_ID="$EXISTING_ID"
+    else
+      warn "Existing session state=$EXISTING_STATE — will create a new one"
+    fi
+  fi
 
   if [[ -z "$SESSION_ID" ]]; then
-    err "Failed to create session. Response: $SESSION_JSON"
-    exit 1
-  fi
-  log "Session: $SESSION_ID"
-  echo "$SESSION_ID" > /tmp/adb-session.id
+    # ---- Create new bastion session ----
+    log "Creating bastion port-forwarding session..."
+    SESSION_JSON=$($OCI bastion session create-port-forwarding \
+      --bastion-id "$BASTION_OCID" \
+      --display-name "kbf-adb-$(date +%Y%m%d-%H%M%S)" \
+      --key-type PUB \
+      --ssh-public-key-file "${SSH_KEY}.pub" \
+      --target-private-ip "$ADB_PRIVATE_IP" \
+      --target-port "$ADB_PORT" \
+      --session-ttl "$SESSION_TTL" 2>&1)
 
-  # ---- Wait for ACTIVE ----
-  log "Waiting for session ACTIVE..."
-  for i in $(seq 1 18); do
-    STATE=$($OCI bastion session get --session-id "$SESSION_ID" \
-      --query 'data."lifecycle-state"' --raw-output 2>/dev/null || echo "UNKNOWN")
-    if [[ "$STATE" == "ACTIVE" ]]; then
-      log "ACTIVE after $((i*10))s"
-      break
+    SESSION_ID=$(echo "$SESSION_JSON" | python3 -c \
+      "import sys,json; print(json.load(sys.stdin)['data']['id'])" 2>/dev/null)
+
+    if [[ -z "$SESSION_ID" ]]; then
+      err "Failed to create session. Response: $SESSION_JSON"
+      exit 1
     fi
-    [[ "$STATE" == "FAILED" || "$STATE" == "DELETED" ]] && { err "Session $STATE"; exit 1; }
-    echo -n "  ${STATE} (${i}0s)... "
-    sleep 10
-    echo ""
-  done
+    echo "$SESSION_ID" > /tmp/adb-session.id
+    log "New session: $SESSION_ID"
+  fi
+
+  # ---- Wait for ACTIVE (new sessions only — reused ACTIVE sessions skip this) ----
+  WAIT_STATE=$($OCI bastion session get --session-id "$SESSION_ID" \
+    --query 'data."lifecycle-state"' --raw-output 2>/dev/null || echo "UNKNOWN")
+  if [[ "$WAIT_STATE" != "ACTIVE" ]]; then
+    log "Waiting for session to become ACTIVE (new session)..."
+    for i in $(seq 1 18); do
+      STATE=$($OCI bastion session get --session-id "$SESSION_ID" \
+        --query 'data."lifecycle-state"' --raw-output 2>/dev/null || echo "UNKNOWN")
+      if [[ "$STATE" == "ACTIVE" ]]; then
+        log "ACTIVE after $((i*10))s"
+        break
+      fi
+      [[ "$STATE" == "FAILED" || "$STATE" == "DELETED" ]] && { err "Session $STATE"; exit 1; }
+      echo -n "  ${STATE} (${i}0s)... "
+      sleep 10
+      echo ""
+    done
+  else
+    log "Session already ACTIVE — opening SSH tunnel immediately"
+  fi
 
   # ---- Open SSH tunnel ----
   log "Opening tunnel: localhost:$LOCAL_PORT → $ADB_PRIVATE_IP:$ADB_PORT"
@@ -147,14 +173,28 @@ if ! $WALLET_ONLY; then
   echo "$TUNNEL_PID" > /tmp/adb-tunnel.pid
   sleep 3
 
-  for attempt in 1 2 3 4 5; do
+  # Wait up to 30s for the port to open (generous budget for new sessions with network latency)
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
     if nc -z localhost "$LOCAL_PORT" 2>/dev/null; then
       log "✓ Tunnel listening on localhost:$LOCAL_PORT (pid=$TUNNEL_PID)"
       break
     fi
-    warn "Port not open yet ($attempt/5)..."
-    sleep 2
+    # Check if SSH process already died (connection refused at bastion end)
+    if ! kill -0 "$TUNNEL_PID" 2>/dev/null; then
+      err "SSH process exited unexpectedly — session may have expired. Re-run without --skip-migrate to create a new session."
+      exit 1
+    fi
+    warn "Port not open yet ($attempt/10)..."
+    sleep 3
   done
+
+  # Final hard check before continuing
+  if ! nc -z localhost "$LOCAL_PORT" 2>/dev/null; then
+    err "Tunnel failed to open on localhost:$LOCAL_PORT after 30s"
+    err "SSH pid=$TUNNEL_PID, session=$SESSION_ID"
+    err "Try: rm /tmp/adb-session.id && ./framework/scripts/adb-connect.sh"
+    exit 1
+  fi
 fi  # end !WALLET_ONLY
 
 # ---- Download wallet (idempotent) ----

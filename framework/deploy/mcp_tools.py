@@ -163,11 +163,14 @@ def _make_ask_handler(app):
             consumer.name, len(question), maxResults,
         )
 
-        # ContextBuilder.answer() accepts only query + budget in the current
-        # implementation.  persona/service/area hints are accepted as kwargs
-        # per the ADR-007 amendment but are silently forwarded here for
-        # forward-compatibility — the builder ignores unknown kwargs.
-        result = ctx.answer(query=question, budget=budget)
+        result = ctx.answer(
+            query=question,
+            budget=budget,
+            persona_hint=persona,
+            service_id_hint=serviceId,
+            func_area_hint=functionalArea,
+            max_results=maxResults,
+        )
 
         response = _build_ask_response(result, consumer)
         return response

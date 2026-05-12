@@ -122,7 +122,20 @@ def _load_app():
         # --- Stores + retrievers ---
         log.info("initializing retrievers…")
         from ..stores.incident_vector_store import IncidentVectorStore
-        store = IncidentVectorStore(adb_pool=None, llm=state["llm"])
+
+        # Load base URLs from adapter configs for real citation URLs (GAP-C1)
+        jira_base_url = _load_adapter_base_url(
+            REPO_ROOT / "framework" / "config" / "adapters" / "jira.yaml"
+        )
+        confluence_base_url = _load_adapter_base_url(
+            REPO_ROOT / "framework" / "config" / "adapters" / "confluence.yaml"
+        )
+        store = IncidentVectorStore(
+            adb_pool=None,
+            llm=state["llm"],
+            jira_base_url=jira_base_url,
+            confluence_base_url=confluence_base_url,
+        )
         state["stores"] = {"ops_incidents": store}
 
         udap_cfg = {
@@ -154,24 +167,53 @@ def _load_app():
         workflow_registry = register_workflow_skills_as_mcp_tools(WORKFLOW_SKILLS_DIR)
         state["workflow_registry"] = workflow_registry
         state["workflow_executor"] = WorkflowExecutor(store=None, llm=state["llm"])
+
+        def _make_wf_callable(skill_path: str, executor):
+            def _call(inputs: dict) -> dict:
+                from pathlib import Path as _Path
+                return executor.execute(_Path(skill_path), inputs)
+            return _call
+
         for tool_name, wf_tool in workflow_registry.items():
-            state["tool_registry"][tool_name] = wf_tool.to_mcp_tool_definition()
+            state["tool_registry"][tool_name] = _make_wf_callable(
+                wf_tool._path or wf_tool.skill_config.get("skill_path", ""),
+                state["workflow_executor"],
+            )
         log.info(
             "registered %d workflow skills as internal MCP tools: %s",
             len(workflow_registry), list(workflow_registry.keys()),
         )
 
         # --- Persona skills ---
+        from ..persona_skills.pm import PmSkill
+        from ..persona_skills.tpm import TpmSkill
+        from ..orchestrator.shim_workflows import ShimWorkflows
+
+        shim_workflows = ShimWorkflows(WORKFLOW_SKILLS_DIR)
+        state["shim_workflows"] = shim_workflows
+
         ops_eng_skill = OpsEngSkill(
             llm=state["llm"], shim_kb=state["shim_kb"], retrievers=retrievers,
         )
-        state["skills"] = {"ops_eng": ops_eng_skill}
+        pm_skill = PmSkill(
+            llm=state["llm"], shim_kb=state["shim_kb"], retrievers=retrievers,
+        )
+        tpm_skill = TpmSkill(
+            llm=state["llm"], shim_kb=state["shim_kb"], retrievers=retrievers,
+        )
+        state["skills"] = {
+            "ops_eng": ops_eng_skill,
+            "pm":      pm_skill,
+            "tpm":     tpm_skill,
+        }
 
         # --- Orchestrator ---
         ctx_builder = ContextBuilder(
             llm=state["llm"], shim_faaas=state["shim_faaas"],
             shim_kb=state["shim_kb"], skills_by_persona=state["skills"],
             synthesizer=Synthesizer(state["llm"]),
+            shim_workflows=shim_workflows,
+            cost_store=app.state.cost_store,
         )
         state["context_builder"] = ctx_builder
         app.state.context_builder = ctx_builder
@@ -250,6 +292,15 @@ def _load_app():
             raise HTTPException(501, str(exc))
 
         return {"content": _serialize(result)}
+
+    # ----------------------------------------------------------------
+    # MCP Streamable HTTP transport — JSON-RPC 2.0 (MCP spec 2025-03-26)
+    # This is the single endpoint that Claude Code's native MCP HTTP client
+    # connects to.  The existing /mcp/tools/* REST routes remain unchanged
+    # for backward compatibility with other clients.
+    # ----------------------------------------------------------------
+    from .mcp_transport import register_mcp_transport
+    register_mcp_transport(app, state)
 
     # ----------------------------------------------------------------
     # Legacy /answer convenience endpoint (preserved for backward compat)
@@ -417,6 +468,23 @@ def _init_laptop_adb_pool(repo_root: Path):
             exc_info=True,
         )
         return None
+
+
+def _load_adapter_base_url(adapter_yaml_path: Path) -> str:
+    """Read the ``native.base_url`` from an adapter YAML config.
+
+    Returns empty string on any error (dev/filestore mode — citation fallback).
+    """
+    if not adapter_yaml_path.exists():
+        return ""
+    try:
+        import yaml  # type: ignore[import]
+        with open(adapter_yaml_path) as fh:
+            raw = yaml.safe_load(fh)
+        return raw.get("native", {}).get("base_url", "")
+    except Exception as exc:
+        log.debug("could not load base_url from %s: %s", adapter_yaml_path, exc)
+        return ""
 
 
 app = _load_app()

@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
+from ..stores.wiki_metadata_store import WikiMetadataStore
+
 log = logging.getLogger(__name__)
 
 _FIXTURE_DIR = Path(__file__).resolve().parents[1] / "_dev_fixtures" / "confluence_pages"
@@ -41,6 +43,7 @@ class ConfluenceWikiIngestor:
         self,
         wiki_root: str | Path | None = None,
         adapter=None,             # ConfluenceNativeAdapter; None → filestore fixture mode
+        wiki_store: WikiMetadataStore | None = None,
     ):
         if wiki_root is None:
             wiki_root = Path.home() / ".kbf" / "wiki"
@@ -48,6 +51,7 @@ class ConfluenceWikiIngestor:
         self._wiki_root.mkdir(parents=True, exist_ok=True)
         self._log_file = self._wiki_root / "ingest.log.jsonl"
         self._adapter = adapter
+        self._wiki_store = wiki_store if wiki_store is not None else WikiMetadataStore()
         self._hash_index = self._load_hash_index()
 
     # -------------------------------------------------------------------------
@@ -142,6 +146,19 @@ class ConfluenceWikiIngestor:
         status = "updated" if existing_hash else "new"
         self._hash_index[page_id] = content_hash
         self._append_log_entry(page_id, content_hash, status, str(md_path))
+
+        # Update wiki metadata index so search_wiki retriever can find this page
+        if self._wiki_store is not None:
+            self._wiki_store.upsert_page({
+                "page_id":            page_id,
+                "title":              title,
+                "path":               str(md_path),
+                "persona":            _raw.get("persona"),
+                "tags":               _raw.get("labels", []),
+                "last_modified":      _raw.get("updated_at"),
+                "content_hash":       content_hash,
+                "extraction_version": self.PARSER_VERSION,
+            })
 
         log.info("ingest_page %s: status=%s path=%s", page_id, status, md_path)
         return {"status": status, "page_id": page_id, "path": str(md_path)}

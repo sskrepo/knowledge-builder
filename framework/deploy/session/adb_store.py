@@ -92,6 +92,34 @@ class AdbSessionStore(SessionStore):
     def _now() -> str:
         return datetime.now(tz=timezone.utc).isoformat()
 
+    @staticmethod
+    def _to_dt(value):
+        """Coerce an ISO-8601 string (or a datetime) into a timezone-aware datetime.
+
+        ``oracledb`` binds Python ``datetime`` values directly into TIMESTAMP
+        columns; ISO strings trigger ORA-01843 because Oracle tries to parse
+        them with the session's NLS_DATE_FORMAT (default ``DD-MON-RR``).
+        Returns None for None.
+        """
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        # Python 3.9's fromisoformat doesn't accept the 'Z' UTC suffix (3.11+).
+        if isinstance(value, str) and value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+        return datetime.fromisoformat(value)
+
+    @staticmethod
+    def _install_dict_rowfactory(cur) -> None:
+        """Make rows accessible as dicts keyed by lowercased column name.
+
+        Must be called AFTER ``cur.execute()`` (which populates ``cur.description``)
+        and BEFORE the first fetch.
+        """
+        cols = [d[0].lower() for d in cur.description]
+        cur.rowfactory = lambda *vals: dict(zip(cols, vals))
+
     # ------------------------------------------------------------------
     # SessionStore interface
     # ------------------------------------------------------------------
@@ -125,14 +153,15 @@ class AdbSessionStore(SessionStore):
             "intent":       session.get("intent_description") or session.get("intent", ""),
             "state":        session.get("state"),
             "session_data": session_data_json,
-            "created_at":   session.get("created_at", now),
-            "updated_at":   now,
-            "expires_at":   expires_at,
+            "created_at":   self._to_dt(session.get("created_at", now)),
+            "updated_at":   self._to_dt(now),
+            "expires_at":   self._to_dt(expires_at),
             "status":       status,
         }
 
         with self._pool.acquire() as conn:
-            conn.execute(_SQL_UPSERT, params)
+            with conn.cursor() as cur:
+                cur.execute(_SQL_UPSERT, params)
             conn.commit()
 
         log.debug(
@@ -146,7 +175,10 @@ class AdbSessionStore(SessionStore):
             return None
 
         with self._pool.acquire() as conn:
-            row = conn.fetchone(_SQL_LOAD, {"synth_id": synth_id, "user_id": user_id})
+            with conn.cursor() as cur:
+                cur.execute(_SQL_LOAD, {"synth_id": synth_id, "user_id": user_id})
+                self._install_dict_rowfactory(cur)
+                row = cur.fetchone()
 
         if row is None:
             return None
@@ -185,7 +217,10 @@ class AdbSessionStore(SessionStore):
             return []
 
         with self._pool.acquire() as conn:
-            rows = conn.fetchall(_SQL_LIST, {"user_id": user_id})
+            with conn.cursor() as cur:
+                cur.execute(_SQL_LIST, {"user_id": user_id})
+                self._install_dict_rowfactory(cur)
+                rows = cur.fetchall()
 
         sessions: list[dict] = []
         for row in rows:
@@ -209,10 +244,11 @@ class AdbSessionStore(SessionStore):
             return
 
         with self._pool.acquire() as conn:
-            conn.execute(
-                _SQL_ABANDON,
-                {"synth_id": synth_id, "user_id": user_id, "now": self._now()},
-            )
+            with conn.cursor() as cur:
+                cur.execute(
+                    _SQL_ABANDON,
+                    {"synth_id": synth_id, "user_id": user_id, "now": self._to_dt(self._now())},
+                )
             conn.commit()
 
         log.info("AdbSessionStore.abandon: %s/%s", user_id, synth_id)
@@ -223,8 +259,9 @@ class AdbSessionStore(SessionStore):
             return 0
 
         with self._pool.acquire() as conn:
-            cursor = conn.execute(_SQL_EXPIRE_STALE)
-            count = cursor.rowcount
+            with conn.cursor() as cur:
+                cur.execute(_SQL_EXPIRE_STALE)
+                count = cur.rowcount
             conn.commit()
 
         log.info("AdbSessionStore.expire_stale: expired %d sessions", count)

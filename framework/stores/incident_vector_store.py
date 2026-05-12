@@ -41,10 +41,14 @@ class IncidentVectorStore(BaseStore):
         adb_pool,
         llm: LLMClient,
         chunker: Chunker | None = None,
+        jira_base_url: str = "",
+        confluence_base_url: str = "",
     ):
         self.pool = adb_pool
         self.llm = llm
         self.chunker = chunker or Chunker(target_tokens=512, overlap_tokens=64)
+        self.jira_base_url = jira_base_url.rstrip("/")
+        self.confluence_base_url = confluence_base_url.rstrip("/")
 
     # ---- Migration ---------------------------------------------------
     def migrate(self) -> None:
@@ -400,10 +404,14 @@ class IncidentVectorStore(BaseStore):
         return where_sql, score_factor_sql, binds
 
     def _citation_url(self, source: str, source_id: str) -> str:
-        # Phase 1: synthesize a likely URL from source + id.
-        # Phase 2: pull base URLs from adapter config.
-        if source == "jira":
-            return f"jira://{source_id}"
-        if source == "confluence":
-            return f"confluence://{source_id}"
+        """Build a resolvable citation URL.
+
+        When base URLs are configured (non-empty), produce real HTTPS links.
+        Falls back to scheme://id in dev/filestore mode where no base URL is known.
+        """
+        if source == "jira" and self.jira_base_url:
+            return f"{self.jira_base_url}/browse/{source_id}"
+        if source == "confluence" and self.confluence_base_url:
+            return f"{self.confluence_base_url}/pages/{source_id}"
+        # Fallback for dev / filestore mode
         return f"{source}://{source_id}"

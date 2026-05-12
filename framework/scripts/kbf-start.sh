@@ -34,6 +34,17 @@ warn() { echo -e "${YLW}[kbf]${NC} $*"; }
 err()  { echo -e "${RED}[kbf] ERROR${NC} $*" >&2; }
 hdr()  { echo -e "\n${CYN}${BLD}── $* ──${NC}"; }
 
+# ── Flag parsing ─────────────────────────────────────────────
+# --migrate        run kb-cli migrate --schema all before starting the server
+# --skip-migrate   (default) skip migration — use on subsequent startups
+RUN_MIGRATE=false
+for _arg in "$@"; do
+    case "$_arg" in
+        --migrate)      RUN_MIGRATE=true  ;;
+        --skip-migrate) RUN_MIGRATE=false ;;
+    esac
+done
+
 # ── Resolve repo root (works whether run from repo root or scripts/) ─────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -169,19 +180,28 @@ fi
 hdr "Step 5 · ADB bastion tunnel (localhost:1522)"
 
 if ./framework/scripts/adb-connect.sh --check 2>/dev/null; then
-    log "Tunnel already alive on port 1522 — skipping new bastion session"
+    log "Tunnel already alive on port 1522"
 else
-    log "Tunnel not running — creating new bastion session…"
-    log "(This takes ~60–90 s while OCI provisions the session)"
+    log "Tunnel not running — reconnecting…"
+    log "(Reuses existing OCI session if still ACTIVE — ~5 s; new session takes ~60–90 s)"
     ./framework/scripts/adb-connect.sh
 fi
-
-# Final confirmation
-if ! nc -z localhost 1522 2>/dev/null; then
-    err "Tunnel still not open on localhost:1522 — check framework/scripts/adb-connect.sh output"
-    exit 1
-fi
 log "ADB tunnel: OK (localhost:1522)"
+
+# ============================================================
+# STEP 5b — DB schema migration (optional — first-run or DDL changes)
+# ============================================================
+hdr "Step 5b · DB migration"
+
+if $RUN_MIGRATE; then
+    log "Running migrations (--schema all --env laptop) …"
+    log "(First run takes ~30 s while Oracle creates users + tables)"
+    "$PYTHON" -m framework.cli.kb_cli migrate --schema all --env laptop
+    log "Migration: OK"
+else
+    log "Skipping migration (pass --migrate on first run or after DDL changes)"
+    log "  Example: bash framework/scripts/kbf-start.sh --migrate"
+fi
 
 # ============================================================
 # STEP 6 — Start the KBF MCP server
@@ -236,15 +256,22 @@ ${CYN}────────────────────────�
       -d '{"persona":"ops_eng","intentDescription":"Summarise on-call runbooks"}' \\
       | python3 -m json.tool
 
-  Wire into Claude Code (~/.claude/claude_desktop_config.json):
+  Wire into Claude Code (.mcp.json in repo root — MCP Streamable HTTP):
     {
       "mcpServers": {
         "kbf": {
-          "url": "http://localhost:${PORT}",
+          "type": "http",
+          "url": "http://localhost:${PORT}/mcp",
           "headers": { "Authorization": "Bearer dev-only-token-replace-me" }
         }
       }
     }
+
+  Verify transport works (JSON-RPC 2.0 initialize handshake):
+    curl -s -X POST http://localhost:${PORT}/mcp \\
+      -H "Content-Type: application/json" \\
+      -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}' \\
+      | python3 -m json.tool
 
 ${CYN}─────────────────────────────────────────────────────────${NC}
 CHEATSHEET

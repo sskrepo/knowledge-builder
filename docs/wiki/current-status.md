@@ -41,6 +41,23 @@ python -m framework.cli.kb_cli promote framework/persona_builders/ops-eng.yaml -
 | **Laptop mode** | Bastion auto-reconnect for ADB (ADR-019), Codex CLI MCP transport for Confluence/Jira (ADR-020 — codex_cli for local stdio + codex_proxy for org HTTPS+OAuth MCP servers), split-deployment: authorSkill local + consumption remote, shared ADB | Code complete (140 new tests; E2E smoke passed against real central_confluence) |
 | **Eval tooling** | GoldSetFeeder interactive CLI (`kb-cli gold-feed`), 7-state machine, count_entries() utility, gold_sets/ directory, 63 tests | Code complete |
 
+## Phase 2+3 gap closure (2026-05-12)
+
+All 9 gaps from the architect's audit are resolved. Key retrieval paths that were silently broken are now functional:
+
+| Gap | File(s) | Fix |
+|-----|---------|-----|
+| GAP-I1 | `ingestion/confluence_wiki_ingest.py` | Ingestor now calls `WikiMetadataStore.upsert_page()` after every new/updated page |
+| GAP-R1 | `retrievers/search_wiki.py` | Full implementation replacing `NotImplementedError` |
+| GAP-R2 | `retrievers/read_wiki_page.py` | Full implementation replacing `NotImplementedError` |
+| GAP-M1 | `deploy/mcp_server.py` | PmSkill + TpmSkill wired into skills dict |
+| GAP-M2 | `deploy/mcp_server.py` | ShimWorkflows passed to ContextBuilder |
+| GAP-M3 | `deploy/mcp_server.py` | cost_store passed to ContextBuilder |
+| GAP-M4 | `deploy/mcp_server.py` | Workflow tool registry stores callables not dicts |
+| GAP-D1 | `persona_skills/_base.py` | All tool dispatch branches implemented |
+| GAP-H1 | `deploy/routes/ask.py`, `deploy/mcp_tools.py` | persona/serviceId/functionalArea hints forwarded |
+| GAP-C1 | `stores/incident_vector_store.py` | Real HTTPS citation URLs when base URLs configured |
+
 ## What gates integration testing
 
 | Item | Status |
