@@ -11,6 +11,14 @@ adb:
     kb_code: { user: KB_CODE_RW, password_secret: vault://kb/kb-code-rw-prod }
     kb_fa_semantic: { user: KB_FA_RW, password_secret: vault://kb/kb-fa-rw-prod }
     kb_shim: { user: KB_SHIM_RW, password_secret: vault://kb/kb-shim-rw-prod }
+
+# ---- Bug DB (DECISION-009) ---------------------------------------------------
+# For prod scale-out, add dsn/wallet_path here to point at a dedicated bug ADB.
+# For now inherits adb connection; different user only.
+bug_db:
+  user: KBF_BUGS
+  password_secret: vault://kb/kbf-bugs-prod
+
 vault:
   vault_ocid: ocid1.vault.oc1.iad.YOUR_PROD_VAULT
   master_key_ocid: ocid1.key.oc1.iad.YOUR_PROD_KEY

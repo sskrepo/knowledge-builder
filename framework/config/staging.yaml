@@ -12,6 +12,12 @@ adb:
     kb_code: { user: KB_CODE_RW, password_secret: vault://kb/kb-code-rw-staging }
     kb_fa_semantic: { user: KB_FA_RW, password_secret: vault://kb/kb-fa-rw-staging }
     kb_shim: { user: KB_SHIM_RW, password_secret: vault://kb/kb-shim-rw-staging }
+
+# ---- Bug DB (DECISION-009) ---------------------------------------------------
+bug_db:
+  user: KBF_BUGS
+  password_secret: vault://kb/kbf-bugs-staging
+
 vault:
   vault_ocid: ocid1.vault.oc1.iad.YOUR_STAGING_VAULT
   master_key_ocid: ocid1.key.oc1.iad.YOUR_STAGING_KEY

@@ -114,6 +114,7 @@ userId: integration-test-user
         app.state.skill_store = FilestoreSkillStore(repo_root=str(store_dir))
         app.state.artifact_store = None
         app.state.adb_pool = None
+        app.state.bug_pool = None   # DECISION-009: bug pool (None in integration tests)
         app.state.cost_store = CostStore(str(store_dir))
         app.state.llm = None
         app.state.context_builder = ctx_builder

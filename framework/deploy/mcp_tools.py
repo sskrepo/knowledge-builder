@@ -621,10 +621,11 @@ def _make_review_skill_session_handler(app):
                     error_store.record_user_bug(entry)
                     bugs_filed += 1
 
-        pool = getattr(app.state, "adb_pool", None)
-        if pool is not None:
+        # Use the dedicated bug DB pool (DECISION-009); fall back to main adb_pool.
+        bug_pool = getattr(app.state, "bug_pool", None) or getattr(app.state, "adb_pool", None)
+        if bug_pool is not None:
             _persist_audit_run(
-                pool=pool,
+                pool=bug_pool,
                 review_id=report.review_id,
                 synth_id=synthId,
                 depth=depth,
@@ -644,7 +645,12 @@ def _persist_audit_run(
     pool, review_id, synth_id, depth, overall_score, recommendation,
     bugs_filed, triggered_by, report
 ) -> None:
-    """Insert a row into KBF_AUDIT_RUNS.  Silently ignores errors."""
+    """Insert a row into KBF_AUDIT_RUNS using the bug DB pool (DECISION-009).
+
+    The caller should pass ``app.state.bug_pool`` (dedicated KBF_BUGS connection)
+    rather than ``app.state.adb_pool``.  Silently ignores errors so a DB failure
+    never surfaces to the MCP caller.
+    """
     import json as _json
 
     _SQL_INSERT = """

@@ -99,13 +99,23 @@ def _load_app():
         log.info("ADB pool ready (env=%s)", kbf_env)
         app.state.adb_pool = adb_pool
 
+        # Bug DB pool (DECISION-009) — non-fatal; falls back to adb_pool if absent.
+        log.info("initialising bug DB pool (env=%s)…", kbf_env)
+        bug_pool = _init_bug_pool(REPO_ROOT, kbf_env)
+        if bug_pool is None:
+            log.warning(
+                "bug DB pool unavailable — bug writes will use main adb_pool (DECISION-009)"
+            )
+            bug_pool = adb_pool   # fallback so AdbErrorStore always gets a pool
+        app.state.bug_pool = bug_pool
+
         # All stores are ADB-backed — no filestore fallback.
         from .error_store import AdbErrorStore
         from .cost_store import AdbCostStore
         app.state.session_store = build_session_store(pool=adb_pool)
         app.state.artifact_store = build_artifact_store(pool=adb_pool, env=kbf_env)
         app.state.skill_store = build_skill_store(pool=adb_pool, env=kbf_env)
-        app.state.error_store = AdbErrorStore(adb_pool, store_root)
+        app.state.error_store = AdbErrorStore(bug_pool, store_root)
         app.state.cost_store = AdbCostStore(adb_pool, store_root)
 
         app.state.startup_time = time.time()
@@ -460,6 +470,130 @@ def _init_adb_pool(repo_root: Path, kbf_env: str):
             f"ADB pool init failed for env={kbf_env!r} "
             f"({type(exc).__name__}: {exc}). Cannot start without ADB."
         ) from exc
+
+
+def _init_bug_pool(repo_root: Path, kbf_env: str):
+    """Initialise and return a dedicated oracledb connection pool for bug storage.
+
+    Reads the same env-specific config YAML as ``_init_adb_pool``, then merges
+    the ``adb`` section (base) with the ``bug_db`` section (overrides) per
+    DECISION-009.  The resulting pool connects as the ``KBF_BUGS`` user (or
+    whatever ``bug_db.user`` specifies).
+
+    Inheritance rules (any key absent from ``bug_db`` falls back to ``adb``):
+      - dsn / service_name  → adb.dsn / adb.service_name
+      - wallet_path         → adb.wallet_path
+      - wallet_password_secret → adb.wallet_password_secret
+      - bastion             → always from the top-level ``bastion`` section
+
+    Returns:
+        oracledb pool on success.
+        None if ``bug_db`` section is absent from config (non-fatal).
+        None if pool creation fails (non-fatal; caller falls back to adb_pool).
+    """
+    cfg_name = {
+        "laptop":     "laptop.yaml",
+        "staging":    "staging.yaml",
+        "production": "prod.yaml",
+    }.get(kbf_env, f"{kbf_env}.yaml")
+    cfg_path = repo_root / "framework" / "config" / cfg_name
+
+    if not cfg_path.exists():
+        log.warning(
+            "bug DB pool: config file %s not found (KBF_ENV=%r) — skipping",
+            cfg_path, kbf_env,
+        )
+        return None
+
+    try:
+        import yaml  # type: ignore[import]
+    except ImportError:
+        log.warning("bug DB pool: PyYAML not installed — skipping")
+        return None
+
+    try:
+        with open(cfg_path) as fh:
+            raw = yaml.safe_load(fh)
+
+        bug_db_raw = raw.get("bug_db", {})
+        if not bug_db_raw:
+            log.warning(
+                "bug DB pool: no 'bug_db' section in %s — skipping (DECISION-009)",
+                cfg_name,
+            )
+            return None
+
+        adb_raw = raw.get("adb", {})
+        bastion_raw = raw.get("bastion", {})
+
+        # Merge: adb provides defaults; bug_db overrides any key it specifies.
+        # Connection parameters are resolved field-by-field so inheritance is
+        # explicit rather than a blind dict merge.
+        service_name = (
+            bug_db_raw.get("dsn")
+            or bug_db_raw.get("service_name")
+            or adb_raw.get("dsn")
+            or adb_raw.get("service_name", "")
+        )
+        wallet_path = str(
+            Path(
+                bug_db_raw.get("wallet_path") or adb_raw.get("wallet_path", "")
+            ).expanduser()
+        )
+        wallet_password = _resolve_secret(
+            bug_db_raw.get("wallet_password_secret")
+            or adb_raw.get("wallet_password_secret", "")
+        )
+        user = bug_db_raw.get("user", "KBF_BUGS")
+        password = _resolve_secret(
+            bug_db_raw.get("password_secret", "")
+        )
+
+        pool_config: dict = {
+            "deployment_mode": raw.get("deployment_mode", kbf_env),
+            "adb": {
+                "service_name":   service_name,
+                "wallet_path":    wallet_path,
+                "user":           user,
+                "password":       password,
+                "wallet_password": wallet_password,
+            },
+        }
+
+        # Bastion config is always inherited from the top-level bastion section.
+        if bastion_raw:
+            pool_config["bastion"] = {
+                "bastion_ocid":            bastion_raw.get("bastion_ocid", ""),
+                "target_db_host":          bastion_raw.get("target_db_host", ""),
+                "target_db_port":          bastion_raw.get("target_db_port", 1522),
+                "local_tunnel_port":       bastion_raw.get("local_tunnel_port", 1522),
+                "ssh_key_path":            bastion_raw.get("ssh_key_path", "~/.ssh/id_rsa"),
+                "session_ttl_seconds":     bastion_raw.get("session_ttl_seconds", 10800),
+                "oci_cli_path":            bastion_raw.get("oci_cli_path", "/opt/homebrew/bin/oci"),
+                "connect_timeout_seconds": bastion_raw.get("connect_timeout_seconds", 30),
+                "max_reconnect_attempts":  bastion_raw.get("max_reconnect_attempts", 3),
+                "script_path":             bastion_raw.get("script_path", ""),
+                "oci_profile":             bastion_raw.get("oci_profile", ""),
+            }
+
+        from ..core.adb_pool import create_adb_pool
+        pool = create_adb_pool(pool_config)
+        if pool is None:
+            log.warning(
+                "bug DB pool: create_adb_pool returned None for env=%r — skipping",
+                kbf_env,
+            )
+            return None
+
+        log.info("bug DB pool ready (env=%s user=%s)", kbf_env, user)
+        return pool
+
+    except Exception as exc:
+        log.warning(
+            "bug DB pool init failed for env=%r (%s: %s) — skipping",
+            kbf_env, type(exc).__name__, exc,
+        )
+        return None
 
 
 def _load_laptop_llm_overrides(repo_root: Path) -> dict:

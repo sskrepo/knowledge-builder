@@ -685,16 +685,45 @@ def cmd_export_bugs(args):
     try:
         with open(config_path) as fh:
             cfg = yaml.safe_load(fh)
+
+        # DECISION-009: export-bugs reads from the dedicated bug_db config.
+        # Any field not set in bug_db is inherited from the adb section.
         adb_cfg = cfg.get("adb", {})
+        bug_db_cfg = cfg.get("bug_db", {})
+
+        # Merge: adb base, bug_db overrides
+        service_name = (
+            bug_db_cfg.get("dsn")
+            or bug_db_cfg.get("service_name")
+            or adb_cfg.get("dsn")
+            or adb_cfg.get("service_name", "")
+        )
+        wallet_path = str(
+            Path(
+                bug_db_cfg.get("wallet_path") or adb_cfg.get("wallet_path", "")
+            ).expanduser()
+        )
+        wallet_password = _resolve_secret_cli(
+            bug_db_cfg.get("wallet_password_secret")
+            or adb_cfg.get("wallet_password_secret", "")
+        )
+        # For the export we connect as the bug DB user (KBF_BUGS) when available;
+        # fall back to adb admin_user for envs that have not yet migrated.
+        user = bug_db_cfg.get("user") or adb_cfg.get("admin_user", "Admin")
+        password = _resolve_secret_cli(
+            bug_db_cfg.get("password_secret")
+            or adb_cfg.get("admin_password_secret", "")
+        )
+
         from ..core.adb_pool import create_adb_pool  # type: ignore[import]
         pool = create_adb_pool({
             "deployment_mode": cfg.get("deployment_mode", "laptop"),
             "adb": {
-                "service_name":    adb_cfg.get("dsn") or adb_cfg.get("service_name", ""),
-                "wallet_path":     str(Path(adb_cfg.get("wallet_path", "")).expanduser()),
-                "user":            adb_cfg.get("admin_user", "Admin"),
-                "password":        _resolve_secret_cli(adb_cfg.get("admin_password_secret", "")),
-                "wallet_password": _resolve_secret_cli(adb_cfg.get("wallet_password_secret", "")),
+                "service_name":    service_name,
+                "wallet_path":     wallet_path,
+                "user":            user,
+                "password":        password,
+                "wallet_password": wallet_password,
             },
             "bastion": cfg.get("bastion", {}),
         })
@@ -941,6 +970,135 @@ def _fmt_ts(ts_value) -> str:
 
 
 # ============================================================================
+# setup-bug-user — create KBF_BUGS Oracle user and grant bug-table access
+# ============================================================================
+
+def cmd_setup_bug_user(args):
+    """Create the KBF_BUGS Oracle user and grant it access to bug tables.
+
+    Connects using the admin pool (from the adb config section), resolves the
+    KBF_BUGS password from bug_db.password_secret, then:
+
+      1. Creates KBF_BUGS (idempotent — ORA-01920 suppressed).
+      2. Grants CREATE SESSION + INSERT/SELECT on bug tables.
+
+    Run once per environment after setting up the schema (migration-005/006).
+    Subsequent runs are safe (GRANTs are idempotent in Oracle).
+
+    Usage:
+        export KBF_BUGS_PASSWORD=<password>
+        kb-cli setup-bug-user --env laptop
+    """
+    env = getattr(args, "env", "") or os.environ.get("KBF_ENV", "laptop")
+    config_path = REPO_ROOT / "framework" / "config" / f"{env}.yaml"
+    if not config_path.exists():
+        print(f"❌ Config not found: {config_path}", file=sys.stderr)
+        return 1
+
+    with open(config_path) as fh:
+        cfg = yaml.safe_load(fh)
+
+    adb_cfg = cfg.get("adb", {})
+    bug_db_cfg = cfg.get("bug_db", {})
+
+    if not bug_db_cfg:
+        print(
+            f"❌ No 'bug_db' section found in {config_path.name}. "
+            "Add it first (DECISION-009).",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Resolve KBF_BUGS password from bug_db.password_secret
+    try:
+        bugs_password = _resolve_secret_cli(bug_db_cfg.get("password_secret", ""))
+    except RuntimeError as exc:
+        print(f"❌ Cannot resolve KBF_BUGS password: {exc}", file=sys.stderr)
+        return 1
+
+    if not bugs_password:
+        print(
+            "❌ KBF_BUGS password is empty. "
+            "Set the env var referenced by bug_db.password_secret.",
+            file=sys.stderr,
+        )
+        return 1
+
+    bugs_user = bug_db_cfg.get("user", "KBF_BUGS")
+
+    # Build admin pool (same as cmd_migrate: uses adb admin credentials)
+    try:
+        from ..core.adb_pool import create_adb_pool  # type: ignore[import]
+
+        wallet_path = str(Path(adb_cfg.get("wallet_path", "")).expanduser())
+        wallet_password = _resolve_secret_cli(adb_cfg.get("wallet_password_secret", ""))
+        admin_user = adb_cfg.get("admin_user", "Admin")
+        admin_password = _resolve_secret_cli(adb_cfg.get("admin_password_secret", ""))
+        service_name = adb_cfg.get("dsn") or adb_cfg.get("service_name", "")
+
+        pool = create_adb_pool({
+            "deployment_mode": cfg.get("deployment_mode", "laptop"),
+            "adb": {
+                "service_name":    service_name,
+                "wallet_path":     wallet_path,
+                "user":            admin_user,
+                "password":        admin_password,
+                "wallet_password": wallet_password,
+            },
+            "bastion": cfg.get("bastion", {}),
+        })
+    except Exception as exc:
+        print(f"❌ Failed to create admin ADB pool: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"▶ setup-bug-user: creating {bugs_user} on {service_name} (env={env})")
+
+    try:
+        with pool.acquire() as conn:
+            with conn.cursor() as cur:
+                # 1. Create user — idempotent (ORA-01920 = user already exists)
+                create_stmt = (
+                    f'BEGIN\n'
+                    f'  EXECUTE IMMEDIATE \'CREATE USER {bugs_user} '
+                    f'IDENTIFIED BY "{bugs_password}"\';\n'
+                    f'EXCEPTION\n'
+                    f'  WHEN OTHERS THEN\n'
+                    f'    IF SQLCODE = -1920 THEN NULL;  -- user already exists\n'
+                    f'    ELSE RAISE;\n'
+                    f'    END IF;\n'
+                    f'END;'
+                )
+                cur.execute(create_stmt)
+                print(f"  ✓ CREATE USER {bugs_user} (or already exists)")
+
+                # 2. GRANT CREATE SESSION
+                cur.execute(f"GRANT CREATE SESSION TO {bugs_user}")
+                print(f"  ✓ GRANT CREATE SESSION TO {bugs_user}")
+
+                # 3. GRANT on bug tables
+                cur.execute(
+                    f"GRANT INSERT, SELECT ON KB_SHIM.KBF_BUG_REPORTS TO {bugs_user}"
+                )
+                print(f"  ✓ GRANT INSERT, SELECT ON KB_SHIM.KBF_BUG_REPORTS TO {bugs_user}")
+
+                cur.execute(
+                    f"GRANT INSERT, SELECT ON KB_SHIM.KBF_AUDIT_RUNS TO {bugs_user}"
+                )
+                print(f"  ✓ GRANT INSERT, SELECT ON KB_SHIM.KBF_AUDIT_RUNS TO {bugs_user}")
+
+            conn.commit()
+
+    except Exception as exc:
+        print(f"❌ setup-bug-user failed: {exc}", file=sys.stderr)
+        _close_pool(pool)
+        return 1
+
+    _close_pool(pool)
+    print(f"✓ setup-bug-user complete — {bugs_user} is ready (DECISION-009)")
+    return 0
+
+
+# ============================================================================
 # watch-bugs — fast local error watcher (reads JSONL hot-cache, not ADB)
 # For a full queryable view of all bugs use: kb-cli export-bugs
 # ============================================================================
@@ -1139,6 +1297,17 @@ def main():
         help="config env name (overrides KBF_ENV, default: laptop)",
     )
     peb.set_defaults(fn=cmd_export_bugs)
+
+    psbu = sub.add_parser(
+        "setup-bug-user",
+        help="create KBF_BUGS Oracle user and grant bug-table access (DECISION-009)",
+    )
+    psbu.add_argument(
+        "--env",
+        default=None,
+        help="config env name (overrides KBF_ENV)",
+    )
+    psbu.set_defaults(fn=cmd_setup_bug_user)
 
     args = p.parse_args()
     return args.fn(args)

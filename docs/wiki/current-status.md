@@ -73,6 +73,8 @@ All 9 gaps from the architect's audit are resolved. Key retrieval paths that wer
 - **DECISION-001–004** (2026-05-04) — all decided (Oracle stack, converged DB, OpenAI, PM/TPM/Aira personas)
 - **ADR-019** (2026-05-11) — Bastion auto-reconnect for Oracle ADB in laptop mode
 - **ADR-020** (2026-05-11, amended 2026-05-11) — Codex CLI as MCP transport for laptop mode. Original: Option B (codex_cli, direct stdio subprocess). Amendment: discovered org MCP servers are HTTPS+OAuth, added codex_proxy mode (LLM-mediated via `codex mcp-server`). E2E smoke passed.
+- **DECISION-009** (2026-05-12) — Dedicated bug DB connection: `bug_db` config section, `KBF_BUGS` Oracle user, same ADB for now. Future DB separation is config-only.
+- **ADR-024** (2026-05-12) — Bug DB connection design: `_init_bug_pool` inheritance contract, `setup-bug-user` CLI, migration-007 GRANTs, non-fatal startup policy for bug_pool, `export-bugs` CLI update.
 - No open decisions
 
 ## Next milestones

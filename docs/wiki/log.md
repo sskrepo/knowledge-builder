@@ -4,6 +4,10 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-12] backend-dev | DECISION-009 implemented — bug_db config section + _init_bug_pool + bug_pool wiring in mcp_server + mcp_tools + export-bugs CLI + setup-bug-user command + migration-007. All existing tests pass (838/839; test_find_symbol_function pre-existing failure unrelated). 12 new unit tests for _init_bug_pool merge logic and failure resilience.
+
+## [2026-05-12] architect | ADR-024 — Bug DB connection design. Documents _init_bug_pool inheritance contract (bug_db overrides dsn/wallet_path/wallet_password_secret/user/password_secret from adb; bastion always inherited), setup-bug-user CLI command (admin pool + runtime password resolution; no password in SQL), migration-007 (GRANTs only, not CREATE USER), non-fatal startup policy for bug_pool (degrades to JSONL if pool fails), SQL table references unchanged (KB_SHIM prefix stays), export-bugs CLI update (reads bug_db section). Exact YAML shape documented for laptop/staging/prod configs.
+
 ## [2026-05-12] dev | DECISION-008 + export-bugs CLI — ADB is the single source of truth for all bug records. pmo/bugs/*.md files become generated exports (not primary records). kb-cli export-bugs reads KBF_BUG_REPORTS + KBF_AUDIT_RUNS, writes YAML-frontmatter + <details>-expandable .md files + INDEX.md to pmo/bugs/. cmd_watch_bugs updated: dedup now checks queue_id in user_bugs.jsonl (not pmo/bugs/ file scan).
 
 ## [2026-05-12] dev | BUG-009 fixed (BUG-queue-6c173) — VALIDATE step failed "workflow references unknown KB" for any newly authored skill. Root cause: _run_validate() built kb_index from filesystem persona_builders/*.yaml only; persona_builder_delta artifact (the new KB entry) was in ADB, not on disk (PROMOTE writes it to disk, not COMMIT). Fix: read persona_builder_delta from skill_store at validate time, wrap in synthetic persona-builder YAML, merge with filesystem builders in temp dir, pass to validate_workflow_links. 18 tests pass.
