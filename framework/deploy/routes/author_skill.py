@@ -234,8 +234,10 @@ def _start_or_continue_session(
     # Build the turn envelope (snake_case — serializer converts to camelCase)
     envelope = _turn_to_envelope(turn)
 
-    # Determine session status
-    status = "committed" if turn.done else "in_progress"
+    # Determine session status.
+    # DB constraint CHK_ASS_STATUS allows: in_progress | completed | abandoned | expired.
+    # "committed" is NOT a valid value — use "completed" for finished sessions (BUG-006).
+    status = "completed" if turn.done else "in_progress"
 
     # Persist session dict with last_turn so GET can re-serve it
     session_dict = conversation.to_dict()

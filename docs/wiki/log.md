@@ -4,6 +4,8 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-12] qa | BUG-006 + BUG-007 filed + verified — BUG-006: PROMOTE/DONE session save raised ORA-02290 because author_skill.py set status='committed' on done sessions; DB constraint CHK_ASS_STATUS only allows in_progress/completed/abandoned/expired. Fixed: 'completed'. BUG-007: gold set seeded with null expected_extraction values because conversation.py passed {f: None for f in gaps} to seed_gold_set with no real example artifact. Fixed: gold_seed.py replaces None values with '<example {field}>' placeholder strings.
+
 ## [2026-05-12] qa | BUG-005 filed + verified — authorSkill validation fails after commit: synthesize_workflow.py wrote KB reference as {persona}.{skill_name}_data (with _data suffix) but synthesize_persona_builder_diff registered the KB as {persona}.{skill_name} (no suffix). validate_workflow_links() looked up the suffixed name, found nothing, returned "workflow references unknown KB". Fix: remove _data suffix from both sites in synthesize_workflow.py so workflow YAML and persona builder index agree.
 
 ## [2026-05-12] qa | BUG-004 filed + verified — authorSkill commits 0 artifacts after PREVIEW. Root cause: SkillBuilderConversation.to_dict() delegates entirely to get_state(), which intentionally omits synthesized_artifacts (kept lean for the GET-endpoint snapshot). But to_dict() is also the persistence path — so synthesized_artifacts was never written to session_data in ADB. On the next MCP call (commit), from_dict() restored an empty dict and _write_artifacts() committed nothing. Same omission for slide_mapping. Fix: to_dict() now appends both fields on top of get_state() output. from_dict() was already correct.
