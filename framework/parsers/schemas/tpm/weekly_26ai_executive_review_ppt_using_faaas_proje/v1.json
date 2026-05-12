@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/tpm/weekly_26ai_executive_review_ppt_using_faaas_proje/v1.json",
+  "title": "tpm \u2014 weekly_26ai_executive_review_ppt_using_faaas_proje \u2014 v1",
+  "description": "Synthesized by skill_builder for persona=tpm, kb=weekly_26ai_executive_review_ppt_using_faaas_proje. Refine before promoting.",
+  "type": "object",
+  "required": [
+    "title",
+    "rag_status",
+    "milestones",
+    "workstreams",
+    "risks",
+    "next_steps"
+  ],
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "Field title \u2014 refine description",
+      "maxLength": 500
+    },
+    "rag_status": {
+      "type": "string",
+      "enum": [
+        "red",
+        "amber",
+        "green"
+      ],
+      "description": "RAG status \u2014 rag_status"
+    },
+    "milestones": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Multi-valued list \u2014 milestones"
+    },
+    "workstreams": {
+      "type": "string",
+      "description": "Field workstreams \u2014 refine description",
+      "maxLength": 500
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Multi-valued list \u2014 risks"
+    },
+    "next_steps": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Multi-valued list \u2014 next_steps"
+    }
+  },
+  "additionalProperties": false
+}

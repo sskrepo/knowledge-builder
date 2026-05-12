@@ -1170,6 +1170,8 @@ class SkillBuilderConversation:
                 artifact_type = "eval_extraction"
             elif rel_path.endswith("-workflow.jsonl"):
                 artifact_type = "eval_workflow"
+            elif "parsers/schemas" in rel_path and rel_path.endswith(".json"):
+                artifact_type = "extraction_schema"
             else:
                 artifact_type = None
 

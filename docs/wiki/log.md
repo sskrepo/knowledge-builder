@@ -4,6 +4,10 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-12] backend-dev | extraction_schema added as 5th artifact type — closes filesystem durability gap. ARTIFACT_TYPES in _base.py + type-inference branch in conversation._write_artifacts() now cover framework/parsers/schemas/{persona}/{skill_name}/v1.json. migration-005 updated (for fresh installs). migration-006 created: ALTERs chk_ksa_artifact_type constraint to include extraction_schema on already-deployed DBs + creates KBF_AUDIT_RUNS table (ADR-023). All committed skill sessions now store 5 artifacts in ADB; nothing production-relevant is filesystem-only.
+
+## [2026-05-12] architect | ADR-023 + DECISION-007 — kbf_ops persona + reviewSkillSession MCP tool. Option 2 chosen (LLM-powered qualitative review). Option 1 (deterministic checks) deferred to ADR-024. KbfOpsSessionLoader reads all synth_id data from ADB; KbfOpsReviewEngine critiques 7 dimensions with structured output; findings auto-filed to KBF_BUG_REPORTS. reviewSkillSession becomes 5th external MCP tool. Backend Dev implementing.
+
 ## [2026-05-12] architect+backend-dev | DECISION-006 decided: Option A (ADB only, no git-sync). Git-sync deferred to ADR-023 — PR review only valuable when author≠approver (not current model; PROMOTE is already the review gate). Backend Dev implementing AdbSkillStore + AdbErrorStore + AdbCostStore + KBF_* DDL migration + kb-cli export-skills.
 
 ## [2026-05-12] backend-dev | OCI kbf-uploads bucket wired — namespace axq4m61mcei3 confirmed, compartment adp_faops_network (ocid1.compartment.oc1..aaaaaaaax7wbfdtfl7axhfae7q5lwvrmf2nlcdii3scarukqmuos7u5mokla). All 3 config files updated. OciArtifactStore now auto-discovers namespace via SDK get_namespace() in production (eliminating hard-coded requirement). KBF_ARTIFACT_OCI_NAMESPACE + KBF_ARTIFACT_OCI_PROFILE env var overrides added. PUT/GET/DELETE probe verified against live bucket. DECISION-005 → resolved.

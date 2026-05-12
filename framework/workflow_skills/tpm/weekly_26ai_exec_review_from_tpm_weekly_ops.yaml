@@ -1,0 +1,65 @@
+workflow_skill: weekly_26ai_exec_review_from_tpm_weekly_ops
+persona: tpm
+status: draft
+trigger:
+  on_request:
+    enabled: true
+    inputs:
+    - name: input
+      type: string
+      description: Query or filter input
+    output_format: pptx
+    response_mode: artifact_url
+skill_card:
+  summary: weekly 26ai exec review from TPM weekly ops
+  use_when: 'User asks for: weekly 26ai exec review from TPM weekly ops'
+  example_invocations:
+  - weekly 26ai exec review from TPM weekly ops
+  do_not_use_for: Single-fact lookups (use vector_search). Live operational data (use
+    query_fleet).
+requires_extractions:
+- kb: tpm.tpm_weekly_ops
+  required_fields:
+  - week_id
+  - top_incidents
+  - blockers
+  - exec_asks
+  - services_touched
+  - metrics
+- kb: pm.pm_briefs
+  required_fields:
+  - summary
+synthesis:
+  output_format: pptx
+  template: synthesis/templates/weekly_26ai_exec_review_from_tpm_weekly_ops.pptx
+  slide_mapping: synthesis/mappings/weekly_26ai_exec_review_from_tpm_weekly_ops.yaml
+  field_mapping:
+    week_id:
+      section: Week Id
+      source_field: week_id
+    summary:
+      section: Summary
+      source_field: summary
+    top_incidents:
+      section: Top Incidents
+      source_field: top_incidents
+    blockers:
+      section: Blockers
+      source_field: blockers
+    exec_asks:
+      section: Exec Asks
+      source_field: exec_asks
+    services_touched:
+      section: Services Touched
+      source_field: services_touched
+    metrics:
+      section: Metrics
+      source_field: metrics
+delivery:
+  kind: filesystem
+  path: ~/.kbf/outputs/weekly_26ai_exec_review_from_tpm_weekly_ops.pptx
+eval:
+  gold_set: eval/gold_sets/tpm-weekly_26ai_exec_review_from_tpm_weekly_ops-workflow.jsonl
+  exit_criteria:
+    field_accuracy: 0.85
+    delivery_success_rate: 0.99

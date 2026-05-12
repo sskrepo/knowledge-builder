@@ -1,0 +1,24 @@
+name: weekly_26ai_executive_review_ppt_using_faaas_proje
+kind: vector
+extraction_schema: framework/parsers/schemas/tpm/weekly_26ai_executive_review_ppt_using_faaas_proje/v1.json
+provides_fields:
+- title
+- rag_status
+- milestones
+- workstreams
+- risks
+- next_steps
+sources:
+- kind: confluence
+  space: OCIFACP
+  include_labels:
+  - 26ai
+  - FAaaS
+  - project-plan
+retrieval_tools:
+- vector_search
+kb_card:
+  summary: Synthesized by skill_builder. Refine after first dry-run.
+  use_when: Queries about title, rag_status, milestones.
+  input_shape: Natural-language question with optional filters.
+  output_shape: Cited passages with structured metadata.

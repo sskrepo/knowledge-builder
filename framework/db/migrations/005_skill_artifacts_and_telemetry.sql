@@ -3,13 +3,18 @@
 -- skill authoring artifacts and operational telemetry.
 --
 -- Tables created:
---   KB_SHIM.KBF_SKILL_ARTIFACTS  — synthesized skill files (4 per session)
+--   KB_SHIM.KBF_SKILL_ARTIFACTS  — synthesized skill files (5 per session)
 --   KB_SHIM.KBF_ERROR_LOG        — server-side error records
 --   KB_SHIM.KBF_BUG_REPORTS      — user-reported bug records (reportBug tool)
 --   KB_SHIM.KBF_COST_LOG         — LLM token usage telemetry
 --
+-- Artifact types (5): workflow_skill, persona_builder_delta, eval_extraction,
+--   eval_workflow, extraction_schema
+--
 -- All statements wrapped in BEGIN..EXCEPTION blocks so re-runs are safe (idempotent).
 -- ORA-00955 = "name is already used by an existing object"
+-- NOTE: If migration-005 was already applied with only 4 artifact types, run
+-- migration-006 to ALTER the CHECK constraint to include extraction_schema.
 
 -- ---------------------------------------------------------------------------
 -- KBF_SKILL_ARTIFACTS
@@ -34,7 +39,8 @@ BEGIN
                     ''workflow_skill'',
                     ''persona_builder_delta'',
                     ''eval_extraction'',
-                    ''eval_workflow''
+                    ''eval_workflow'',
+                    ''extraction_schema''
                 )
             ),
             CONSTRAINT chk_ksa_status CHECK (

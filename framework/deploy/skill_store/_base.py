@@ -3,11 +3,12 @@
 Implements DECISION-006 Option A: Oracle ADB as the primary artifact store
 for skill authoring sessions, with a filesystem fallback for laptop mode.
 
-Artifact types (exactly 4 per skill):
+Artifact types (5 per skill):
   workflow_skill          — framework/workflow_skills/{persona}/{skill_name}.yaml
   persona_builder_delta   — framework/persona_builders/{persona}.yaml.new_kb entry
   eval_extraction         — eval/gold_sets/{persona}-{skill_name}-extraction.jsonl
   eval_workflow           — eval/gold_sets/{persona}-{skill_name}-workflow.jsonl
+  extraction_schema       — framework/parsers/schemas/{persona}/{skill_name}/v1.json
 
 artifact_id (primary key):
   "{persona}.{skill_name}.{artifact_type}"
@@ -21,6 +22,7 @@ ARTIFACT_TYPES = frozenset({
     "persona_builder_delta",
     "eval_extraction",
     "eval_workflow",
+    "extraction_schema",      # framework/parsers/schemas/{persona}/{skill_name}/v1.json
 })
 
 

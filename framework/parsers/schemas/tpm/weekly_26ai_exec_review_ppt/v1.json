@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/tpm/weekly_26ai_exec_review_ppt/v1.json",
+  "title": "tpm \u2014 weekly_26ai_exec_review_ppt \u2014 v1",
+  "description": "Synthesized by skill_builder for persona=tpm, kb=weekly_26ai_exec_review_ppt. Refine before promoting.",
+  "type": "object",
+  "required": [
+    "project",
+    "rag_status",
+    "risks",
+    "next_steps"
+  ],
+  "properties": {
+    "project": {
+      "type": "string",
+      "description": "Field project \u2014 refine description",
+      "maxLength": 500
+    },
+    "rag_status": {
+      "type": "string",
+      "enum": [
+        "red",
+        "amber",
+        "green"
+      ],
+      "description": "RAG status \u2014 rag_status"
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Multi-valued list \u2014 risks"
+    },
+    "next_steps": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Multi-valued list \u2014 next_steps"
+    }
+  },
+  "additionalProperties": false
+}
