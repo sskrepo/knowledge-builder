@@ -483,12 +483,28 @@ class SkillBuilderConversation:
     # -- REVIEW_SCHEMA ---------------------------------------------------
 
     def _advance_to_review_schema(self) -> ConversationTurn:
-        """Generate field specs (type + description) and present for review."""
-        from .synthesize_schema import _infer_field_spec
+        """Generate field specs (type + description) and present for review.
 
-        for f in self._data.fields:
-            if f not in self._data.field_specs:
-                self._data.field_specs[f] = _infer_field_spec(f)
+        Synthesizes extraction descriptions from artifact context (raw_title +
+        body_text from slide_mapping) using the LLM when available. Falls back
+        to raw_title hint or heuristic when no LLM is wired up.
+        """
+        from .synthesize_schema import _infer_field_spec, synthesize_field_descriptions
+
+        # Fields that don't have specs yet — synthesize descriptions for them.
+        new_fields = [f for f in self._data.fields if f not in self._data.field_specs]
+        if new_fields:
+            descriptions = synthesize_field_descriptions(
+                fields=new_fields,
+                mapping=self._data.slide_mapping,
+                intent=self._data.intent_description or "",
+                persona=self._data.persona or "",
+                llm=self._llm,
+            )
+            for f in new_fields:
+                base_spec = _infer_field_spec(f)
+                base_spec["description"] = descriptions.get(f, base_spec["description"])
+                self._data.field_specs[f] = base_spec
 
         self._state = "REVIEW_SCHEMA"
         return self._prompt_review_schema()

@@ -61,10 +61,23 @@ def _analyze_pptx(p: Path) -> tuple[list[str], dict | None]:
         field = _to_field_name(raw_title)
         if field and field not in fields:
             fields.append(field)
+            # Capture body text (all non-title text frames) for LLM description synthesis
+            body_parts: list[str] = []
+            for shape in slide.shapes:
+                if not shape.has_text_frame:
+                    continue
+                if slide.shapes.title and shape == slide.shapes.title:
+                    continue
+                for para in shape.text_frame.paragraphs:
+                    t = para.text.strip()
+                    if t:
+                        body_parts.append(t)
+            body_text = " ".join(body_parts)[:400]
             mapping[field] = {
                 "kind": "slide_title",
                 "slide": i,
                 "raw_title": raw_title,
+                "body_text": body_text,
             }
 
     return fields, mapping if len(mapping) > 1 else None
@@ -82,7 +95,8 @@ def _analyze_docx(p: Path) -> tuple[list[str], dict | None]:
         "title": {"kind": "document_title", "heading_level": 0, "raw_heading": "Document Title"},
     }
 
-    for para in doc.paragraphs:
+    paragraphs = list(doc.paragraphs)
+    for idx, para in enumerate(paragraphs):
         if not para.style.name.startswith("Heading"):
             continue
         raw_heading = para.text.strip()
@@ -93,10 +107,22 @@ def _analyze_docx(p: Path) -> tuple[list[str], dict | None]:
         field = _to_field_name(raw_heading)
         if field and field not in fields:
             fields.append(field)
+            # Capture first non-heading paragraphs under this heading as body_text
+            body_parts: list[str] = []
+            for body_para in paragraphs[idx + 1:]:
+                if body_para.style.name.startswith("Heading"):
+                    break
+                t = body_para.text.strip()
+                if t:
+                    body_parts.append(t)
+                if sum(len(p) for p in body_parts) > 400:
+                    break
+            body_text = " ".join(body_parts)[:400]
             mapping[field] = {
                 "kind": "heading",
                 "heading_level": level,
                 "raw_heading": raw_heading,
+                "body_text": body_text,
             }
 
     return fields, mapping if len(mapping) > 1 else None
@@ -107,7 +133,8 @@ def _analyze_markdown(p: Path) -> tuple[list[str], dict | None]:
     mapping: dict = {}
     section_index = 0
 
-    for i, line in enumerate(p.read_text().splitlines()):
+    all_lines = p.read_text().splitlines()
+    for i, line in enumerate(all_lines):
         m = re.match(r"^(#{1,6})\s+(.+)$", line)
         if not m:
             continue
@@ -116,12 +143,24 @@ def _analyze_markdown(p: Path) -> tuple[list[str], dict | None]:
         field = _to_field_name(raw_heading)
         if field and field not in fields:
             fields.append(field)
+            # Capture non-heading lines immediately following as body_text
+            body_parts: list[str] = []
+            for body_line in all_lines[i + 1:]:
+                if re.match(r"^#{1,6}\s", body_line):
+                    break
+                t = body_line.strip()
+                if t:
+                    body_parts.append(t)
+                if sum(len(x) for x in body_parts) > 400:
+                    break
+            body_text = " ".join(body_parts)[:400]
             mapping[field] = {
                 "kind": "heading",
                 "heading_level": level,
                 "line_number": i + 1,
                 "raw_heading": raw_heading,
                 "section_index": section_index,
+                "body_text": body_text,
             }
             section_index += 1
 
