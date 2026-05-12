@@ -73,24 +73,53 @@ class OciGenAiLLMClient:
             log.warning("oci SDK not installed; OciGenAiLLMClient is stub-mode")
             return None
 
-        if self.auth == "instance_principal":
-            signer = oci.auth.signers.InstancePrincipalsSecurityTokenSigner()
+        try:
+            if self.auth == "instance_principal":
+                signer = oci.auth.signers.InstancePrincipalsSecurityTokenSigner()
+                return GenerativeAiInferenceClient(
+                    config={}, signer=signer, service_endpoint=self.endpoint,
+                    timeout=self.timeout_s,
+                )
+            if self.auth == "resource_principal":
+                signer = oci.auth.signers.get_resource_principals_signer()
+                return GenerativeAiInferenceClient(
+                    config={}, signer=signer, service_endpoint=self.endpoint,
+                    timeout=self.timeout_s,
+                )
+            # config_file / security_token (local dev — uses ~/.oci/config + profile)
+            config = oci.config.from_file(profile_name=self.config_profile)
+            # OCI session-auth profiles carry a security_token_file; regular API-key
+            # profiles do not.  Build the appropriate signer automatically.
+            if "security_token_file" in config:
+                import os as _os
+                token_path = _os.path.expanduser(config["security_token_file"])
+                key_path   = _os.path.expanduser(config["key_file"])
+                with open(token_path) as fh:
+                    token = fh.read()
+                private_key = oci.signer.load_private_key_from_file(key_path)
+                signer = oci.auth.signers.SecurityTokenSigner(
+                    token=token, private_key=private_key
+                )
+                log.info(
+                    "OciGenAiLLMClient: using SecurityTokenSigner (profile=%s)",
+                    self.config_profile,
+                )
+                return GenerativeAiInferenceClient(
+                    config={}, signer=signer, service_endpoint=self.endpoint,
+                    timeout=self.timeout_s,
+                )
+            # Plain API-key profile
             return GenerativeAiInferenceClient(
-                config={}, signer=signer, service_endpoint=self.endpoint,
+                config=config, service_endpoint=self.endpoint,
                 timeout=self.timeout_s,
             )
-        if self.auth == "resource_principal":
-            signer = oci.auth.signers.get_resource_principals_signer()
-            return GenerativeAiInferenceClient(
-                config={}, signer=signer, service_endpoint=self.endpoint,
-                timeout=self.timeout_s,
+        except Exception as exc:
+            log.warning(
+                "OciGenAiLLMClient: could not build client "
+                "(auth=%s, profile=%s): %s — running in stub mode",
+                self.auth, self.config_profile, exc,
             )
-        # config_file fallback (local dev)
-        config = oci.config.from_file(profile_name=self.config_profile)
-        return GenerativeAiInferenceClient(
-            config=config, service_endpoint=self.endpoint,
-            timeout=self.timeout_s,
-        )
+            return None
 
     # ------------------------------------------------------------------
     # chat()
@@ -151,7 +180,9 @@ class OciGenAiLLMClient:
             "is_stream": False,
         }
         if max_tokens is not None:
-            chat_request_kwargs["max_tokens"] = max_tokens
+            # Use max_completion_tokens (OCI SDK ≥2.x); alias max_tokens for
+            # older SDKs — GenericChatRequest accepts either field name.
+            chat_request_kwargs["max_completion_tokens"] = max_tokens
         if oci_response_format is not None:
             chat_request_kwargs["response_format"] = oci_response_format
 
@@ -255,14 +286,22 @@ class OciGenAiLLMClient:
     # helpers
     # ------------------------------------------------------------------
     def _resolve_model(self, model: str) -> str:
-        """Map either a framework concept or an OCI id to the OCI model id."""
-        # Already a fully-qualified OCI id?
-        if "." in model and model.startswith(("openai.", "cohere.", "meta.")):
+        """Map either a framework concept or an OCI id to the OCI model id.
+
+        Resolution order:
+          1. Full OCID (``ocid1.generativeaimodel.*``) — returned as-is.
+          2. Known provider prefix (``openai.``, ``cohere.``, ``meta.``) — as-is.
+          3. Framework concept key in ``self.models`` dict.
+          4. Bare model name — prefixed with ``openai.``.
+        """
+        # Full OCID passed directly (e.g. Oracle GPT-5)
+        if model.startswith("ocid1.generativeaimodel."):
             return model
-        # Framework concept names
+        # Already a fully-qualified provider-prefixed id
+        if model.startswith(("openai.", "cohere.", "meta.")):
+            return model
+        # Framework concept names (chat / synthesis / eval_judge / embedding)
         if model in self.models:
             return self.models[model]
         # Bare model name → assume openai. prefix
-        if not model.startswith("openai."):
-            return f"openai.{model}"
-        return model
+        return f"openai.{model}"

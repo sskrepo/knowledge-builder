@@ -111,7 +111,12 @@ def _load_app():
         log.info("loading shim_faaas…")
         state["shim_faaas"] = ShimFaaas(SHIM_FAAAS_PATH)
         state["shim_kb"] = ShimKb(PERSONA_BUILDERS_DIR)
-        state["llm"] = LLMClient()
+        # Laptop mode: apply auth overrides from laptop.yaml [llm] section
+        llm_kwargs: dict = {}
+        if kbf_env == "laptop" and adb_pool is not None:
+            # _init_laptop_adb_pool already read the YAML — re-read llm section
+            llm_kwargs = _load_laptop_llm_overrides(REPO_ROOT)
+        state["llm"] = LLMClient(**llm_kwargs)
         app.state.llm = state["llm"]
 
         # --- Stores + retrievers ---
@@ -300,6 +305,36 @@ def _resolve_secret(ref: str) -> str:
             log.warning("mcp_server: env var %s is not set (required for ADB auth)", var)
         return val
     return ref  # literal value — not recommended but supported
+
+
+def _load_laptop_llm_overrides(repo_root: Path) -> dict:
+    """Read laptop.yaml [llm] section and return kwargs for LLMClient().
+
+    Only applies auth / config_profile overrides — endpoint and model are
+    inherited from framework/config/adapters/llm.yaml.
+
+    Returns empty dict on any error so LLMClient() falls back gracefully.
+    """
+    laptop_cfg_path = repo_root / "framework" / "config" / "laptop.yaml"
+    if not laptop_cfg_path.exists():
+        return {}
+    try:
+        import yaml  # type: ignore[import]
+        with open(laptop_cfg_path) as fh:
+            raw = yaml.safe_load(fh)
+        llm_raw = raw.get("llm", {})
+        kwargs: dict = {}
+        if llm_raw.get("auth"):
+            kwargs["auth"] = llm_raw["auth"]
+        if llm_raw.get("config_profile"):
+            kwargs["config_profile"] = llm_raw["config_profile"]
+        if llm_raw.get("provider"):
+            kwargs["provider"] = llm_raw["provider"]
+        log.info("laptop mode: LLMClient overrides from laptop.yaml: %s", kwargs)
+        return kwargs
+    except Exception as exc:
+        log.warning("laptop mode: could not load llm overrides (%s) — using defaults", exc)
+        return {}
 
 
 def _init_laptop_adb_pool(repo_root: Path):

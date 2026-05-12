@@ -47,7 +47,7 @@ python -m framework.cli.kb_cli promote framework/persona_builders/ops-eng.yaml -
 |---|---|
 | Oracle 23ai ADB | ✅ **CONNECTED + AUTO-RECONNECT** — `aira_genai_agent_db_Sravan` (Oracle AI DB 26ai, EU Frankfurt). Tunnel via `./framework/scripts/adb-connect.sh`. Config in `framework/config/laptop.yaml` (gitignored). mcp_server.py auto-creates pool on `KBF_ENV=laptop`; RetryWrapper calls adb-connect.sh on any connectivity error and retries transparently. |
 | OCI Vault + secrets | ⏳ Pending — using env vars in laptop mode for now |
-| OpenAI API key or OCI GenAI URL | ⏳ Pending |
+| OCI GenAI inference | ✅ **LIVE** — Oracle GPT-5 (eu-frankfurt-1). `LLMClient(auth=config_file, config_profile=adpcpprod)` confirmed working. Config: `framework/config/adapters/llm.yaml` (endpoint + model OCID) + `laptop.yaml [llm]` override. SecurityTokenSigner auto-selected from `~/.oci/config [adpcpprod]`. |
 | Confluence API token | ✅ Via `codex_proxy` mode (Codex OAuth) |
 | Jira API token | ✅ Via `codex_proxy` mode (Codex OAuth) |
 | AIRA team's 50 query/citation pairs | ⏳ Pending |

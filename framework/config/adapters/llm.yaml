@@ -3,31 +3,38 @@
 provider: oci_genai
 
 # === OCI Generative AI Inference (PRIMARY PATH) ============================
-# REPLACE the endpoint with your tenancy's regional GenAI Inference URL.
-# Common endpoints:
-#   https://inference.generativeai.us-ashburn-1.oci.oraclecloud.com
-#   https://inference.generativeai.us-chicago-1.oci.oraclecloud.com
-#   https://inference.generativeai.eu-frankfurt-1.oci.oraclecloud.com
-#   https://inference.generativeai.uk-london-1.oci.oraclecloud.com
-#   https://inference.generativeai.ap-mumbai-1.oci.oraclecloud.com
-#   https://inference.generativeai.ap-tokyo-1.oci.oraclecloud.com
-#   https://inference.generativeai.ap-sydney-1.oci.oraclecloud.com
+# Region: eu-frankfurt-1 (aligned with ADB + bastion, same tenancy)
+# Tenancy: adpcpprod  (ocid1.tenancy.oc1..aaaaaaaau5s6...)
+# Model: Oracle GPT-5 (on-demand serving, EU Frankfurt)
+#
+# Laptop/dev overrides live in framework/config/laptop.yaml [llm] section:
+#   auth: config_file
+#   config_profile: adpcpprod
+#
+# Prod / OCI Compute overrides:
+#   auth: instance_principal  (no config file needed)
 oci_genai:
-  endpoint: https://inference.generativeai.us-ashburn-1.oci.oraclecloud.com
-  # compartment OCID — null means "use vault.compartment_ocid from env config"
-  compartment_ocid: null
-  # auth: instance_principal | resource_principal | config_file
+  endpoint: https://inference.generativeai.eu-frankfurt-1.oci.oraclecloud.com
+  # Compartment OCID for billing / IAM scope (adpcpprod tenancy)
+  compartment_ocid: ocid1.tenancy.oc1..aaaaaaaau5s6lj67ia5vy6qjglhvquqdszjqlmvlmsetu4jrtjni4mng6hea
+  # auth: instance_principal (OCI Compute / Functions)
+  #       config_file        (laptop — uses ~/.oci/config + config_profile below)
   auth: instance_principal
-  config_profile: DEFAULT       # only used when auth: config_file
+  config_profile: DEFAULT     # only used when auth: config_file
+
   models:
-    chat: openai.gpt-4o
-    synthesis: openai.gpt-4o
-    eval_judge: openai.gpt-4o
-    embedding: openai.text-embedding-3-large
+    # Oracle GPT-5 (EU Frankfurt on-demand serving)
+    # OCID source: GenAI_modelgpt5_2.py smoke-test
+    chat:      ocid1.generativeaimodel.oc1.eu-frankfurt-1.amaaaaaask7dceya3ky2tq47f4syiiqm2p4skqcwtav7jyvcl322w36dx4kq
+    synthesis: ocid1.generativeaimodel.oc1.eu-frankfurt-1.amaaaaaask7dceya3ky2tq47f4syiiqm2p4skqcwtav7jyvcl322w36dx4kq
+    eval_judge: ocid1.generativeaimodel.oc1.eu-frankfurt-1.amaaaaaask7dceya3ky2tq47f4syiiqm2p4skqcwtav7jyvcl322w36dx4kq
+    # Embedding — OCI Cohere v3 (same region); fallback to openai.text-embedding-3-large
+    embedding: cohere.embed-multilingual-v3.0
+
   retries: 3
-  timeout_s: 60
+  timeout_s: 120              # GPT-5 can be slower than GPT-4o for long prompts
   rate_limit:
-    requests_per_minute: 600    # tier-dependent; lower for non-prod tenancies
+    requests_per_minute: 60   # on-demand tier default; increase when quota upgraded
 
 # === Direct OpenAI (FALLBACK; local dev only) ==============================
 openai_direct:
