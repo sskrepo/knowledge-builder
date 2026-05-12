@@ -152,6 +152,37 @@ EXTERNAL_TOOLS_SCHEMA = [
         },
     },
     {
+        "name": "deleteSkill",
+        "description": (
+            "Hard-delete all stored artifacts for a skill (workflow YAML, persona builder delta, "
+            "eval gold sets, extraction schema). This is IRREVERSIBLE — the skill is permanently "
+            "removed from the skill store. Requires 'admin' scope AND the server-side deletion "
+            "password in confirmationPassword. Does NOT remove already-ingested vector/graph content "
+            "(run a re-index to propagate the removal)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["persona", "skillName", "confirmationPassword"],
+            "properties": {
+                "persona": {
+                    "type": "string",
+                    "description": "Persona slug (e.g. 'ops_eng', 'tpm')",
+                },
+                "skillName": {
+                    "type": "string",
+                    "description": "Skill slug (e.g. 'weekly_incident_summary')",
+                },
+                "confirmationPassword": {
+                    "type": "string",
+                    "description": (
+                        "Server-side deletion password (KBF_SKILL_DELETE_PASSWORD). "
+                        "Required in addition to the bearer token admin scope."
+                    ),
+                },
+            },
+        },
+    },
+    {
         "name": "uploadArtifact",
         "description": (
             "Upload a local file (PPT, DOCX, Markdown, text) to the server for "
@@ -213,6 +244,7 @@ def build_external_tool_registry(app) -> dict[str, Any]:
         "askKnowledgeBase": _make_ask_handler(app),
         "authorSkill": _make_author_skill_handler(app),
         "uploadArtifact": _make_upload_artifact_handler(app),
+        "deleteSkill": _make_delete_skill_handler(app),
     }
 
 
@@ -704,6 +736,126 @@ def _report_to_dict(report, bugs_filed: int = 0) -> dict:
     ]
     d["bugsFiledCount"] = bugs_filed
     return d
+
+
+def _make_delete_skill_handler(app):
+    """Build the deleteSkill MCP tool handler.
+
+    Protection layers:
+      1. Bearer token must have 'admin' scope.
+      2. confirmationPassword must match KBF_SKILL_DELETE_PASSWORD env var.
+
+    Both checks must pass — the password is a second factor on top of the token.
+    """
+    import os
+
+    async def delete_skill_handler(
+        *,
+        persona: str,
+        skillName: str,
+        confirmationPassword: str,
+        _consumer=None,
+    ) -> dict:
+        consumer = _consumer or _anonymous_consumer()
+
+        # Layer 1: admin scope required.
+        if "admin" not in consumer.scopes:
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": "deleteSkill requires admin scope."}],
+            }
+
+        # Layer 2: confirmation password check.
+        delete_password = os.environ.get("KBF_SKILL_DELETE_PASSWORD", "")
+        if not delete_password:
+            return {
+                "isError": True,
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        "Server is not configured for skill deletion "
+                        "(KBF_SKILL_DELETE_PASSWORD not set). Contact the framework team."
+                    ),
+                }],
+            }
+        if confirmationPassword != delete_password:
+            log.warning(
+                "mcp:deleteSkill rejected — wrong confirmationPassword consumer=%s persona=%s skill=%s",
+                consumer.name, persona, skillName,
+            )
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": "Invalid confirmationPassword."}],
+            }
+
+        # Input validation.
+        persona = (persona or "").strip()
+        skill_name = (skillName or "").strip()
+        if not persona or not skill_name:
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": "persona and skillName are required."}],
+            }
+
+        skill_store = getattr(app.state, "skill_store", None)
+        if skill_store is None:
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": "Skill store not available."}],
+            }
+
+        log.warning(
+            "mcp:deleteSkill persona=%s skill=%s consumer=%s — destructive delete initiated",
+            persona, skill_name, consumer.name,
+        )
+
+        try:
+            deleted_types = skill_store.delete(persona, skill_name)
+        except Exception as exc:
+            log.error("mcp:deleteSkill failed: %s", exc)
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": f"Delete failed: {exc}"}],
+            }
+
+        if not deleted_types:
+            return {
+                "isError": False,
+                "content": [{
+                    "type": "text",
+                    "text": (
+                        f"No artifacts found for {persona}.{skill_name} — nothing deleted."
+                    ),
+                }],
+                "deletedArtifacts": [],
+                "persona": persona,
+                "skillName": skill_name,
+                "status": "not_found",
+            }
+
+        log.warning(
+            "mcp:deleteSkill COMPLETED persona=%s skill=%s deleted=%s consumer=%s",
+            persona, skill_name, deleted_types, consumer.name,
+        )
+
+        return {
+            "isError": False,
+            "content": [{
+                "type": "text",
+                "text": (
+                    f"Deleted {len(deleted_types)} artifact(s) for {persona}.{skill_name}: "
+                    f"{', '.join(sorted(deleted_types))}. "
+                    "Note: already-ingested vector/graph content is not removed — "
+                    "run a re-index to propagate."
+                ),
+            }],
+            "deletedArtifacts": sorted(deleted_types),
+            "persona": persona,
+            "skillName": skill_name,
+            "status": "deleted",
+        }
+
+    return delete_skill_handler
 
 
 # ---------------------------------------------------------------------------

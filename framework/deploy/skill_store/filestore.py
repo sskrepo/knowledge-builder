@@ -145,3 +145,21 @@ class FilestoreSkillStore(SkillStore):
                 })
 
         return results
+
+    def delete(self, persona: str, skill_name: str) -> list[str]:
+        deleted_types: list[str] = []
+        for artifact_type in ARTIFACT_TYPES:
+            rel = _rel_path(persona, skill_name, artifact_type)
+            full = self._root / rel
+            if full.exists():
+                try:
+                    full.unlink()
+                    deleted_types.append(artifact_type)
+                    log.info(
+                        "FilestoreSkillStore.delete: removed %s", full
+                    )
+                except OSError as exc:
+                    log.warning(
+                        "FilestoreSkillStore.delete: could not remove %s: %s", full, exc
+                    )
+        return deleted_types

@@ -68,6 +68,19 @@ _SQL_LIST_ALL = """
     ORDER BY MAX(updated_at) DESC
 """
 
+_SQL_LIST_EXISTING_TYPES = """
+    SELECT artifact_type
+    FROM KB_SHIM.KBF_SKILL_ARTIFACTS
+    WHERE persona    = :persona
+      AND skill_name = :skill_name
+"""
+
+_SQL_DELETE_SKILL = """
+    DELETE FROM KB_SHIM.KBF_SKILL_ARTIFACTS
+    WHERE persona    = :persona
+      AND skill_name = :skill_name
+"""
+
 _SQL_LIST_PERSONA = """
     SELECT persona, skill_name, status,
            COUNT(*) AS artifact_count,
@@ -236,3 +249,28 @@ class AdbSkillStore(SkillStore):
                 "updated_at":     str(row["updated_at"]) if row["updated_at"] else "",
             })
         return results
+
+    def delete(self, persona: str, skill_name: str) -> list[str]:
+        if self._pool is None:
+            log.warning("AdbSkillStore: no pool — delete is a no-op (stub mode)")
+            return []
+
+        params = {"persona": persona, "skill_name": skill_name}
+
+        with self._pool.acquire() as conn:
+            with conn.cursor() as cur:
+                # Capture which artifact_types exist before deleting
+                cur.execute(_SQL_LIST_EXISTING_TYPES, params)
+                self._install_dict_rowfactory(cur)
+                rows = cur.fetchall()
+                deleted_types = [r["artifact_type"] for r in rows]
+
+                if deleted_types:
+                    cur.execute(_SQL_DELETE_SKILL, params)
+            conn.commit()
+
+        log.info(
+            "AdbSkillStore.delete: persona=%s skill=%s deleted_types=%s",
+            persona, skill_name, deleted_types,
+        )
+        return deleted_types

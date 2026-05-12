@@ -557,6 +557,113 @@ paths:
           $ref: '#/components/responses/RateLimited'
 
   # ─────────────────────────────────────────────────────────────────────────
+  # Skill management
+  # ─────────────────────────────────────────────────────────────────────────
+
+  /api/v1/kb/skill/{persona}/{skillName}:
+    parameters:
+      - name: persona
+        in: path
+        required: true
+        description: Persona slug (e.g. ops_eng, tpm)
+        schema:
+          type: string
+          example: "ops_eng"
+      - name: skillName
+        in: path
+        required: true
+        description: Skill slug (e.g. weekly_incident_summary)
+        schema:
+          type: string
+          example: "weekly_incident_summary"
+
+    delete:
+      operationId: deleteSkill
+      tags: [AuthorSkill]
+      summary: Hard-delete all artifacts for a skill
+      description: |
+        Permanently removes all stored artifacts for the given skill
+        (workflow YAML, persona builder delta, eval gold sets, extraction schema).
+
+        **This operation is irreversible.** Already-ingested vector/graph content
+        is NOT removed by this call — run a re-index job to propagate the deletion
+        to the retrieval stores.
+
+        **Two-layer protection:**
+        1. Bearer token must carry `admin` scope.
+        2. Request body must include `confirmationPassword` matching the
+           server-side `KBF_SKILL_DELETE_PASSWORD` secret.
+
+        MCP tool name: `deleteSkill`
+
+        Required scope: `admin`
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteSkillRequest'
+            example:
+              confirmationPassword: "<KBF_SKILL_DELETE_PASSWORD value>"
+      responses:
+        '200':
+          description: Skill deleted (or not found — check status field)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteSkillResponse'
+              examples:
+                deleted:
+                  summary: Skill found and deleted
+                  value:
+                    persona: "ops_eng"
+                    skillName: "weekly_incident_summary"
+                    status: "deleted"
+                    deletedArtifacts:
+                      - "eval_extraction"
+                      - "eval_workflow"
+                      - "extraction_schema"
+                      - "persona_builder_delta"
+                      - "workflow_skill"
+                    message: "Deleted 5 artifact(s) for ops_eng.weekly_incident_summary."
+                notFound:
+                  summary: Skill not found — nothing deleted
+                  value:
+                    persona: "ops_eng"
+                    skillName: "nonexistent_skill"
+                    status: "not_found"
+                    deletedArtifacts: []
+                    message: "No artifacts found for ops_eng.nonexistent_skill — nothing deleted."
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          description: |
+            Token lacks admin scope, or confirmationPassword is wrong/missing.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                noAdminScope:
+                  value:
+                    error:
+                      code: "permission_denied"
+                      message: "Token lacks 'admin' scope required for deleteSkill"
+                      details: {}
+                wrongPassword:
+                  value:
+                    error:
+                      code: "permission_denied"
+                      message: "Invalid confirmationPassword"
+                      details: {}
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/UpstreamUnavailable'
+
+  # ─────────────────────────────────────────────────────────────────────────
   # Operational endpoints
   # ─────────────────────────────────────────────────────────────────────────
 
@@ -1100,6 +1207,49 @@ components:
           description: |
             True if the session had already committed artifacts to git before being abandoned.
             When true, those commits are retained.
+
+    # ── Skill management ─────────────────────────────────────────────────────
+
+    DeleteSkillRequest:
+      type: object
+      required: [confirmationPassword]
+      properties:
+        confirmationPassword:
+          type: string
+          description: |
+            Server-side deletion password (value of KBF_SKILL_DELETE_PASSWORD env var).
+            Required in addition to the admin-scoped bearer token.
+
+    DeleteSkillResponse:
+      type: object
+      required: [persona, skillName, status, deletedArtifacts, message]
+      properties:
+        persona:
+          type: string
+          description: Persona slug that was targeted.
+        skillName:
+          type: string
+          description: Skill slug that was targeted.
+        status:
+          type: string
+          enum: [deleted, not_found]
+          description: |
+            'deleted' — artifacts were found and removed.
+            'not_found' — no artifacts existed; nothing was changed.
+        deletedArtifacts:
+          type: array
+          items:
+            type: string
+            enum:
+              - workflow_skill
+              - persona_builder_delta
+              - eval_extraction
+              - eval_workflow
+              - extraction_schema
+          description: Artifact types that were removed.
+        message:
+          type: string
+          description: Human-readable summary of the operation.
 
     # ── Operational ──────────────────────────────────────────────────────────
 

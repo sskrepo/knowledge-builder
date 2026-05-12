@@ -101,3 +101,19 @@ class SkillStore(ABC):
             List of dicts, each with keys:
               persona, skill_name, status, artifact_count, updated_at
         """
+
+    @abstractmethod
+    def delete(self, persona: str, skill_name: str) -> list[str]:
+        """Hard-delete all stored artifacts for a skill.
+
+        This is a destructive, irreversible operation. The caller is responsible
+        for confirming the deletion password before invoking this method.
+
+        Args:
+            persona:    Persona slug (e.g. "ops_eng").
+            skill_name: Skill slug (e.g. "weekly_incident_summary").
+
+        Returns:
+            List of artifact_type strings that were deleted (may be empty if skill
+            was not found or had no artifacts).
+        """

@@ -362,3 +362,194 @@ class TestMakeArtifactId:
     def test_all_five_types_generate_unique_ids(self):
         ids = [make_artifact_id("ops_eng", "incident_summary", t) for t in ARTIFACT_TYPES]
         assert len(set(ids)) == len(ARTIFACT_TYPES)  # one unique id per artifact type
+
+
+# ---------------------------------------------------------------------------
+# delete() — FilestoreSkillStore
+# ---------------------------------------------------------------------------
+
+
+class TestFilestoreSkillStoreDelete:
+    def test_delete_removes_all_existing_artifacts(self, tmp_path):
+        store = FilestoreSkillStore(repo_root=tmp_path)
+        store.write_artifacts(
+            synth_id="s1",
+            persona="tpm",
+            skill_name="my_skill",
+            artifacts={t: f"content-{t}" for t in ARTIFACT_TYPES},
+        )
+        deleted = store.delete("tpm", "my_skill")
+        assert set(deleted) == ARTIFACT_TYPES
+        # Files are gone
+        for t in ARTIFACT_TYPES:
+            assert store.read_artifact("tpm", "my_skill", t) is None
+
+    def test_delete_returns_empty_list_when_skill_not_found(self, tmp_path):
+        store = FilestoreSkillStore(repo_root=tmp_path)
+        deleted = store.delete("tpm", "nonexistent_skill")
+        assert deleted == []
+
+    def test_delete_only_removes_existing_files(self, tmp_path):
+        store = FilestoreSkillStore(repo_root=tmp_path)
+        # Only write 2 of 5 artifact types
+        partial = {t: "content" for t in list(ARTIFACT_TYPES)[:2]}
+        store.write_artifacts("s1", "ops_eng", "partial_skill", partial)
+        deleted = store.delete("ops_eng", "partial_skill")
+        assert set(deleted) == set(partial.keys())
+
+    def test_delete_is_idempotent(self, tmp_path):
+        store = FilestoreSkillStore(repo_root=tmp_path)
+        store.write_artifacts("s1", "tpm", "skill", {"workflow_skill": "yaml"})
+        store.delete("tpm", "skill")
+        # Second delete — nothing to remove, should not raise
+        deleted2 = store.delete("tpm", "skill")
+        assert deleted2 == []
+
+
+# ---------------------------------------------------------------------------
+# delete() — AdbSkillStore
+# ---------------------------------------------------------------------------
+
+
+class TestAdbSkillStoreDelete:
+    def _make_pool(self, existing_types: list[str]):
+        """Build a mock pool that returns existing_types from the SELECT query."""
+        pool = MagicMock()
+        conn = MagicMock()
+        cur = MagicMock()
+
+        pool.acquire.return_value.__enter__ = lambda s: conn
+        pool.acquire.return_value.__exit__ = MagicMock(return_value=False)
+        conn.cursor.return_value.__enter__ = lambda s: cur
+        conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+        # First execute call → SELECT (returns existing types)
+        # Second execute call → DELETE (no return value needed)
+        cur.fetchall.return_value = [{"artifact_type": t} for t in existing_types]
+        cur.description = [("artifact_type",)]
+
+        return pool, cur
+
+    def test_delete_executes_select_then_delete(self):
+        existing = ["workflow_skill", "eval_extraction"]
+        pool, cur = self._make_pool(existing)
+        store = AdbSkillStore(pool=pool)
+        # Patch rowfactory install (description already set above)
+        deleted = store.delete("tpm", "my_skill")
+        assert set(deleted) == set(existing)
+        # DELETE was called
+        assert cur.execute.call_count == 2
+
+    def test_delete_skips_delete_sql_when_no_rows(self):
+        pool, cur = self._make_pool([])
+        store = AdbSkillStore(pool=pool)
+        deleted = store.delete("tpm", "ghost_skill")
+        assert deleted == []
+        # Only SELECT was called, no DELETE
+        assert cur.execute.call_count == 1
+
+    def test_delete_is_noop_when_pool_is_none(self):
+        store = AdbSkillStore(pool=None)
+        deleted = store.delete("ops_eng", "some_skill")
+        assert deleted == []
+
+
+# ---------------------------------------------------------------------------
+# deleteSkill MCP tool
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteSkillMcpTool:
+    """Tests for the deleteSkill MCP handler (password + scope protection)."""
+
+    def _make_app(self, deleted_types: list[str] | None = None):
+        """Build a minimal mock app with skill_store."""
+        from unittest.mock import MagicMock
+        app = MagicMock()
+        skill_store = MagicMock()
+        skill_store.delete.return_value = deleted_types if deleted_types is not None else ["workflow_skill"]
+        app.state.skill_store = skill_store
+        return app, skill_store
+
+    def _admin_consumer(self):
+        from framework.deploy.auth.consumer import ConsumerManifest
+        return ConsumerManifest(
+            name="test-admin", token_hash="x", scopes=["admin"],
+            persona_allowlist=[], rpm_cap=60, token_budget_per_request=8000,
+            user_id="test-admin",
+        )
+
+    def _write_consumer(self):
+        from framework.deploy.auth.consumer import ConsumerManifest
+        return ConsumerManifest(
+            name="test-writer", token_hash="x", scopes=["write"],
+            persona_allowlist=[], rpm_cap=60, token_budget_per_request=8000,
+            user_id="test-writer",
+        )
+
+    def test_rejects_non_admin_scope(self):
+        import asyncio
+        from framework.deploy.mcp_tools import _make_delete_skill_handler
+        app, _ = self._make_app()
+        handler = _make_delete_skill_handler(app)
+        result = asyncio.get_event_loop().run_until_complete(
+            handler(persona="tpm", skillName="skill", confirmationPassword="pw",
+                    _consumer=self._write_consumer())
+        )
+        assert result["isError"] is True
+        assert "admin" in result["content"][0]["text"]
+
+    def test_rejects_wrong_password(self, monkeypatch):
+        import asyncio
+        from framework.deploy.mcp_tools import _make_delete_skill_handler
+        monkeypatch.setenv("KBF_SKILL_DELETE_PASSWORD", "correct-password")
+        app, _ = self._make_app()
+        handler = _make_delete_skill_handler(app)
+        result = asyncio.get_event_loop().run_until_complete(
+            handler(persona="tpm", skillName="skill", confirmationPassword="wrong",
+                    _consumer=self._admin_consumer())
+        )
+        assert result["isError"] is True
+        assert "Invalid" in result["content"][0]["text"]
+
+    def test_rejects_when_password_env_not_set(self, monkeypatch):
+        import asyncio
+        from framework.deploy.mcp_tools import _make_delete_skill_handler
+        monkeypatch.delenv("KBF_SKILL_DELETE_PASSWORD", raising=False)
+        app, _ = self._make_app()
+        handler = _make_delete_skill_handler(app)
+        result = asyncio.get_event_loop().run_until_complete(
+            handler(persona="tpm", skillName="skill", confirmationPassword="any",
+                    _consumer=self._admin_consumer())
+        )
+        assert result["isError"] is True
+        assert "not configured" in result["content"][0]["text"]
+
+    def test_deletes_skill_with_correct_credentials(self, monkeypatch):
+        import asyncio
+        from framework.deploy.mcp_tools import _make_delete_skill_handler
+        monkeypatch.setenv("KBF_SKILL_DELETE_PASSWORD", "secret123")
+        app, skill_store = self._make_app(deleted_types=["workflow_skill", "eval_extraction"])
+        handler = _make_delete_skill_handler(app)
+        result = asyncio.get_event_loop().run_until_complete(
+            handler(persona="tpm", skillName="my_skill", confirmationPassword="secret123",
+                    _consumer=self._admin_consumer())
+        )
+        assert result["isError"] is False
+        assert result["status"] == "deleted"
+        assert set(result["deletedArtifacts"]) == {"workflow_skill", "eval_extraction"}
+        skill_store.delete.assert_called_once_with("tpm", "my_skill")
+
+    def test_returns_not_found_when_no_artifacts(self, monkeypatch):
+        import asyncio
+        from framework.deploy.mcp_tools import _make_delete_skill_handler
+        monkeypatch.setenv("KBF_SKILL_DELETE_PASSWORD", "secret123")
+        app, _ = self._make_app(deleted_types=[])
+        handler = _make_delete_skill_handler(app)
+        result = asyncio.get_event_loop().run_until_complete(
+            handler(persona="ops_eng", skillName="ghost", confirmationPassword="secret123",
+                    _consumer=self._admin_consumer())
+        )
+        assert result["isError"] is False
+        assert result["status"] == "not_found"
+        assert result["deletedArtifacts"] == []
