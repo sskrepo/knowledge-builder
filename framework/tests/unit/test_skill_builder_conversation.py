@@ -366,3 +366,106 @@ class TestRunValidateSkillStore:
         synthetic = {"persona": "tpm", "knowledge_bases": [delta_parsed]}
         assert synthetic["knowledge_bases"][0]["name"] == "weekly_26ai_executive_review"
         assert "tpm.weekly_26ai_executive_review" == f"tpm.{synthetic['knowledge_bases'][0]['name']}"
+
+
+# ---------------------------------------------------------------------------
+# REVIEW_SCHEMA — bulk multi-command support
+# ---------------------------------------------------------------------------
+
+
+class TestReviewSchemaBulkEdits:
+    """Tests for multi-line schema editing (17-round-trips → 1 round-trip fix)."""
+
+    def _make_conv(self, fields=None):
+        from framework.skill_builder.conversation import SkillBuilderConversation
+        conv = SkillBuilderConversation(persona="tpm")
+        conv._state = "REVIEW_SCHEMA"
+        conv._data.fields = fields or ["schedule_health", "key_accomplishments", "dependencies"]
+        conv._data.field_specs = {
+            f: {"type": "string", "description": f"Field {f} — refine description", "maxLength": 500}
+            for f in conv._data.fields
+        }
+        return conv
+
+    def test_single_describe_command_still_works(self):
+        conv = self._make_conv()
+        turn = conv._handle_review_schema_response(
+            "describe schedule_health as RAG status with 1-2 sentence justification"
+        )
+        assert turn.state == "REVIEW_SCHEMA"
+        assert conv._data.field_specs["schedule_health"]["description"] == \
+            "RAG status with 1-2 sentence justification"
+
+    def test_multiline_describe_commands_applied_in_one_turn(self):
+        conv = self._make_conv()
+        bulk_input = (
+            "describe schedule_health as RAG status with 1-2 sentence justification\n"
+            "describe key_accomplishments as Top 3-5 achievements this week as bullet points\n"
+            "describe dependencies as External blockers with owning team and ETA"
+        )
+        turn = conv._handle_review_schema_response(bulk_input)
+        assert turn.state == "REVIEW_SCHEMA"
+        assert "RAG status" in conv._data.field_specs["schedule_health"]["description"]
+        assert "achievements" in conv._data.field_specs["key_accomplishments"]["description"]
+        assert "blockers" in conv._data.field_specs["dependencies"]["description"]
+        assert "✓ Applied 3 edit(s)" in turn.message
+
+    def test_multiline_set_type_commands_applied_in_one_turn(self):
+        conv = self._make_conv()
+        bulk_input = (
+            "set type of key_accomplishments to array\n"
+            "set type of dependencies to array"
+        )
+        turn = conv._handle_review_schema_response(bulk_input)
+        assert conv._data.field_specs["key_accomplishments"]["type"] == "array"
+        assert conv._data.field_specs["dependencies"]["type"] == "array"
+        assert "✓ Applied 2 edit(s)" in turn.message
+
+    def test_mixed_describe_and_set_type_in_one_turn(self):
+        """The 17-round-trip scenario: 14 describes + 3 type flips = 1 turn."""
+        conv = self._make_conv()
+        bulk_input = (
+            "describe schedule_health as RAG status for schedule\n"
+            "describe key_accomplishments as Bullet list of top achievements\n"
+            "set type of key_accomplishments to array\n"
+            "set type of dependencies to array"
+        )
+        turn = conv._handle_review_schema_response(bulk_input)
+        assert "✓ Applied 4 edit(s)" in turn.message
+        assert conv._data.field_specs["schedule_health"]["description"] == \
+            "RAG status for schedule"
+        assert conv._data.field_specs["key_accomplishments"]["type"] == "array"
+        assert conv._data.field_specs["dependencies"]["type"] == "array"
+
+    def test_bulk_with_invalid_line_reports_error_but_applies_valid(self):
+        conv = self._make_conv()
+        bulk_input = (
+            "describe schedule_health as RAG status\n"
+            "this is not a valid command\n"
+            "set type of key_accomplishments to array"
+        )
+        turn = conv._handle_review_schema_response(bulk_input)
+        # Valid commands applied
+        assert conv._data.field_specs["schedule_health"]["description"] == "RAG status"
+        assert conv._data.field_specs["key_accomplishments"]["type"] == "array"
+        # Error reported
+        assert "✓ Applied 2 edit(s)" in turn.message
+        assert "⚠ 1 line(s) not recognised" in turn.message
+
+    def test_bulk_ok_on_single_line_still_advances_state(self):
+        conv = self._make_conv()
+        # Advance to REVIEW_SCHEMA requires prior state setup — just test the handler
+        turn = conv._handle_review_schema_response("ok")
+        # Should advance past REVIEW_SCHEMA
+        assert turn.state != "REVIEW_SCHEMA"
+
+    def test_unknown_field_in_bulk_is_reported_not_raised(self):
+        conv = self._make_conv()
+        bulk_input = (
+            "describe schedule_health as RAG status\n"
+            "describe nonexistent_field as something"
+        )
+        turn = conv._handle_review_schema_response(bulk_input)
+        assert "✓ Applied 1 edit(s)" in turn.message
+        assert "⚠ 1 line(s) not recognised" in turn.message
+        assert "nonexistent_field" in turn.message

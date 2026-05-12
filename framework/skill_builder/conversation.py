@@ -531,6 +531,67 @@ class SkillBuilderConversation:
         if lowered in ("ok", "looks good", "continue", "done", "yes"):
             return self._advance_to_check_reuse()
 
+        # Multi-command support: split on newlines, execute each line in order.
+        # A single-line input goes through the same path (list of one).
+        lines = [ln.strip() for ln in user_input.splitlines() if ln.strip()]
+        if len(lines) > 1:
+            return self._handle_bulk_schema_edits(lines)
+
+        return self._apply_single_schema_command(user_input)
+
+    def _handle_bulk_schema_edits(self, lines: list[str]) -> ConversationTurn:
+        """Apply multiple schema edit commands in one turn.
+
+        Executes each line as an independent command (describe / set type /
+        set maxLength / set enum).  Collects errors and reports them alongside
+        the count of successful edits, then re-renders the schema prompt.
+        """
+        applied: list[str] = []
+        errors: list[str] = []
+
+        for line in lines:
+            result = self._apply_single_schema_command(line, _bulk=True)
+            if result is None:
+                # Successfully applied
+                applied.append(line)
+            else:
+                errors.append(f"  ✗ {line!r} — {result}")
+
+        # Prepend a summary banner to the schema re-render.
+        summary_parts = []
+        if applied:
+            summary_parts.append(f"✓ Applied {len(applied)} edit(s).")
+        if errors:
+            summary_parts.append(
+                f"⚠ {len(errors)} line(s) not recognised (skipped):\n" + "\n".join(errors)
+            )
+
+        base_turn = self._prompt_review_schema()
+        base_turn.message = "\n".join(summary_parts) + "\n\n" + base_turn.message
+        return base_turn
+
+    def _apply_single_schema_command(
+        self, user_input: str, _bulk: bool = False
+    ) -> "ConversationTurn | None":
+        """Apply one schema edit command.
+
+        When called from _handle_bulk_schema_edits (_bulk=True):
+          - Returns None on success (caller accumulates).
+          - Returns the error message string on failure (caller collects).
+        When called directly (_bulk=False):
+          - Returns a ConversationTurn (prompt or error) as before.
+        """
+
+        def _err(msg: str):
+            if _bulk:
+                return msg  # type: ignore[return-value]
+            return ConversationTurn(state="REVIEW_SCHEMA", message=msg)
+
+        def _ok():
+            if _bulk:
+                return None
+            return self._prompt_review_schema()
+
         # describe <field> as <text>
         m = re.match(r"(?i)describe\s+(\S+)\s+as\s+(.+)", user_input)
         if m:
@@ -543,11 +604,10 @@ class SkillBuilderConversation:
                     "type": "string", "description": new_desc, "maxLength": 500,
                 }
             else:
-                return ConversationTurn(
-                    state="REVIEW_SCHEMA",
-                    message=f"Unknown field '{field_name}'. Available: {', '.join(self._data.fields)}",
+                return _err(
+                    f"Unknown field '{field_name}'. Available: {', '.join(self._data.fields)}"
                 )
-            return self._prompt_review_schema()
+            return _ok()
 
         # set type of <field> to <type>
         m = re.match(r"(?i)set\s+type\s+of\s+(\S+)\s+to\s+(\S+)", user_input)
@@ -557,10 +617,9 @@ class SkillBuilderConversation:
             if new_type in ("string", "integer", "number", "boolean", "array", "object"):
                 if field_name in self._data.field_specs:
                     self._data.field_specs[field_name]["type"] = new_type
-                    return self._prompt_review_schema()
-            return ConversationTurn(
-                state="REVIEW_SCHEMA",
-                message=f"Invalid type '{new_type}'. Valid: string, integer, number, boolean, array, object",
+                    return _ok()
+            return _err(
+                f"Invalid type '{new_type}'. Valid: string, integer, number, boolean, array, object"
             )
 
         # set maxLength of <field> to <number>
@@ -569,7 +628,8 @@ class SkillBuilderConversation:
             field_name = _to_field_name(m.group(1))
             if field_name in self._data.field_specs:
                 self._data.field_specs[field_name]["maxLength"] = int(m.group(2))
-                return self._prompt_review_schema()
+                return _ok()
+            return _err(f"Unknown field '{field_name}'.")
 
         # set enum of <field> to <val1>, <val2>, ...
         m = re.match(r"(?i)set\s+enum\s+of\s+(\S+)\s+to\s+(.+)", user_input)
@@ -578,17 +638,14 @@ class SkillBuilderConversation:
             vals = [v.strip().strip("'\"") for v in m.group(2).split(",") if v.strip()]
             if field_name in self._data.field_specs and vals:
                 self._data.field_specs[field_name]["enum"] = vals
-                return self._prompt_review_schema()
+                return _ok()
+            return _err(f"Unknown field '{field_name}' or empty enum list.")
 
-        return ConversationTurn(
-            state="REVIEW_SCHEMA",
-            message=(
-                "I didn't understand that edit. Try:\n"
-                "  'describe <field> as <extraction instruction>'\n"
-                "  'set type of <field> to <type>'\n"
-                "  'ok' to continue"
-            ),
-            options=["ok", "describe <field> as <text>"],
+        return _err(
+            "I didn't understand that edit. Try:\n"
+            "  'describe <field> as <extraction instruction>'\n"
+            "  'set type of <field> to <type>'\n"
+            "  'ok' to continue"
         )
 
     # -- CHECK_REUSE -----------------------------------------------------
