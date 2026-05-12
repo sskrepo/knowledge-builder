@@ -2,6 +2,7 @@
 title: ADR-020 — Codex CLI as MCP Transport for Laptop Mode
 status: accepted
 created: 2026-05-11
+amended: 2026-05-11
 owner: architect
 deciders: user
 tags: [adr, adapters, ingestion, auth, laptop, mcp]
@@ -11,7 +12,182 @@ related: [ADR-011, ADR-010]
 # ADR-020 — Codex CLI as MCP Transport for Laptop Mode
 
 ## Status
-Accepted (2026-05-11).
+Accepted (2026-05-11). **Amended 2026-05-11** — discovery on the company laptop
+showed Codex registers Confluence/Jira MCP servers as remote HTTPS URLs with
+OAuth, not stdio spawn commands. Option B (`codex_cli` mode) is preserved for
+any future local stdio MCP server case, but Option D (previously rejected) is
+now also accepted, under the name `codex_proxy`, as the only viable laptop
+path for the org's actual Confluence/Jira MCP servers. See **Amendment 1**
+below.
+
+## Amendment 1 — 2026-05-11 — Discovery of HTTPS+OAuth reality
+
+### What we found
+
+When the user ran `codex mcp list` on the company laptop, the registered MCP
+servers were not stdio subprocess specs but **HTTPS endpoints with OAuth**:
+
+```
+Name                 Url                                                     Transport          Auth
+central_confluence   https://emcp.oracle.com/atlassian/centralconfluence/v2  streamable_http    OAuth
+central_jira         https://emcp.oracle.com/atlassian/centraljira/v2        streamable_http    OAuth
+oci_jira             https://emcp.oracle.com/atlassian/ocijira/v2            streamable_http    Unsupported
+openaiDeveloperDocs  https://developers.openai.com/mcp                       streamable_http    Unsupported
+```
+
+Probing `https://emcp.oracle.com/atlassian/centralconfluence/v2` confirmed:
+
+- It returns HTTP 401 with `WWW-Authenticate: Bearer error="invalid_token"`
+  and a `resource_metadata` pointer per RFC 9728.
+- Its OAuth authorization server (`.well-known/oauth-authorization-server`)
+  advertises **only `authorization_code` and `refresh_token` grants** — no
+  `client_credentials`. There is no service-account / non-interactive bearer
+  token; every token comes from a browser-based OAuth flow.
+- Codex acquires its tokens via the OAuth flow on first connection and stores
+  them in macOS Keychain under service `Codex MCP Credentials`, account
+  `<server_name>|<hash>`. They are not exposed in any plain-text file under
+  `~/.codex/`.
+
+### Consequence for Option B (codex_cli)
+
+Option B as written assumed `~/.codex/config.toml` contained a `command` and
+`args` for each MCP server. With HTTPS+OAuth registrations the file just
+holds a URL. **There is no subprocess for the framework to spawn.**
+
+Option B remains valid as a transport mode for any future case where a
+laptop developer chooses to register a *local* stdio MCP server (e.g.
+`codex mcp add my_local_thing -- node ./mcp-server.js`). The `codex_cli.py`
+adapter and its tests are kept for that case. For the org's actual
+Confluence/Jira MCP servers it is not usable.
+
+### Verification of `codex mcp-server` reality
+
+We probed `codex mcp-server` directly via MCP JSON-RPC over stdio:
+
+```
+initialize         ->  protocolVersion: 2025-06-18, serverInfo.name: codex-mcp-server
+tools/list         ->  [ "codex", "codex-reply" ]
+```
+
+Only 2 tools — both LLM-mediated. Calling the `codex` tool with a tightly
+constrained prompt ("use the central_confluence MCP server to search for
+'test page', return JSON only") returned real Confluence data in ~45 s as a
+markdown-fenced JSON block in `content[0].text`. The previously-rejected
+Option D ("wrap codex mcp-server") is in fact the only available transport
+that reuses Codex's OAuth, and its output is parseable as long as the prompt
+enforces a JSON schema.
+
+### Decision (Amendment 1)
+
+Add a fourth adapter transport mode — `codex_proxy`.
+
+**Adapter location.** New sibling modules:
+
+```
+framework/adapters/confluence/codex_proxy.py
+framework/adapters/jira/codex_proxy.py
+framework/core/codex_proxy_runtime.py   # shared subprocess + JSON extraction
+```
+
+The shared runtime owns the `codex mcp-server` subprocess, the MCP
+initialize handshake, the `codex` / `codex-reply` tool calls, JSON
+extraction from markdown fences, and thread-id reuse so subsequent calls go
+through `codex-reply` (cheaper than starting a fresh Codex session).
+
+**Wire path.**
+
+1. Framework adapter spawns `codex mcp-server` once per adapter session.
+2. Adapter constructs a natural-language prompt that pins (a) the target
+   Codex-registered MCP server name (e.g. `central_confluence`), (b) the
+   operation, and (c) a strict JSON output schema.
+3. Adapter calls Codex's `codex` tool over stdio MCP JSON-RPC.
+4. Codex runs an LLM session that internally calls the Atlassian MCP server
+   using its cached OAuth bearer token.
+5. Adapter strips the markdown fence and parses the JSON, returning a
+   normalized `RawItem` / `RawItemRef`.
+
+**Trade-offs accepted.** This adds an LLM mediation cost that the original
+Option A rejection rationale called out: ~1-3k tokens per call, 30-60 s
+latency, occasional prose-around-JSON that the parser must tolerate. We
+accept these explicitly because:
+
+- It is the only path that reuses Codex's existing OAuth — no need for the
+  framework to drive its own browser OAuth flow.
+- It is restricted to laptop dev / demos by the same `KBF_ENV` guard that
+  bounds `codex_cli`.
+- Production deployments use `mode: mcp` with a service token on the OCI VM,
+  where `codex_proxy` is blocked by the env guard.
+
+**Schema.**
+
+```yaml
+codex_proxy:
+  server_name: central_confluence    # name registered with `codex mcp add`
+  codex_bin: codex                   # default; codex CLI on PATH
+  timeout_seconds: 180               # per-call upper bound
+  max_pages_per_list: 25             # Confluence only — cap per list()
+  # max_issues_per_list: 50          # Jira variant
+```
+
+**Tool map is absent.** Unlike `mcp` and `codex_cli`, `codex_proxy` does not
+declare a tool map. The Codex LLM picks the right upstream MCP tool from the
+prompt. This is the source of the latency / token cost and the reason
+`codex_proxy` is laptop-only.
+
+**Mode comparison — four transports.**
+
+| | `native` | `mcp` | `codex_cli` | `codex_proxy` |
+|---|---|---|---|---|
+| Transport | Direct REST | HTTP MCP w/ service token | stdio MCP subprocess | LLM-mediated via `codex mcp-server` |
+| Auth | Service token | Service bearer (Vault) | MCP server self-managed | Codex's OAuth (Keychain) |
+| Throughput | High | Moderate | Moderate | Low (LLM-bound) |
+| LLM cost per call | 0 | 0 | 0 | ~1-3k tokens |
+| Latency per call | <1 s | ~1-3 s | ~1-3 s | 30-60 s |
+| Laptop viable | If REST reachable | No (no service token) | If user registered stdio server | Yes — designed for this |
+| Remote VM viable | Yes | Yes | No (env guard) | No (env guard) |
+| Failure modes | API errors | + tool / cap errors | + subprocess crash | + LLM refusal, malformed JSON |
+| Best for | Batch backfill | Steady-state remote | Local stdio MCP dev | Laptop w/ HTTPS+OAuth MCP |
+
+**Factory branch.** Both `framework/adapters/confluence/__init__.py` and
+`framework/adapters/jira/__init__.py` gain a `mode == "codex_proxy"` branch
+with the same `KBF_ENV` guard as `codex_cli`.
+
+**Test strategy.** `framework/tests/test_codex_proxy_adapter.py` covers
+(a) JSON extraction from various Codex response shapes (bare JSON, fenced,
+fenced + prose, embedded), (b) the runtime's initialize / call / reply /
+shutdown / error paths with a mocked subprocess, (c) each adapter's
+healthcheck / list / fetch / stream_changes paths with a mocked runtime,
+(d) the factory env guard for both adapters. 33 tests, all passing.
+
+**Not in scope (deferred).** A direct-OAuth MCP adapter that drives the
+Authorization Code + PKCE flow itself (no Codex involvement) — desirable
+for production-quality laptop dev, but out of scope for this amendment.
+Tracked as a follow-up; will land as a new `codex_oauth` or `mcp_oauth`
+mode in a future ADR if/when the team has time to implement and maintain
+its own client registration + token refresh.
+
+### Smoke-test verification — 2026-05-11
+
+End-to-end smoke test against real `central_confluence` (FACP space) confirmed:
+
+```
+[1/4] healthcheck            ok=True  26s   7 tools live (get_comments, get_labels,
+                                            get_page_children, fetch, get_page,
+                                            search, confluence_search)
+[2/4] list (max 5 pages)     5 refs returned in 17s
+[3/4] resolve page by title  "FAaaSPMO-145" not matched by search — fallback used
+[4/4] fetch page id=1811687037  title="Prioritized BPM ER List", space=FACP,
+                                version=197, body excerpt retrieved in 87s
+```
+
+Unit test suite: `framework/tests/test_codex_proxy_adapter.py` — **33 tests, all passing** (Python 3.9, pytest 8.4.2).
+Full framework suite: **607/608 passing** (1 pre-existing failure in `test_find_symbol_function`, unrelated to this change).
+
+End of Amendment 1.
+
+---
+
+## Original decision (Option B — codex_cli)
 
 ## Context
 

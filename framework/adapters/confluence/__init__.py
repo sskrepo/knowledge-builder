@@ -22,4 +22,12 @@ def make_confluence_adapter(adapter_config: dict) -> Adapter:
             )
         from .codex_cli import ConfluenceCodexCliAdapter
         return ConfluenceCodexCliAdapter(adapter_config["codex_cli"])
+    elif mode == "codex_proxy":
+        if os.getenv("KBF_ENV", "dev") not in ("dev", "laptop"):
+            raise RuntimeError(
+                "mode: codex_proxy is laptop-only. "
+                "Set mode: mcp with a service token for staging/prod."
+            )
+        from .codex_proxy import ConfluenceCodexProxyAdapter
+        return ConfluenceCodexProxyAdapter(adapter_config["codex_proxy"])
     raise ValueError(f"unknown confluence mode: {mode}")

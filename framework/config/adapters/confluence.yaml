@@ -1,6 +1,7 @@
-# Confluence adapter — tri-mode per ADR-011 / ADR-020. Flip mode: native | mcp | codex_cli.
+# Confluence adapter — quad-mode per ADR-011 / ADR-020.
+# Flip mode: native | mcp | codex_cli | codex_proxy.
 adapter: confluence
-mode: mcp                                 # native | mcp | codex_cli
+mode: mcp                                 # native | mcp | codex_cli | codex_proxy
 
 native:
   base_url: https://confluence.mycompany.internal
@@ -40,6 +41,18 @@ mcp:
 #   timeout_seconds: 60
 #   max_retries: 2
 #   poll_interval_seconds: 300          # no webhook support in codex_cli mode
+#
+# Use codex_cli only when the upstream MCP server is registered in Codex
+# with a SPAWN COMMAND (i.e. `codex mcp add <name> -- <cmd> <args...>`).
+# For Codex-registered HTTPS+OAuth servers (e.g. `central_confluence`)
+# there is no spawn command, so use codex_proxy below instead.
+
+# codex_proxy:                            # ADR-020 amended — LLM-mediated via `codex mcp-server`
+#   server_name: central_confluence      # name registered with `codex mcp add` (HTTPS+OAuth)
+#   codex_bin: codex                     # default; the codex CLI binary on PATH
+#   timeout_seconds: 180                 # per-call; Codex LLM session is slow (30-60s typical)
+#   max_pages_per_list: 25               # cap per list() call to keep prompts bounded
+# # NOTE: each call runs a Codex LLM session (~1-3k tokens). Use for laptop dev / demos only.
 
 content_filtering:
   exclude_archived: true

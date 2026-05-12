@@ -38,7 +38,7 @@ python -m framework.cli.kb_cli promote framework/persona_builders/ops-eng.yaml -
 | **2 — Fleet + code wiki + skill-builder** | Fleet adapter, code wiki, 4 MCP tools, skill-builder Phase A (module split per ADR-015), provides_fields backfill | Code complete |
 | **3 — Workflow runtime + orchestrator** | conversation.py (15-state machine), WorkflowMCPTool, 4-tier routing, Tier 3 fanout, cost telemetry, validate_workflow_links, 3 workflow skills, WikiMetadataStore, Confluence ingestion | Code complete |
 | **V3 — Deployment interaction layer** | PDD V3 design + implementation: 2 MCP tools (askKnowledgeBase, authorSkill), REST routes (ask + 5 authorSkill + 3 ops), bearer auth middleware, session persistence (filestore + ADB), camelCase serialization, cost store, OpenAPI 3.1 spec, OCI deployment runbook | Code complete (468 tests, 0 failures) |
-| **Laptop mode** | Bastion auto-reconnect for ADB (ADR-019), Codex CLI MCP transport for Confluence/Jira (ADR-020), split-deployment: authorSkill local + consumption remote, shared ADB | Code complete (107 new tests) |
+| **Laptop mode** | Bastion auto-reconnect for ADB (ADR-019), Codex CLI MCP transport for Confluence/Jira (ADR-020 — codex_cli for local stdio + codex_proxy for org HTTPS+OAuth MCP servers), split-deployment: authorSkill local + consumption remote, shared ADB | Code complete (140 new tests; E2E smoke passed against real central_confluence) |
 | **Eval tooling** | GoldSetFeeder interactive CLI (`kb-cli gold-feed`), 7-state machine, count_entries() utility, gold_sets/ directory, 63 tests | Code complete |
 
 ## What gates integration testing
@@ -54,7 +54,7 @@ External provisioning (ask once, when ready):
 ## Recent decisions
 - **DECISION-001–004** (2026-05-04) — all decided (Oracle stack, converged DB, OpenAI, PM/TPM/Aira personas)
 - **ADR-019** (2026-05-11) — Bastion auto-reconnect for Oracle ADB in laptop mode
-- **ADR-020** (2026-05-11) — Codex CLI as MCP transport for laptop mode (Option B: direct MCP stdio subprocess)
+- **ADR-020** (2026-05-11, amended 2026-05-11) — Codex CLI as MCP transport for laptop mode. Original: Option B (codex_cli, direct stdio subprocess). Amendment: discovered org MCP servers are HTTPS+OAuth, added codex_proxy mode (LLM-mediated via `codex mcp-server`). E2E smoke passed.
 - No open decisions
 
 ## Next milestones
