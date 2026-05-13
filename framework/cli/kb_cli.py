@@ -1226,6 +1226,147 @@ def cmd_watch_bugs(args):
 
 
 # ============================================================================
+# backfill-skills-to-adb
+# ============================================================================
+def cmd_backfill_skills(args):
+    """One-time backfill of on-disk skills into KBF_SKILL_ARTIFACTS (ADB).
+
+    Scans framework/workflow_skills/{persona}/{skill_name}.yaml and writes each
+    skill's artifacts to ADB via AdbSkillStore.write_artifacts().  Skills that
+    already exist in ADB are overwritten (MERGE INTO is idempotent).
+
+    Artifact coverage per skill:
+      workflow_skill    — framework/workflow_skills/{persona}/{skill_name}.yaml
+      eval_extraction   — eval/gold_sets/{persona}-{skill_name}-extraction.jsonl
+      eval_workflow     — eval/gold_sets/{persona}-{skill_name}-workflow.jsonl
+      (persona_builder_delta skipped for legacy skills — no reliable per-skill delta on disk)
+
+    Usage:
+      kb-cli backfill-skills-to-adb --env laptop
+      kb-cli backfill-skills-to-adb --env laptop --persona tpm --dry-run
+    """
+    env = args.env or os.environ.get("KBF_ENV", "laptop")
+    persona_filter = getattr(args, "persona", None) or ""
+    dry_run = getattr(args, "dry_run", False)
+
+    print(f"▶ backfill-skills-to-adb  env={env}  persona={persona_filter or '(all)'}  dry_run={dry_run}")
+
+    # ── Discover on-disk skills ────────────────────────────────────────────
+    skills_dir = REPO_ROOT / "framework" / "workflow_skills"
+    if not skills_dir.exists():
+        print(f"❌ workflow_skills dir not found: {skills_dir}", file=sys.stderr)
+        return 1
+
+    if persona_filter:
+        search_dirs = [skills_dir / persona_filter]
+    else:
+        search_dirs = [d for d in sorted(skills_dir.iterdir()) if d.is_dir()]
+
+    _REL_TEMPLATES = {
+        "workflow_skill":  "framework/workflow_skills/{persona}/{skill_name}.yaml",
+        "eval_extraction": "eval/gold_sets/{persona}-{skill_name}-extraction.jsonl",
+        "eval_workflow":   "eval/gold_sets/{persona}-{skill_name}-workflow.jsonl",
+    }
+
+    skills: list[tuple[str, str, dict[str, str]]] = []  # (persona, skill_name, artifacts)
+    for persona_dir in search_dirs:
+        if not persona_dir.is_dir():
+            continue
+        p_name = persona_dir.name
+        for skill_file in sorted(persona_dir.glob("*.yaml")):
+            if skill_file.name.startswith("_"):
+                continue
+            skill_n = skill_file.stem
+            typed: dict[str, str] = {}
+            for artifact_type, tmpl in _REL_TEMPLATES.items():
+                path = REPO_ROOT / tmpl.format(persona=p_name, skill_name=skill_n)
+                if path.exists():
+                    try:
+                        typed[artifact_type] = path.read_text(encoding="utf-8")
+                    except OSError as exc:
+                        print(f"  ⚠ could not read {path.name}: {exc}")
+            if typed:
+                skills.append((p_name, skill_n, typed))
+
+    if not skills:
+        print("  No skills found on disk — nothing to backfill.")
+        return 0
+
+    print(f"  Found {len(skills)} skill(s) on disk:")
+    for p, s, arts in skills:
+        print(f"    {p}.{s}  ({', '.join(sorted(arts.keys()))})")
+
+    if dry_run:
+        print("\n  [dry-run] No changes written to ADB.")
+        return 0
+
+    # ── Build ADB pool (same logic as cmd_migrate) ────────────────────────
+    config_path = REPO_ROOT / "framework" / "config" / f"{env}.yaml"
+    if not config_path.exists():
+        print(f"❌ config not found: {config_path}", file=sys.stderr)
+        return 1
+
+    with open(config_path) as fh:
+        cfg = yaml.safe_load(fh)
+
+    adb_cfg = cfg.get("adb", {})
+    bastion_cfg_dict = cfg.get("bastion", {})
+
+    try:
+        from ..core.adb_pool import create_adb_pool
+
+        wallet_path = str(Path(adb_cfg.get("wallet_path", "")).expanduser())
+        wallet_password = _resolve_secret_cli(adb_cfg.get("wallet_password_secret", ""))
+        admin_user = adb_cfg.get("admin_user", "Admin")
+        admin_password = _resolve_secret_cli(adb_cfg.get("admin_password_secret", ""))
+        service_name = adb_cfg.get("dsn") or adb_cfg.get("service_name", "")
+
+        pool_dict = {
+            "deployment_mode": cfg.get("deployment_mode", "laptop"),
+            "adb": {
+                "service_name":    service_name,
+                "wallet_path":     wallet_path,
+                "user":            admin_user,
+                "password":        admin_password,
+                "wallet_password": wallet_password,
+            },
+            "bastion": bastion_cfg_dict,
+        }
+
+        print(f"\n  Connecting to ADB ({service_name}) …")
+        pool = create_adb_pool(pool_dict)
+        print("  ✓ ADB pool ready")
+
+    except Exception as exc:
+        print(f"❌ Failed to create ADB pool: {exc}", file=sys.stderr)
+        return 1
+
+    # ── Write to ADB ──────────────────────────────────────────────────────
+    from ..deploy.skill_store.adb import AdbSkillStore
+
+    store = AdbSkillStore(pool)
+
+    ok = 0
+    failed = 0
+    for persona, skill_name, typed_artifacts in skills:
+        try:
+            store.write_artifacts(
+                synth_id="backfill",
+                persona=persona,
+                skill_name=skill_name,
+                artifacts=typed_artifacts,
+            )
+            print(f"  ✓ {persona}.{skill_name}")
+            ok += 1
+        except Exception as exc:
+            print(f"  ✗ {persona}.{skill_name}: {exc}", file=sys.stderr)
+            failed += 1
+
+    print(f"\n  Backfill complete: {ok} written, {failed} failed.")
+    return 0 if failed == 0 else 1
+
+
+# ============================================================================
 # main
 # ============================================================================
 def main():
@@ -1320,6 +1461,15 @@ def main():
         help="config env name (overrides KBF_ENV)",
     )
     psbu.set_defaults(fn=cmd_setup_bug_user)
+
+    pbf = sub.add_parser(
+        "backfill-skills-to-adb",
+        help="one-time backfill of on-disk workflow_skills into KBF_SKILL_ARTIFACTS (ADB)",
+    )
+    pbf.add_argument("--env", default=None, help="config env name (overrides KBF_ENV, default: laptop)")
+    pbf.add_argument("--persona", default=None, help="backfill only this persona (e.g. tpm)")
+    pbf.add_argument("--dry-run", action="store_true", help="discover skills but don't write to ADB")
+    pbf.set_defaults(fn=cmd_backfill_skills)
 
     args = p.parse_args()
     return args.fn(args)
