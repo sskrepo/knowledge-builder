@@ -1191,6 +1191,93 @@ class TestRunIngest:
         assert turn.state == "INGEST"
         # Stats should be zero (exception swallowed)
         assert conv._data.ingest_result["items_upserted"] == 0
+        # And status must be 'failed' so PROMOTE refuses to advance.
+        assert conv._data.ingest_result["status"] == "failed"
+
+    def test_run_ingest_zero_pages_back_is_treated_as_failure(self):
+        """Codex (or any adapter) returning {"results": []} → 0 pages back is
+        NOT a successful zero-result. It means extraction yielded nothing and
+        the KB will be empty. This was the exact silent path that let session
+        synth-tpm-14a54555 reach PROMOTE with an empty KB. The session must
+        stay at INGEST with status=failed and a "retry ingestion" option.
+        """
+        import os
+        sources = [{"kind": "confluence", "space": "OCIFACP",
+                    "include_labels": ["26ai", "weekly-status"]}]
+        conv = self._make_conv(sources=sources)
+
+        mock_ingestor_instance = MagicMock()
+        # Adapter completed cleanly (no exception) but returned 0 pages —
+        # this is the codex {"results": []} case.
+        mock_ingestor_instance.ingest_space.return_value = {
+            "pages_new": 0, "pages_updated": 0, "pages_unchanged": 0,
+        }
+        mock_ingestor_cls = MagicMock(return_value=mock_ingestor_instance)
+
+        with patch.dict(os.environ, {"KBF_ENV": "laptop"}):
+            with patch(
+                "framework.skill_builder.conversation._build_confluence_adapter",
+                return_value=None,
+            ):
+                with patch(
+                    "framework.ingestion.confluence_wiki_ingest.ConfluenceWikiIngestor",
+                    mock_ingestor_cls,
+                ):
+                    turn = conv._run_ingest()
+
+        result = conv._data.ingest_result
+        assert result["status"] == "failed", (
+            "0 pages back from the adapter must be treated as a failed "
+            "extraction — otherwise the session silently advances to PROMOTE "
+            "with an empty KB (synth-tpm-14a54555 bug)."
+        )
+        assert result["items_processed"] == 0
+        # The failure detail should name the offending space.
+        failures = result.get("failures") or []
+        assert any("OCIFACP" in f.get("space", "") for f in failures)
+        # The turn should offer retry, not advance.
+        assert turn.state == "INGEST"
+        assert "retry ingestion" in (turn.options or []) or \
+               "retry" in " ".join(turn.options or []).lower()
+
+    def test_run_ingest_one_source_with_pages_one_empty_both_fail(self):
+        """When multiple Confluence sources are configured and ANY one comes
+        back empty, the whole ingestion is treated as failed — partial KB
+        coverage is not acceptable because the user configured those sources
+        expecting they would all contribute.
+        """
+        import os
+        sources = [
+            {"kind": "confluence", "space": "TPM", "include_labels": ["weekly-ops"]},
+            {"kind": "confluence", "space": "OCIFACP", "include_labels": ["26ai"]},
+        ]
+        conv = self._make_conv(sources=sources)
+
+        mock_ingestor_instance = MagicMock()
+        # First space returns 2 pages; second returns 0.
+        mock_ingestor_instance.ingest_space.side_effect = [
+            {"pages_new": 2, "pages_updated": 0, "pages_unchanged": 0},
+            {"pages_new": 0, "pages_updated": 0, "pages_unchanged": 0},
+        ]
+        mock_ingestor_cls = MagicMock(return_value=mock_ingestor_instance)
+
+        with patch.dict(os.environ, {"KBF_ENV": "laptop"}):
+            with patch(
+                "framework.skill_builder.conversation._build_confluence_adapter",
+                return_value=None,
+            ):
+                with patch(
+                    "framework.ingestion.confluence_wiki_ingest.ConfluenceWikiIngestor",
+                    mock_ingestor_cls,
+                ):
+                    conv._run_ingest()
+
+        result = conv._data.ingest_result
+        assert result["status"] == "failed"
+        failures = result.get("failures") or []
+        assert any("OCIFACP" in f.get("space", "") for f in failures), (
+            "the empty OCIFACP source must be listed as a failure"
+        )
 
 
 class TestBuildConfluenceAdapter:

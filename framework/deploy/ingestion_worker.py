@@ -277,11 +277,29 @@ def main(persona_builder: str | None = None, skill_store=None):
                 labels = src.get("include_labels") or src.get("labels") or []
                 try:
                     stats = ingestor.ingest_space(space, labels or None)
-                    log.info(
-                        "  %s.%s ← Confluence %s: new=%d updated=%d unchanged=%d",
-                        persona, kb_name, space,
-                        stats["pages_new"], stats["pages_updated"], stats["pages_unchanged"],
+                    pages_total = (
+                        stats["pages_new"]
+                        + stats["pages_updated"]
+                        + stats["pages_unchanged"]
                     )
+                    log.info(
+                        "  %s.%s ← Confluence %s: new=%d updated=%d unchanged=%d total=%d",
+                        persona, kb_name, space,
+                        stats["pages_new"], stats["pages_updated"],
+                        stats["pages_unchanged"], pages_total,
+                    )
+                    # 0 pages back from the adapter is a failed extraction, not a
+                    # silent success — log as ERROR (visible in operator console)
+                    # so the source is surfaced for investigation. Worker keeps
+                    # processing the remaining KBs so one bad source doesn't kill
+                    # the whole run.
+                    if pages_total == 0:
+                        log.error(
+                            "  %s.%s ← Confluence %s: 0 pages returned (labels=%s). "
+                            "KB extraction yielded nothing — check space key, label "
+                            "filters, and codex/Confluence access.",
+                            persona, kb_name, space, labels or "(none)",
+                        )
                     total_stats["pages_new"]       += stats["pages_new"]
                     total_stats["pages_updated"]    += stats["pages_updated"]
                     total_stats["pages_unchanged"]  += stats["pages_unchanged"]

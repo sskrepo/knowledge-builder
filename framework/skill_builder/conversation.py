@@ -1418,16 +1418,43 @@ class SkillBuilderConversation:
                 labels = src.get("include_labels") or src.get("labels") or []
                 try:
                     stats = ingestor.ingest_space(space, labels or None)
+                    pages_total = (
+                        stats["pages_new"]
+                        + stats["pages_updated"]
+                        + stats["pages_unchanged"]
+                    )
                     log.info(
-                        "_run_ingest: Confluence %s new=%d updated=%d unchanged=%d",
+                        "_run_ingest: Confluence %s new=%d updated=%d unchanged=%d total=%d",
                         space,
                         stats["pages_new"],
                         stats["pages_updated"],
                         stats["pages_unchanged"],
+                        pages_total,
                     )
-                    total_new += stats["pages_new"]
-                    total_updated += stats["pages_updated"]
-                    total_unchanged += stats["pages_unchanged"]
+                    # Zero pages back from the adapter is an extraction failure,
+                    # not a success. Codex returning {"results": []} silently
+                    # advanced the synth-tpm-14a54555 session through INGEST →
+                    # PROMOTE with an empty KB. Possible causes:
+                    #   - label filters match no real pages (most common)
+                    #   - space key wrong / not accessible
+                    #   - codex MCP layer returned empty results without error
+                    #   - fixture dir missing for the space (laptop fixture mode)
+                    # Whatever the cause, advancing on an empty extraction is
+                    # never correct — the user must fix the input and retry.
+                    if pages_total == 0:
+                        labels_desc = labels if labels else "(no label filter)"
+                        msg = (
+                            f"adapter returned 0 pages for space '{space}' "
+                            f"with labels {labels_desc} (mode={mode}). "
+                            f"KB extraction yielded nothing — treating as failed. "
+                            f"Verify the space key, label filters, and codex/Confluence access."
+                        )
+                        log.error("_run_ingest: %s", msg)
+                        failures.append((space, msg))
+                    else:
+                        total_new += stats["pages_new"]
+                        total_updated += stats["pages_updated"]
+                        total_unchanged += stats["pages_unchanged"]
                 except Exception as exc:
                     log.error("_run_ingest: Confluence %s failed: %s", space, exc)
                     failures.append((space, str(exc)))
