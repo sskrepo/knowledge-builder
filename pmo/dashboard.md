@@ -258,6 +258,25 @@ python -m framework.cli.kb_cli promote framework/persona_builders/ops-eng.yaml -
 ## ⚠️ Risks / contradictions (from lint)
 - **Stub-only testing** — all 176 Python files run against filestore + stub LLM. Real-world behavior (vector similarity, LLM synthesis quality, API rate limits) is untested until provisioning arrives. Mitigated: code is structured for easy swap via env vars. **Evidence this matters: BUG-001** — the pool-attached `AdbSessionStore` was a complete blocker on laptop mode, but `test_session_store.py` only exercised stub mode (`pool=None`), so the bug shipped. Any module that has a "real backend" + "stub backend" split needs at least one fake-backed test of the real path.
 
+## 🔴 Production rollout gates (mandatory — do not skip)
+
+The following steps are not automated and must be executed manually during the
+first production deploy. Each has an ADR as source of truth.
+
+| # | Gate | ADR | When | SQL / Command |
+|---|------|-----|------|---------------|
+| 1 | Confirm ADB In-Memory option enabled | ADR-025 | Before first ingestion | `SELECT value FROM v$option WHERE parameter = 'In-Memory Column Store';` |
+| 2 | **Rebuild vector index INMEMORY** after first ingestion | ADR-025 | After `chunks` table is non-empty | `ALTER INDEX KB_INCIDENTS.ix_chunks_embedding_hnsw REBUILD ORGANIZATION INMEMORY NEIGHBOR GRAPH;` |
+| 3 | Setup `OCI_VECTOR_CRED` DB credential for in-DB embedding | ADR-012 | Before any embedding runs | See `kb_incidents.sql` §ADR-012 comment + `bootstrap-vault.sh` |
+| 4 | Run `kb-cli migrate --schema all --env prod` | — | First deploy | `bash framework/scripts/kbf-start.sh --migrate` |
+| 5 | Smoke test: `POST /mcp tools/call askKnowledgeBase` returns non-empty results | — | After migration + ingestion + index rebuild | See OCI runbook §6 |
+
+> Gate 2 is the most commonly forgotten. The disk-resident HNSW index (created
+> by migration) is functional but 2-5× slower than the in-memory form. Run the
+> REBUILD immediately after the first ingestion run confirms `chunks` is
+> non-empty. See ADR-025 for fallback if the In-Memory option is not available
+> on the chosen ADB tier.
+
 ## Next milestones
 - Schedule persona authoring workshops (workshop guide ready at `pmo/workshops/persona-authoring-workshop.md`)
 - Provide provisioning when ready for integration testing

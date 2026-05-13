@@ -52,6 +52,9 @@
 - [ADR-019 — Bastion auto-reconnect for Oracle ADB in laptop mode](adr/ADR-019-bastion-auto-reconnect.md)
 - [ADR-020 — Codex CLI as MCP transport for laptop mode](adr/ADR-020-codex-cli-mcp-transport.md)
 - [ADR-021 — Artifact upload for remote authorSkill sessions](adr/ADR-021-artifact-upload-oci.md)
+- [ADR-023 — KBF-ops persona + reviewSkillSession quality review](adr/ADR-023-kbf-ops-persona-session-quality-review.md)
+- [ADR-024 — Dedicated bug DB connection](adr/ADR-024-bug-db-connection.md)
+- [ADR-025 — Vector index INMEMORY rebuild on first production deploy ⚠️ prod gate](adr/ADR-025-vector-index-inmemory-prod-rebuild.md)
 
 ## Engineering
 - 🚀 **[laptop-quickstart](engineering/laptop-quickstart.md)** — V2; run framework end-to-end on laptop with no provisioning (no ADB, no Vault, no OpenAI required)
