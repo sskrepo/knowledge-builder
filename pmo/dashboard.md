@@ -265,17 +265,19 @@ first production deploy. Each has an ADR as source of truth.
 
 | # | Gate | ADR | When | SQL / Command |
 |---|------|-----|------|---------------|
-| 1 | Confirm ADB In-Memory option enabled | ADR-025 | Before first ingestion | `SELECT value FROM v$option WHERE parameter = 'In-Memory Column Store';` |
-| 2 | **Rebuild vector index INMEMORY** after first ingestion | ADR-025 | After `chunks` table is non-empty | `ALTER INDEX KB_INCIDENTS.ix_chunks_embedding_hnsw REBUILD ORGANIZATION INMEMORY NEIGHBOR GRAPH;` |
+| 1 | **Verify ADB In-Memory option is enabled** (HNSW requires it) | ADR-025 | Before `kb-cli migrate` runs | `SELECT value FROM v$option WHERE parameter = 'In-Memory Column Store';` |
+| 2 | **Rebuild vector index after first ingestion** to refresh in-memory graph | ADR-025 | After `chunks` table is non-empty | `ALTER INDEX KB_INCIDENTS.ix_chunks_embedding_hnsw REBUILD ORGANIZATION INMEMORY NEIGHBOR GRAPH;` |
 | 3 | Setup `OCI_VECTOR_CRED` DB credential for in-DB embedding | ADR-012 | Before any embedding runs | See `kb_incidents.sql` §ADR-012 comment + `bootstrap-vault.sh` |
 | 4 | Run `kb-cli migrate --schema all --env prod` | — | First deploy | `bash framework/scripts/kbf-start.sh --migrate` |
 | 5 | Smoke test: `POST /mcp tools/call askKnowledgeBase` returns non-empty results | — | After migration + ingestion + index rebuild | See OCI runbook §6 |
 
-> Gate 2 is the most commonly forgotten. The disk-resident HNSW index (created
-> by migration) is functional but 2-5× slower than the in-memory form. Run the
-> REBUILD immediately after the first ingestion run confirms `chunks` is
-> non-empty. See ADR-025 for fallback if the In-Memory option is not available
-> on the chosen ADB tier.
+> **Correction (2026-05-13):** Earlier guidance said the migration creates a
+> "disk-resident" HNSW index that could be optionally rebuilt as INMEMORY.
+> That was wrong — Oracle 23ai HNSW *requires* `ORGANIZATION INMEMORY NEIGHBOR
+> GRAPH` (ORA-51914 if omitted). Gate 1 is therefore a true prerequisite, not
+> a nice-to-have: if the tenancy lacks the In-Memory option, the migration
+> itself will fail. Gate 2 (post-ingestion REBUILD) remains valuable because
+> it refreshes the graph against real data.
 
 ## Next milestones
 - Schedule persona authoring workshops (workshop guide ready at `pmo/workshops/persona-authoring-workshop.md`)

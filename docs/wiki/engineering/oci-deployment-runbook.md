@@ -916,7 +916,7 @@ Each command runs the corresponding DDL file from `framework/stores/sql/` and lo
 The `kb_incidents` migration (`framework/stores/sql/kb_incidents.sql`) creates:
 - `content_items` table with full metadata columns and multi-valued JSON indexes
 - `chunks` table with `VECTOR(3072, FLOAT32)` column
-- **HNSW vector index (`ix_chunks_embedding_hnsw`)** — disk-resident form (no `ORGANIZATION INMEMORY`), creates instantly. **See §5.5 below for the mandatory post-ingestion INMEMORY rebuild (ADR-025).**
+- **HNSW vector index (`ix_chunks_embedding_hnsw`)** — uses `ORGANIZATION INMEMORY NEIGHBOR GRAPH` (mandatory for HNSW on Oracle 23ai; omitting raises ORA-51914). Requires the ADB tenancy to have the **In-Memory Column Store** option enabled — verify with the v$option query in §5.5 BEFORE running migrate. The DDL itself is cheap (~5 s) on empty data.
 - Graph `edges` table
 - `batch_insert_datasets_vectors_kbi` procedure for in-DB embedding (ADR-012)
 
@@ -995,25 +995,29 @@ content_items row count: 0
 ok
 ```
 
-### 5.5 Rebuild vector index as INMEMORY after first ingestion (ADR-025 — mandatory)
+### 5.5 ADB In-Memory option + post-ingestion index rebuild (ADR-025 — mandatory)
 
-> **This step is a production gate. Do not skip.**
->
-> The migration creates a disk-resident HNSW index (no `ORGANIZATION INMEMORY NEIGHBOR GRAPH`)
-> so that `kb-cli migrate` completes in seconds. The disk-resident form is fully functional
-> but 2-5× slower at query time than the in-memory form.
->
-> Run this rebuild **once**, after the first ingestion has populated the `chunks` table.
+> **Correction (2026-05-13):** Earlier guidance suggested the migration
+> created a "disk-resident" HNSW index. That was wrong — Oracle 23ai HNSW
+> *requires* `ORGANIZATION INMEMORY NEIGHBOR GRAPH` (omitting raises
+> ORA-51914). The In-Memory option must therefore be **verified before**
+> running `kb-cli migrate`, not after.
 
-**Step 1 — confirm the ADB In-Memory option is available:**
+**Step 1 — BEFORE migrating, confirm ADB In-Memory option is enabled:**
 ```sql
+sqlplus ADMIN/"<admin-password>"@kbfprod_high
 SELECT value FROM v$option WHERE parameter = 'In-Memory Column Store';
 -- Expected: VALUE = TRUE
--- If FALSE: the ADB tier does not include In-Memory. Keep disk-resident form and
--- document the latency trade-off. Do not run the REBUILD.
 ```
 
-**Step 2 — run the rebuild (as ADMIN or KB_INCIDENTS owner):**
+If `FALSE` or row missing → **stop**. The migration will fail with ORA-51914
+on the HNSW CREATE VECTOR INDEX statement. The only options are (a) upgrade
+the ADB tier to one that includes In-Memory, or (b) switch the index type to
+IVF (`ORGANIZATION NEIGHBOR PARTITIONS`) — a separate ADR with different
+recall/latency trade-offs, not currently supported by the codebase.
+
+**Step 2 — after first ingestion has populated `chunks`, rebuild the index
+to refresh the in-memory graph with real vectors:**
 ```sql
 -- Connect as ADMIN
 sqlplus ADMIN/"<admin-password>"@kbfprod_high
@@ -1022,7 +1026,7 @@ sqlplus ADMIN/"<admin-password>"@kbfprod_high
 SELECT COUNT(*) FROM KB_INCIDENTS.chunks;
 -- Expected: > 0
 
--- Rebuild index as INMEMORY NEIGHBOR GRAPH
+-- Rebuild index
 ALTER INDEX KB_INCIDENTS.ix_chunks_embedding_hnsw
   REBUILD ORGANIZATION INMEMORY NEIGHBOR GRAPH;
 -- Takes 30-120 s depending on chunk count. Run during maintenance window.
@@ -1037,8 +1041,8 @@ WHERE  table_owner = 'KB_INCIDENTS'
 -- STATUS should be VALID
 ```
 
-After rebuild, vector search queries use the in-memory graph and deliver full
-ANN performance. See ADR-025 for rationale and fallback guidance.
+After rebuild, vector search queries use the freshly-built in-memory graph.
+See ADR-025 for rationale.
 
 ---
 

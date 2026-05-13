@@ -90,13 +90,18 @@ CREATE TABLE chunks (
 CREATE INDEX ix_chunks_content_ord     ON chunks (content_id, ord);
 
 -- HNSW index for fast ANN search using cosine distance.
--- Disk-resident (no ORGANIZATION INMEMORY) — creates instantly even on ADB.
--- INMEMORY NEIGHBOR GRAPH would give faster queries but requires ADB to provision
--- an in-memory pool at creation time (~20-60 s even on empty table). Add that
--- clause only in production after the table has real data and the in-memory pool
--- is confirmed available.
+-- ORGANIZATION INMEMORY NEIGHBOR GRAPH is MANDATORY for HNSW on Oracle 23ai —
+-- omitting it raises ORA-51914 ("Missing ORGANIZATION clause when creating a
+-- vector index"). The only alternative is IVF with ORGANIZATION NEIGHBOR
+-- PARTITIONS, which is a different index type with different recall/latency.
+--
+-- On an empty table this still creates in a few seconds (the previous claim
+-- of "20-60 s hang" was actually the LLMClient() init we now skip in
+-- kb_cli.py:cmd_migrate; the index DDL itself is cheap on empty data).
+-- See ADR-025 for the production INMEMORY pool requirements.
 CREATE VECTOR INDEX ix_chunks_embedding_hnsw
   ON chunks (embedding)
+  ORGANIZATION INMEMORY NEIGHBOR GRAPH
   DISTANCE COSINE
   WITH TARGET ACCURACY 95
   PARAMETERS (TYPE HNSW, NEIGHBORS 32, EFCONSTRUCTION 200);
