@@ -890,9 +890,34 @@ def _make_delete_skill_handler(app):
                 "status": "not_found",
             }
 
+        # Remove the promoted KB entry from KBF_PERSONA_BUILDERS so ShimKb
+        # stops routing queries to this skill's KB.
+        pb_deleted = False
+        try:
+            pb_deleted = skill_store.delete_persona_builder_kb(persona, skill_name)
+            if pb_deleted:
+                log.info(
+                    "mcp:deleteSkill removed KBF_PERSONA_BUILDERS entry "
+                    "persona=%s kb_name=%s", persona, skill_name,
+                )
+        except Exception as exc:
+            log.warning(
+                "mcp:deleteSkill delete_persona_builder_kb failed "
+                "(artifacts already deleted): %s", exc,
+            )
+
+        # Hot-reload ShimKb so the card is immediately gone from routing.
+        shim_kb = getattr(app.state, "shim_kb", None)
+        if shim_kb is not None:
+            try:
+                shim_kb.reload()
+                log.info("mcp:deleteSkill ShimKb reloaded after deletion")
+            except Exception as exc:
+                log.warning("mcp:deleteSkill shim_kb.reload() failed: %s", exc)
+
         log.warning(
-            "mcp:deleteSkill COMPLETED persona=%s skill=%s deleted=%s consumer=%s",
-            persona, skill_name, deleted_types, consumer.name,
+            "mcp:deleteSkill COMPLETED persona=%s skill=%s deleted=%s pb_deleted=%s consumer=%s",
+            persona, skill_name, deleted_types, pb_deleted, consumer.name,
         )
 
         return {
@@ -902,11 +927,13 @@ def _make_delete_skill_handler(app):
                 "text": (
                     f"Deleted {len(deleted_types)} artifact(s) for {persona}.{skill_name}: "
                     f"{', '.join(sorted(deleted_types))}. "
+                    f"KB routing entry {'removed' if pb_deleted else 'not found (already clean)'}. "
                     "Note: already-ingested vector/graph content is not removed — "
                     "run a re-index to propagate."
                 ),
             }],
             "deletedArtifacts": sorted(deleted_types),
+            "pbEntryDeleted": pb_deleted,
             "persona": persona,
             "skillName": skill_name,
             "status": "deleted",

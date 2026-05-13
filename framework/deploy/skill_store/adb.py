@@ -91,6 +91,12 @@ _SQL_LIST_PERSONA = """
     ORDER BY MAX(updated_at) DESC
 """
 
+_SQL_DELETE_PB = """
+    DELETE FROM KB_SHIM.KBF_PERSONA_BUILDERS
+    WHERE persona = :persona
+      AND kb_name = :kb_name
+"""
+
 _SQL_UPSERT_PB = """
     MERGE INTO KB_SHIM.KBF_PERSONA_BUILDERS tgt
     USING DUAL ON (tgt.persona = :persona AND tgt.kb_name = :kb_name)
@@ -315,6 +321,23 @@ class AdbSkillStore(SkillStore):
             persona, skill_name, deleted_types,
         )
         return deleted_types
+
+    def delete_persona_builder_kb(self, persona: str, kb_name: str) -> bool:
+        if self._pool is None:
+            log.warning(
+                "AdbSkillStore: no pool — delete_persona_builder_kb is a no-op (stub mode)"
+            )
+            return False
+        with self._pool.acquire() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_SQL_DELETE_PB, {"persona": persona, "kb_name": kb_name})
+                deleted = cur.rowcount > 0
+            conn.commit()
+        log.info(
+            "AdbSkillStore.delete_persona_builder_kb: persona=%s kb_name=%s deleted=%s",
+            persona, kb_name, deleted,
+        )
+        return deleted
 
     def upsert_persona_builder_kb(
         self,

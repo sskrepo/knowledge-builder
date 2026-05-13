@@ -1,4 +1,4 @@
-"""Unit tests for listSkills and getSkill MCP tool handlers.
+"""Unit tests for listSkills, getSkill, and deleteSkill MCP tool handlers.
 
 Coverage:
   listSkills
@@ -18,6 +18,14 @@ Coverage:
     - skill not found returns isError
     - missing persona or skillName returns isError
     - skill_store absent returns isError
+
+  deleteSkill (persona_builder cleanup)
+    - delete_persona_builder_kb called after artifacts deleted
+    - pbEntryDeleted=True in response when KB entry existed
+    - pbEntryDeleted=False in response when KB entry was already absent
+    - shim_kb.reload() called after successful delete
+    - shim_kb.reload() failure does not crash the handler
+    - delete_persona_builder_kb failure does not crash (artifacts still deleted)
     - persona_builder_delta absent → empty kbCard
     - malformed persona_builder_delta YAML → empty kbCard (no crash)
     - list_skills exception returns isError
@@ -309,3 +317,112 @@ class TestGetSkill:
         ))
         assert result.get("isError") is True
         assert "timeout" in result["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# deleteSkill — persona_builder cleanup tests
+# ---------------------------------------------------------------------------
+
+class TestDeleteSkillPersonaBuilderCleanup:
+    """deleteSkill must also clean up KBF_PERSONA_BUILDERS and reload ShimKb."""
+
+    def _handler(self, skill_store, shim_kb=None):
+        app = _app(skill_store)
+        app.state.shim_kb = shim_kb
+        registry = build_external_tool_registry(app)
+        return registry["deleteSkill"]
+
+    def _admin_consumer(self):
+        return _consumer(scopes=["read", "write", "admin"])
+
+    def _store_with_skill(self, pb_deleted=True):
+        store = MagicMock()
+        store.delete.return_value = ["workflow_skill", "persona_builder_delta"]
+        store.delete_persona_builder_kb.return_value = pb_deleted
+        return store
+
+    def test_delete_persona_builder_kb_called(self):
+        """delete_persona_builder_kb must be called with the right persona + skill_name."""
+        import os
+        store = self._store_with_skill()
+        handler = self._handler(store)
+        with _patched_delete_pw("kbf-delete-dev"):
+            _run(handler(
+                persona="tpm", skillName="weekly_ops",
+                confirmationPassword="kbf-delete-dev",
+                _consumer=self._admin_consumer(),
+            ))
+        store.delete_persona_builder_kb.assert_called_once_with("tpm", "weekly_ops")
+
+    def test_pb_entry_deleted_true_in_response(self):
+        """pbEntryDeleted=True when the KB entry existed and was removed."""
+        store = self._store_with_skill(pb_deleted=True)
+        with _patched_delete_pw("pw"):
+            result = _run(self._handler(store)(
+                persona="tpm", skillName="weekly_ops",
+                confirmationPassword="pw", _consumer=self._admin_consumer(),
+            ))
+        assert result["pbEntryDeleted"] is True
+        assert "removed" in result["content"][0]["text"]
+
+    def test_pb_entry_deleted_false_when_not_found(self):
+        """pbEntryDeleted=False when KB entry was already absent (no error)."""
+        store = self._store_with_skill(pb_deleted=False)
+        with _patched_delete_pw("pw"):
+            result = _run(self._handler(store)(
+                persona="tpm", skillName="weekly_ops",
+                confirmationPassword="pw", _consumer=self._admin_consumer(),
+            ))
+        assert result["pbEntryDeleted"] is False
+        assert result.get("isError") is not True
+
+    def test_shim_kb_reload_called(self):
+        """shim_kb.reload() must be called after a successful delete."""
+        store = self._store_with_skill()
+        shim_kb = MagicMock()
+        with _patched_delete_pw("pw"):
+            _run(self._handler(store, shim_kb=shim_kb)(
+                persona="tpm", skillName="weekly_ops",
+                confirmationPassword="pw", _consumer=self._admin_consumer(),
+            ))
+        shim_kb.reload.assert_called_once()
+
+    def test_shim_kb_reload_failure_does_not_crash(self):
+        """shim_kb.reload() raising must not propagate — delete still succeeds."""
+        store = self._store_with_skill()
+        shim_kb = MagicMock()
+        shim_kb.reload.side_effect = RuntimeError("reload failed")
+        with _patched_delete_pw("pw"):
+            result = _run(self._handler(store, shim_kb=shim_kb)(
+                persona="tpm", skillName="weekly_ops",
+                confirmationPassword="pw", _consumer=self._admin_consumer(),
+            ))
+        assert result.get("isError") is not True
+        assert result["status"] == "deleted"
+
+    def test_delete_persona_builder_kb_failure_does_not_crash(self):
+        """delete_persona_builder_kb raising must not cancel the overall delete."""
+        store = self._store_with_skill()
+        store.delete_persona_builder_kb.side_effect = RuntimeError("ADB timeout")
+        with _patched_delete_pw("pw"):
+            result = _run(self._handler(store)(
+                persona="tpm", skillName="weekly_ops",
+                confirmationPassword="pw", _consumer=self._admin_consumer(),
+            ))
+        # Artifacts were still deleted
+        assert result.get("isError") is not True
+        assert result["status"] == "deleted"
+
+
+# ---------------------------------------------------------------------------
+# Helpers for deleteSkill tests
+# ---------------------------------------------------------------------------
+
+from contextlib import contextmanager
+from unittest.mock import patch
+
+@contextmanager
+def _patched_delete_pw(password: str):
+    """Patch KBF_SKILL_DELETE_PASSWORD env var for the duration of the block."""
+    with patch.dict("os.environ", {"KBF_SKILL_DELETE_PASSWORD": password}):
+        yield

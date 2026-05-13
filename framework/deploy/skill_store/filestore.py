@@ -169,6 +169,24 @@ class FilestoreSkillStore(SkillStore):
                     )
         return deleted_types
 
+    def delete_persona_builder_kb(self, persona: str, kb_name: str) -> bool:
+        """Remove KB entry file from ~/.kbf/persona_builders/{persona}/{kb_name}.yaml."""
+        dest = _PB_STORE_ROOT / persona / f"{kb_name}.yaml"
+        if not dest.exists():
+            return False
+        try:
+            dest.unlink()
+            log.info(
+                "FilestoreSkillStore.delete_persona_builder_kb: removed %s", dest
+            )
+            return True
+        except OSError as exc:
+            log.warning(
+                "FilestoreSkillStore.delete_persona_builder_kb: could not remove %s: %s",
+                dest, exc,
+            )
+            return False
+
     def upsert_persona_builder_kb(
         self,
         persona: str,

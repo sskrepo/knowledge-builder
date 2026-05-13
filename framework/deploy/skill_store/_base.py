@@ -119,6 +119,21 @@ class SkillStore(ABC):
         """
 
     @abstractmethod
+    def delete_persona_builder_kb(self, persona: str, kb_name: str) -> bool:
+        """Remove a promoted KB entry from the persona builder store.
+
+        Called by deleteSkill to ensure the KB card no longer appears in
+        ShimKb after the skill artifacts are deleted.
+
+        Args:
+            persona: Persona slug (e.g. "tpm").
+            kb_name: KB slug (e.g. "weekly_exec_review").
+
+        Returns:
+            True if a row was deleted, False if no matching row was found.
+        """
+
+    @abstractmethod
     def upsert_persona_builder_kb(
         self,
         persona: str,
