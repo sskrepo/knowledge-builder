@@ -65,7 +65,7 @@ _SQL_LIST_ALL = """
            MAX(updated_at) AS updated_at
     FROM KB_SHIM.KBF_SKILL_ARTIFACTS
     GROUP BY persona, skill_name, status
-    ORDER BY MAX(updated_at) DESC
+    ORDER BY updated_at DESC
 """
 
 _SQL_LIST_EXISTING_TYPES = """
@@ -88,7 +88,7 @@ _SQL_LIST_PERSONA = """
     FROM KB_SHIM.KBF_SKILL_ARTIFACTS
     WHERE persona = :persona
     GROUP BY persona, skill_name, status
-    ORDER BY MAX(updated_at) DESC
+    ORDER BY updated_at DESC
 """
 
 _SQL_DELETE_PB = """
