@@ -1,191 +1,292 @@
-"""Unit tests for ShimKb — including *.yaml.new_kb loading (authored-but-not-promoted KBs).
+"""Unit tests for framework/orchestrator/shim_kb.py.
 
 Coverage:
-  - Full *.yaml persona builders loaded correctly
-  - *.yaml.new_kb raw KB entry loaded and included in cards
-  - new_kb card inherits owning persona's visibility defaults
-  - new_kb card uses vector_search as default retrieval tool
-  - new_kb card visible via cards_visible_to(persona)
-  - new_kb card visible via render_for_persona_prompt(persona)
-  - find_kb("persona.kb_name") finds new_kb entry
-  - Malformed new_kb file skipped without crash
-  - new_kb without 'name' key skipped
+  ShimKb (YAML-only, no skill_store):
+    - Loads cards from *.yaml seed files
+    - cards_owned_by returns only the correct persona's cards
+    - cards_visible_to respects persona_visibility
+    - find_kb works by name and by persona.name
+    - render_for_persona_prompt produces sensible output
+
+  ShimKb (ADB-backed via skill_store):
+    - list_persona_builder_kbs(status='production') results are merged on top
+    - ADB entries override YAML seed cards with the same (persona, name) key
+    - ADB entries for new KBs not in YAML are appended
+    - skill_store failure falls back gracefully to YAML-only
+
+  ShimKb.reload():
+    - Calls list_persona_builder_kbs again to pick up newly promoted KBs
 """
 from __future__ import annotations
 
-import yaml
-import pytest
 from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+import yaml
 
 from framework.orchestrator.shim_kb import ShimKb
 
 
 # ---------------------------------------------------------------------------
-# Fixtures / helpers
+# Fixtures
 # ---------------------------------------------------------------------------
 
-def _write_yaml(path: Path, data: dict) -> None:
-    path.write_text(yaml.dump(data))
 
-
-def _make_full_pb(tmp_path: Path, persona: str, kb_names: list[str]) -> Path:
-    """Write a minimal full persona builder YAML for `persona`."""
-    path = tmp_path / f"{persona}.yaml"
-    _write_yaml(path, {
+def _write_persona_yaml(pb_dir: Path, persona: str, kb_name: str, kind: str = "vector"):
+    """Write a minimal persona builder YAML to pb_dir."""
+    cfg = {
         "persona": persona,
-        "status": "production",
-        "metadata_defaults": {
-            "persona_visibility": [persona, "exec", "pm"],
-        },
+        "metadata_defaults": {"persona_visibility": [persona]},
         "knowledge_bases": [
             {
-                "name": kb,
-                "kind": "wiki",
-                "retrieval_tools": ["search_wiki", "vector_search"],
-                "provides_fields": ["field_a", "field_b"],
+                "name": kb_name,
+                "kind": kind,
+                "retrieval_tools": ["vector_search"],
+                "provides_fields": ["title", "summary"],
                 "kb_card": {
-                    "summary": f"{kb} summary",
-                    "use_when": f"Questions about {kb}",
+                    "summary": f"Seed KB {kb_name}",
+                    "use_when": f"when you need {kb_name}",
                 },
             }
-            for kb in kb_names
         ],
-    })
-    return path
-
-
-def _make_new_kb(tmp_path: Path, persona: str, kb_name: str) -> Path:
-    """Write a *.yaml.new_kb raw KB entry (as COMMIT produces)."""
-    path = tmp_path / f"{persona}.yaml.new_kb"
-    _write_yaml(path, {
-        "name": kb_name,
-        "kind": "vector",
-        "provides_fields": ["project_name", "overall_rag", "executive_summary"],
-        "sources": [{"kind": "confluence", "space": "OCIFACP"}],
-        "retrieval_tools": ["vector_search"],
-        "kb_card": {
-            "summary": "26ai weekly exec review data.",
-            "use_when": "Questions about 26ai project status or exec review.",
-        },
-    })
+    }
+    path = pb_dir / f"{persona}.yaml"
+    path.write_text(yaml.safe_dump(cfg, allow_unicode=True), encoding="utf-8")
     return path
 
 
 # ---------------------------------------------------------------------------
-# Tests — full persona builder loading (sanity)
+# YAML-only (no skill_store)
 # ---------------------------------------------------------------------------
 
-class TestShimKbFullYaml:
-    def test_loads_full_yaml(self, tmp_path):
-        _make_full_pb(tmp_path, "tpm", ["tpm_weekly_ops"])
-        kb = ShimKb(tmp_path)
-        assert len(kb.all_cards()) == 1
-        assert kb.all_cards()[0]["name"] == "tpm_weekly_ops"
 
-    def test_skips_underscore_files(self, tmp_path):
-        _make_full_pb(tmp_path, "tpm", ["tpm_weekly_ops"])
-        (tmp_path / "_template.yaml").write_text("persona: _template\nknowledge_bases: []")
-        kb = ShimKb(tmp_path)
-        assert all(c["persona"] != "_template" for c in kb.all_cards())
-
-    def test_cards_visible_to_respects_visibility(self, tmp_path):
-        _make_full_pb(tmp_path, "tpm", ["tpm_weekly_ops"])
-        kb = ShimKb(tmp_path)
-        assert any(c["name"] == "tpm_weekly_ops" for c in kb.cards_visible_to("tpm"))
-        assert any(c["name"] == "tpm_weekly_ops" for c in kb.cards_visible_to("exec"))
-        assert not any(c["name"] == "tpm_weekly_ops" for c in kb.cards_visible_to("unknown_persona"))
-
-
-# ---------------------------------------------------------------------------
-# Tests — *.yaml.new_kb loading
-# ---------------------------------------------------------------------------
-
-class TestShimKbNewKb:
-    def test_new_kb_included_in_all_cards(self, tmp_path):
-        """A *.yaml.new_kb entry must appear in all_cards()."""
-        _make_full_pb(tmp_path, "tpm", ["tpm_weekly_ops"])
-        _make_new_kb(tmp_path, "tpm", "generate_a_weekly_exec_review_pptx_for_the_26ai_pr")
-        kb = ShimKb(tmp_path)
-        names = [c["name"] for c in kb.all_cards()]
-        assert "generate_a_weekly_exec_review_pptx_for_the_26ai_pr" in names, (
-            "newly authored KB from .new_kb must be visible in all_cards()"
-        )
-
-    def test_new_kb_inherits_persona_visibility(self, tmp_path):
-        """new_kb entry must inherit the owning persona's visibility list."""
-        _make_full_pb(tmp_path, "tpm", ["tpm_weekly_ops"])
-        _make_new_kb(tmp_path, "tpm", "26ai_exec_review")
-        kb = ShimKb(tmp_path)
-        card = next(c for c in kb.all_cards() if c["name"] == "26ai_exec_review")
-        assert "exec" in card["persona_visibility"], (
-            "new_kb must inherit visibility=[tpm, exec, pm] from tpm.yaml"
-        )
-
-    def test_new_kb_visible_to_tpm(self, tmp_path):
-        """cards_visible_to('tpm') must include the new_kb entry."""
-        _make_full_pb(tmp_path, "tpm", ["tpm_weekly_ops"])
-        _make_new_kb(tmp_path, "tpm", "generate_a_weekly_exec_review_pptx_for_the_26ai_pr")
-        kb = ShimKb(tmp_path)
-        visible_names = [c["name"] for c in kb.cards_visible_to("tpm")]
-        assert "generate_a_weekly_exec_review_pptx_for_the_26ai_pr" in visible_names
-
-    def test_new_kb_appears_in_persona_prompt(self, tmp_path):
-        """render_for_persona_prompt must include the new_kb entry."""
-        _make_full_pb(tmp_path, "tpm", ["tpm_weekly_ops"])
-        _make_new_kb(tmp_path, "tpm", "generate_a_weekly_exec_review_pptx_for_the_26ai_pr")
-        kb = ShimKb(tmp_path)
-        prompt = kb.render_for_persona_prompt("tpm")
-        assert "generate_a_weekly_exec_review_pptx_for_the_26ai_pr" in prompt, (
-            "new_kb must appear in the persona prompt shown to the retrieval LLM"
-        )
-
-    def test_new_kb_find_by_qualified_name(self, tmp_path):
-        """find_kb('tpm.generate_...') must resolve the new_kb entry."""
-        _make_full_pb(tmp_path, "tpm", ["tpm_weekly_ops"])
-        _make_new_kb(tmp_path, "tpm", "generate_a_weekly_exec_review_pptx_for_the_26ai_pr")
-        kb = ShimKb(tmp_path)
-        card = kb.find_kb("tpm.generate_a_weekly_exec_review_pptx_for_the_26ai_pr")
-        assert card is not None, (
-            "find_kb by qualified name must find the new_kb entry"
-        )
+class TestShimKbYamlOnly:
+    def test_loads_cards_from_yaml(self, tmp_path):
+        _write_persona_yaml(tmp_path, "tpm", "weekly_status")
+        shim = ShimKb(tmp_path)
+        assert len(shim.all_cards()) == 1
+        card = shim.all_cards()[0]
+        assert card["name"] == "weekly_status"
         assert card["persona"] == "tpm"
 
-    def test_new_kb_uses_vector_search_tool(self, tmp_path):
-        """new_kb card must carry vector_search as a retrieval tool."""
-        _make_full_pb(tmp_path, "tpm", ["tpm_weekly_ops"])
-        _make_new_kb(tmp_path, "tpm", "26ai_exec_review")
-        kb = ShimKb(tmp_path)
-        card = next(c for c in kb.all_cards() if c["name"] == "26ai_exec_review")
-        assert "vector_search" in card["retrieval_tools"]
+    def test_skips_underscore_files(self, tmp_path):
+        _write_persona_yaml(tmp_path, "tpm", "weekly_status")
+        (tmp_path / "_private.yaml").write_text("persona: internal\nknowledge_bases: []")
+        shim = ShimKb(tmp_path)
+        assert len(shim.all_cards()) == 1
 
-    def test_new_kb_without_name_skipped(self, tmp_path):
-        """A new_kb file with no 'name' key must be silently skipped."""
-        _make_full_pb(tmp_path, "tpm", ["tpm_weekly_ops"])
-        # Write a nameless new_kb file
-        (tmp_path / "tpm.yaml.new_kb").write_text(
-            "kind: vector\nprovides_fields: [f1]\n"
-        )
-        kb = ShimKb(tmp_path)
-        # Only the full YAML KB should be present
-        assert len(kb.all_cards()) == 1
+    def test_cards_owned_by(self, tmp_path):
+        _write_persona_yaml(tmp_path, "tpm", "weekly_status")
+        _write_persona_yaml(tmp_path, "pm", "exec_summary")
+        shim = ShimKb(tmp_path)
 
-    def test_malformed_new_kb_skipped(self, tmp_path):
-        """A malformed *.yaml.new_kb file must be skipped, not crash ShimKb."""
-        _make_full_pb(tmp_path, "tpm", ["tpm_weekly_ops"])
-        (tmp_path / "tpm.yaml.new_kb").write_text("{bad yaml{{{{")
-        kb = ShimKb(tmp_path)  # Must not raise
-        assert len(kb.all_cards()) == 1  # Only full YAML card
+        tpm_cards = shim.cards_owned_by("tpm")
+        assert len(tpm_cards) == 1
+        assert tpm_cards[0]["persona"] == "tpm"
 
-    def test_new_kb_no_existing_full_yaml_defaults_to_persona(self, tmp_path):
-        """new_kb without a matching full *.yaml defaults visibility to [persona]."""
-        # No tpm.yaml — only the new_kb file
-        (tmp_path / "tpm.yaml.new_kb").write_text(yaml.dump({
-            "name": "my_kb",
-            "kind": "vector",
-            "provides_fields": ["f1"],
-            "retrieval_tools": ["vector_search"],
-        }))
-        kb = ShimKb(tmp_path)
-        card = next((c for c in kb.all_cards() if c["name"] == "my_kb"), None)
+    def test_cards_visible_to(self, tmp_path):
+        # tpm.yaml with visibility [tpm, pm]
+        cfg = {
+            "persona": "tpm",
+            "metadata_defaults": {"persona_visibility": ["tpm", "pm"]},
+            "knowledge_bases": [
+                {
+                    "name": "cross_visible",
+                    "kind": "vector",
+                    "retrieval_tools": [],
+                    "provides_fields": [],
+                    "kb_card": {},
+                }
+            ],
+        }
+        (tmp_path / "tpm.yaml").write_text(yaml.safe_dump(cfg))
+        shim = ShimKb(tmp_path)
+
+        # both tpm and pm can see it
+        assert len(shim.cards_visible_to("tpm")) == 1
+        assert len(shim.cards_visible_to("pm")) == 1
+        # ops_eng cannot see it
+        assert len(shim.cards_visible_to("ops_eng")) == 0
+
+    def test_find_kb_by_name(self, tmp_path):
+        _write_persona_yaml(tmp_path, "tpm", "weekly_status")
+        shim = ShimKb(tmp_path)
+
+        card = shim.find_kb("weekly_status")
         assert card is not None
-        assert card["persona_visibility"] == ["tpm"]
+        assert card["name"] == "weekly_status"
+
+    def test_find_kb_by_persona_dot_name(self, tmp_path):
+        _write_persona_yaml(tmp_path, "tpm", "weekly_status")
+        shim = ShimKb(tmp_path)
+
+        card = shim.find_kb("tpm.weekly_status")
+        assert card is not None
+        assert card["persona"] == "tpm"
+
+    def test_find_kb_returns_none_when_not_found(self, tmp_path):
+        shim = ShimKb(tmp_path)
+        assert shim.find_kb("does_not_exist") is None
+        assert shim.find_kb("tpm.does_not_exist") is None
+
+    def test_render_for_persona_prompt(self, tmp_path):
+        _write_persona_yaml(tmp_path, "tpm", "weekly_status")
+        shim = ShimKb(tmp_path)
+
+        output = shim.render_for_persona_prompt("tpm")
+        assert "weekly_status" in output
+        assert "vector" in output
+
+    def test_render_for_persona_prompt_no_cards(self, tmp_path):
+        shim = ShimKb(tmp_path)
+        output = shim.render_for_persona_prompt("tpm")
+        assert "no KBs" in output
+
+
+# ---------------------------------------------------------------------------
+# ADB-backed (with skill_store)
+# ---------------------------------------------------------------------------
+
+
+def _make_skill_store_with_kbs(pb_rows: list[dict]) -> MagicMock:
+    mock_store = MagicMock()
+    mock_store.list_persona_builder_kbs.return_value = pb_rows
+    return mock_store
+
+
+class TestShimKbAdbBacked:
+    def test_adb_kbs_merged_on_top_of_yaml(self, tmp_path):
+        _write_persona_yaml(tmp_path, "tpm", "seed_kb")
+
+        adb_entry_yaml = yaml.safe_dump({
+            "name": "promoted_skill",
+            "kind": "vector",
+            "retrieval_tools": ["vector_search"],
+            "provides_fields": ["title"],
+            "kb_card": {"summary": "Promoted via authorSkill"},
+        })
+        mock_store = _make_skill_store_with_kbs([{
+            "persona": "tpm",
+            "kb_name": "promoted_skill",
+            "content_yaml": adb_entry_yaml,
+            "status": "production",
+            "updated_at": "2026-01-01",
+        }])
+
+        shim = ShimKb(tmp_path, skill_store=mock_store)
+        cards = shim.all_cards()
+
+        # Seed KB + promoted KB = 2 total
+        assert len(cards) == 2
+        names = {c["name"] for c in cards}
+        assert "seed_kb" in names
+        assert "promoted_skill" in names
+
+    def test_adb_entry_overrides_yaml_seed_with_same_name(self, tmp_path):
+        _write_persona_yaml(tmp_path, "tpm", "weekly_status")
+
+        # Same KB name as the seed — ADB entry should win
+        adb_entry_yaml = yaml.safe_dump({
+            "name": "weekly_status",
+            "kind": "relational",
+            "retrieval_tools": ["text_to_sql"],
+            "provides_fields": ["title", "updated_fields"],
+            "kb_card": {"summary": "Upgraded to relational"},
+        })
+        mock_store = _make_skill_store_with_kbs([{
+            "persona": "tpm",
+            "kb_name": "weekly_status",
+            "content_yaml": adb_entry_yaml,
+            "status": "production",
+            "updated_at": "2026-05-12",
+        }])
+
+        shim = ShimKb(tmp_path, skill_store=mock_store)
+        cards = shim.all_cards()
+
+        # Only one card — the ADB version wins
+        assert len(cards) == 1
+        assert cards[0]["kind"] == "relational"
+        assert cards[0]["_source"] == "adb"
+
+    def test_skill_store_failure_falls_back_to_yaml(self, tmp_path):
+        _write_persona_yaml(tmp_path, "tpm", "seed_kb")
+
+        mock_store = MagicMock()
+        mock_store.list_persona_builder_kbs.side_effect = RuntimeError("ADB down")
+
+        # Should not raise
+        shim = ShimKb(tmp_path, skill_store=mock_store)
+        cards = shim.all_cards()
+
+        # Falls back to YAML seed only
+        assert len(cards) == 1
+        assert cards[0]["name"] == "seed_kb"
+
+    def test_list_persona_builder_kbs_called_with_production_status(self, tmp_path):
+        mock_store = _make_skill_store_with_kbs([])
+        ShimKb(tmp_path, skill_store=mock_store)
+
+        mock_store.list_persona_builder_kbs.assert_called_once_with(status="production")
+
+    def test_invalid_content_yaml_skipped(self, tmp_path):
+        mock_store = _make_skill_store_with_kbs([{
+            "persona": "tpm",
+            "kb_name": "bad_entry",
+            "content_yaml": ":::invalid yaml:::{{{",
+            "status": "production",
+            "updated_at": "2026-01-01",
+        }])
+
+        # Should not raise; bad entry is skipped
+        shim = ShimKb(tmp_path, skill_store=mock_store)
+        # No cards from the bad ADB entry
+        assert shim.find_kb("bad_entry") is None
+
+
+# ---------------------------------------------------------------------------
+# ShimKb.reload()
+# ---------------------------------------------------------------------------
+
+
+class TestShimKbReload:
+    def test_reload_calls_list_persona_builder_kbs_again(self, tmp_path):
+        _write_persona_yaml(tmp_path, "tpm", "seed_kb")
+
+        # First call returns empty; second call returns a new promoted KB
+        adb_entry_yaml = yaml.safe_dump({
+            "name": "newly_promoted",
+            "kind": "vector",
+            "retrieval_tools": [],
+            "provides_fields": [],
+            "kb_card": {},
+        })
+        mock_store = MagicMock()
+        mock_store.list_persona_builder_kbs.side_effect = [
+            [],  # first load() call at __init__
+            [{   # reload() call
+                "persona": "tpm",
+                "kb_name": "newly_promoted",
+                "content_yaml": adb_entry_yaml,
+                "status": "production",
+                "updated_at": "2026-05-12",
+            }],
+        ]
+
+        shim = ShimKb(tmp_path, skill_store=mock_store)
+        assert shim.find_kb("newly_promoted") is None  # not yet visible
+
+        shim.reload()
+        assert shim.find_kb("newly_promoted") is not None  # now visible
+
+    def test_reload_without_skill_store_reruns_yaml_load(self, tmp_path):
+        shim = ShimKb(tmp_path)
+        assert shim.all_cards() == []
+
+        # Add a new YAML file, then reload
+        _write_persona_yaml(tmp_path, "tpm", "new_seed_kb")
+        shim.reload()
+
+        assert len(shim.all_cards()) == 1
+        assert shim.all_cards()[0]["name"] == "new_seed_kb"

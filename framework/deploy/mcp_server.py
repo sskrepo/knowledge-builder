@@ -123,7 +123,8 @@ def _load_app():
         # --- Shims + LLM ---
         log.info("loading shim_faaas…")
         state["shim_faaas"] = ShimFaaas(SHIM_FAAAS_PATH)
-        state["shim_kb"] = ShimKb(PERSONA_BUILDERS_DIR)
+        state["shim_kb"] = ShimKb(PERSONA_BUILDERS_DIR, skill_store=app.state.skill_store)
+        app.state.shim_kb = state["shim_kb"]
         # Apply LLM overrides from env-specific config (laptop.yaml [llm] section etc.)
         # _load_env_llm_overrides reads the [llm] section from the active env YAML
         # and returns kwargs that override adapters/llm.yaml defaults.  This ensures

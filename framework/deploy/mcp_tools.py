@@ -183,6 +183,61 @@ EXTERNAL_TOOLS_SCHEMA = [
         },
     },
     {
+        "name": "listSkills",
+        "description": (
+            "List all authored skills stored in the skill store, optionally filtered "
+            "by persona and/or status. Returns a lightweight summary — no artifact "
+            "content. Use getSkill to fetch full detail for a specific skill."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "persona": {
+                    "type": "string",
+                    "description": (
+                        "Optional persona slug to filter by (e.g. 'tpm', 'ops_eng'). "
+                        "Omit to list skills for all personas."
+                    ),
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["draft", "promoted", "production"],
+                    "description": "Optional status filter.",
+                },
+            },
+        },
+    },
+    {
+        "name": "getSkill",
+        "description": (
+            "Fetch full detail for a specific skill: KB card, sources, retrieval tools, "
+            "and eval gold-set line counts. Pass includeArtifacts=true to also receive "
+            "the raw workflow YAML (requires write scope)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "required": ["persona", "skillName"],
+            "properties": {
+                "persona": {
+                    "type": "string",
+                    "description": "Persona slug (e.g. 'tpm')",
+                },
+                "skillName": {
+                    "type": "string",
+                    "description": "Skill slug (e.g. 'generate_weekly_exec_review_pptx')",
+                },
+                "includeArtifacts": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "When true, include the full workflow YAML text in the response. "
+                        "Requires write scope."
+                    ),
+                },
+            },
+        },
+    },
+    {
         "name": "uploadArtifact",
         "description": (
             "Upload a local file (PPT, DOCX, Markdown, text) to the server for "
@@ -245,6 +300,8 @@ def build_external_tool_registry(app) -> dict[str, Any]:
         "authorSkill": _make_author_skill_handler(app),
         "uploadArtifact": _make_upload_artifact_handler(app),
         "deleteSkill": _make_delete_skill_handler(app),
+        "listSkills": _make_list_skills_handler(app),
+        "getSkill": _make_get_skill_handler(app),
     }
 
 
@@ -856,6 +913,207 @@ def _make_delete_skill_handler(app):
         }
 
     return delete_skill_handler
+
+
+# ---------------------------------------------------------------------------
+# listSkills / getSkill handlers
+# ---------------------------------------------------------------------------
+
+
+def _make_list_skills_handler(app):
+    """Build the listSkills MCP tool handler.
+
+    Returns a lightweight summary of all skills in the skill store.
+    Requires read scope (or anonymous dev mode).
+    """
+
+    async def list_skills_handler(
+        *,
+        persona: str = "",
+        status: str = "",
+        _consumer=None,
+    ) -> dict:
+        """MCP handler for listSkills.
+
+        Args:
+            persona:   Optional persona slug filter.
+            status:    Optional status filter ("draft" | "promoted" | "production").
+            _consumer: ConsumerManifest injected by MCP dispatch.
+        """
+        skill_store = getattr(app.state, "skill_store", None)
+        if skill_store is None:
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": "Skill store not available."}],
+            }
+
+        log.info(
+            "mcp:listSkills persona=%s status=%s",
+            persona or "(all)", status or "(all)",
+        )
+
+        try:
+            raw = skill_store.list_skills(persona=persona or None)
+        except Exception as exc:
+            log.error("mcp:listSkills list_skills failed: %s", exc)
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": f"Failed to list skills: {exc}"}],
+            }
+
+        # Client-side status filter (list_skills only accepts persona filter)
+        if status:
+            raw = [s for s in raw if s.get("status") == status]
+
+        skills = [
+            {
+                "persona":       s.get("persona", ""),
+                "skillName":     s.get("skill_name", ""),
+                "status":        s.get("status", "draft"),
+                "artifactCount": s.get("artifact_count", 0),
+                "updatedAt":     s.get("updated_at", ""),
+            }
+            for s in raw
+        ]
+
+        return {"skills": skills, "total": len(skills)}
+
+    return list_skills_handler
+
+
+def _make_get_skill_handler(app):
+    """Build the getSkill MCP tool handler.
+
+    Returns full skill detail: KB card parsed from persona_builder_delta,
+    eval gold-set line counts, and optionally the raw workflow YAML.
+    Requires write scope when includeArtifacts=True.
+    """
+    import yaml as _yaml
+
+    async def get_skill_handler(
+        *,
+        persona: str,
+        skillName: str,
+        includeArtifacts: bool = False,
+        _consumer=None,
+    ) -> dict:
+        """MCP handler for getSkill.
+
+        Args:
+            persona:          Persona slug (e.g. "tpm").
+            skillName:        Skill slug (e.g. "generate_weekly_exec_review_pptx").
+            includeArtifacts: When True, include full workflow YAML in response
+                              (requires write scope).
+            _consumer:        ConsumerManifest injected by MCP dispatch.
+        """
+        consumer = _consumer or _anonymous_consumer()
+
+        persona = (persona or "").strip()
+        skill_name = (skillName or "").strip()
+        if not persona or not skill_name:
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": "persona and skillName are required."}],
+            }
+
+        if includeArtifacts and "write" not in consumer.scopes:
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": "includeArtifacts=true requires write scope."}],
+            }
+
+        skill_store = getattr(app.state, "skill_store", None)
+        if skill_store is None:
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": "Skill store not available."}],
+            }
+
+        log.info(
+            "mcp:getSkill persona=%s skill=%s include_artifacts=%s consumer=%s",
+            persona, skill_name, includeArtifacts, consumer.name,
+        )
+
+        # --- Summary row ---------------------------------------------------
+        try:
+            all_skills = skill_store.list_skills(persona=persona)
+        except Exception as exc:
+            log.error("mcp:getSkill list_skills failed: %s", exc)
+            return {
+                "isError": True,
+                "content": [{"type": "text", "text": f"Failed to fetch skill list: {exc}"}],
+            }
+
+        summary = next(
+            (s for s in all_skills if s.get("skill_name") == skill_name),
+            None,
+        )
+        if summary is None:
+            return {
+                "isError": True,
+                "content": [{
+                    "type": "text",
+                    "text": f"Skill '{persona}.{skill_name}' not found.",
+                }],
+            }
+
+        # --- Artifacts -----------------------------------------------------
+        def _read(artifact_type: str) -> str | None:
+            try:
+                return skill_store.read_artifact(persona, skill_name, artifact_type)
+            except Exception as exc:
+                log.warning(
+                    "mcp:getSkill read_artifact %s failed: %s", artifact_type, exc
+                )
+                return None
+
+        delta_yaml  = _read("persona_builder_delta")
+        workflow_yaml = _read("workflow_skill") if includeArtifacts else None
+        eval_ext    = _read("eval_extraction")
+        eval_wf     = _read("eval_workflow")
+
+        # --- Parse KB card from persona_builder_delta ----------------------
+        kb_card: dict = {}
+        if delta_yaml:
+            try:
+                delta = _yaml.safe_load(delta_yaml) or {}
+                raw_card = delta.get("kb_card") or {}
+                kb_card = {
+                    "summary":        raw_card.get("summary", ""),
+                    "useWhen":        raw_card.get("use_when", ""),
+                    "providesFields": delta.get("provides_fields", []),
+                    "kind":           delta.get("kind", ""),
+                    "sources":        delta.get("sources", []),
+                    "retrievalTools": delta.get("retrieval_tools", []),
+                }
+            except Exception as exc:
+                log.warning("mcp:getSkill failed to parse persona_builder_delta: %s", exc)
+
+        # --- Eval counts (line count ≈ example count for JSONL) -----------
+        def _line_count(text: str | None) -> int:
+            if not text:
+                return 0
+            return sum(1 for ln in text.splitlines() if ln.strip())
+
+        response: dict = {
+            "persona":       persona,
+            "skillName":     skill_name,
+            "status":        summary.get("status", "draft"),
+            "artifactCount": summary.get("artifact_count", 0),
+            "updatedAt":     summary.get("updated_at", ""),
+            "kbCard":        kb_card,
+            "evalCounts": {
+                "extraction": _line_count(eval_ext),
+                "workflow":   _line_count(eval_wf),
+            },
+        }
+
+        if includeArtifacts:
+            response["workflowYaml"] = workflow_yaml or ""
+
+        return response
+
+    return get_skill_handler
 
 
 # ---------------------------------------------------------------------------

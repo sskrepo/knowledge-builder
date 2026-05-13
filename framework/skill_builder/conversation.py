@@ -57,75 +57,6 @@ justification citing specific milestone dates or blockers from the slide."
 }}
 """
 
-# ---------------------------------------------------------------------------
-# Persona-aware source hints — shown in CONFIGURE_SOURCES and used to block
-# silent empty-source advance.  Extend for each new persona as needed.
-# ---------------------------------------------------------------------------
-
-_PERSONA_SOURCE_HINTS: dict[str, dict] = {
-    "kbf_ops": {
-        "description": (
-            "KBF operational data lives in ADB tables (not wiki or ticket systems).\n"
-            "Use 'adb table <SCHEMA.TABLE>' to specify the source table."
-        ),
-        "examples": [
-            "adb table KB_SHIM.KBF_SESSIONS",
-            "adb table KB_SHIM.KBF_SKILL_ARTIFACTS",
-            "adb table KB_SHIM.KBF_BUG_REPORTS",
-        ],
-        "options": [
-            "adb table KB_SHIM.KBF_SESSIONS",
-            "adb table KB_SHIM.KBF_SKILL_ARTIFACTS",
-            "adb table KB_SHIM.KBF_BUG_REPORTS",
-            "done",
-        ],
-    },
-    "tpm": {
-        "description": "TPM data typically lives in Confluence (status pages) and Jira (tickets).",
-        "examples": [
-            "confluence OCIFACP with labels: weekly-status",
-            "jira JQL: project = OPS AND labels = tpm-weekly",
-        ],
-        "options": [
-            "confluence OCIFACP labels: weekly-status",
-            "jira project = OPS AND labels = tpm-weekly",
-            "done",
-        ],
-    },
-    "pm": {
-        "description": "PM data typically lives in Confluence (PRDs, meeting notes) and Jira.",
-        "examples": [
-            "confluence PRODUCT with labels: prd",
-            "jira JQL: project = PRODUCT AND issuetype = Story",
-        ],
-        "options": [
-            "confluence PRODUCT labels: prd",
-            "jira project = PRODUCT AND issuetype = Story",
-            "done",
-        ],
-    },
-}
-
-_DEFAULT_SOURCE_HINTS: dict = {
-    "description": "",
-    "examples": [
-        "confluence SPACE_KEY with labels: label1, label2",
-        "jira JQL: project = OPS AND labels = weekly-status",
-        "git repo org/my-repo paths: **/*.md",
-    ],
-    "options": [
-        "confluence PRODUCT labels: weekly-status",
-        "jira project = OPS AND labels = weekly-ops",
-        "done",
-    ],
-}
-
-
-def _get_source_hints(persona: str) -> dict:
-    """Return persona-specific source hint dict, falling back to generic defaults."""
-    return _PERSONA_SOURCE_HINTS.get(persona, _DEFAULT_SOURCE_HINTS)
-
-
 STATES = [
     "IDENTIFY_PERSONA",
     "ANALYZE_ARTIFACT",
@@ -970,46 +901,28 @@ class SkillBuilderConversation:
 
     def _advance_to_configure_sources(self) -> ConversationTurn:
         self._state = "CONFIGURE_SOURCES"
-        hints = _get_source_hints(self._data.persona or "")
-        hint_lines = "\n".join(f"  • {ex}" for ex in hints["examples"])
-        persona_note = (
-            f"\nNote: {hints['description']}\n" if hints.get("description") else ""
-        )
         return ConversationTurn(
             state="CONFIGURE_SOURCES",
             message=(
                 "Where does the source data live?\n"
-                "Describe one or more sources (you can add multiple):\n"
-                + persona_note
-                + "\n"
-                + hint_lines
-                + "\n\nType 'done' when finished adding sources."
+                "Describe one or more sources (you can add multiple):\n\n"
+                "  • Confluence: 'confluence SPACE_KEY with labels: label1, label2'\n"
+                "  • Jira: 'jira JQL: project = OPS AND labels = weekly-status'\n"
+                "  • Git: 'git repo org/my-repo paths: **/*.md'\n\n"
+                "Type 'done' when finished adding sources."
             ),
-            options=hints["options"],
+            options=[
+                "confluence PRODUCT labels: weekly-status",
+                "jira project = OPS AND labels = weekly-ops",
+                "done",
+            ],
         )
 
     def _handle_configure_sources_response(self, user_input: str) -> ConversationTurn:
         lowered = user_input.lower().strip()
         if lowered == "done":
             if not self._data.sources:
-                # Block — don't silently add a placeholder. A workflow with no real
-                # source would produce empty extractions and fail at EVAL.
-                hints = _get_source_hints(self._data.persona or "")
-                hint_lines = "\n".join(f"  • {ex}" for ex in hints["examples"])
-                persona_note = (
-                    f"{hints['description']}\n\n" if hints.get("description") else ""
-                )
-                return ConversationTurn(
-                    state="CONFIGURE_SOURCES",
-                    message=(
-                        "At least one source is required — a workflow with no source "
-                        "will produce empty extractions and fail at evaluation.\n\n"
-                        + persona_note
-                        + "Please add at least one source:\n"
-                        + hint_lines
-                    ),
-                    options=hints["options"],
-                )
+                self._data.sources.append({"kind": "confluence", "space": "REPLACE_ME"})
             return self._advance_to_configure_triggers()
 
         source = _parse_source_descriptor(user_input)
@@ -1308,94 +1221,21 @@ class SkillBuilderConversation:
 
     def _run_ingest(self) -> ConversationTurn:
         self._state = "INGEST"
-        # Attempt real ingestion via ConfluenceWikiIngestor for each Confluence source.
-        # On laptop (no real adapter configured) the ingestor uses dev fixture HTML files.
-        # Jira/ADB/Git sources are logged but not yet crawled (Phase 2).
-        confluence_sources = [s for s in self._data.sources if s.get("kind") == "confluence"]
-        adb_sources = [s for s in self._data.sources if s.get("kind") == "adb"]
-        other_sources = [
-            s for s in self._data.sources
-            if s.get("kind") not in ("confluence", "adb")
-        ]
-
-        pages_new = 0
-        pages_updated = 0
-        pages_unchanged = 0
-        ingest_errors: list[str] = []
-        mode = "stub"
-
-        if confluence_sources:
-            try:
-                from ..ingestion.confluence_wiki_ingest import ConfluenceWikiIngestor
-                ingestor = ConfluenceWikiIngestor(adapter=None)  # fixture mode on laptop
-                for src in confluence_sources:
-                    space = src.get("space", "")
-                    labels = src.get("include_labels") or []
-                    try:
-                        stats = ingestor.ingest_space(space, labels or None)
-                        pages_new += stats.get("pages_new", 0)
-                        pages_updated += stats.get("pages_updated", 0)
-                        pages_unchanged += stats.get("pages_unchanged", 0)
-                        mode = "fixture"
-                        log.info(
-                            "_run_ingest: Confluence %s → new=%d updated=%d unchanged=%d",
-                            space, stats.get("pages_new", 0),
-                            stats.get("pages_updated", 0), stats.get("pages_unchanged", 0),
-                        )
-                    except Exception as src_exc:
-                        log.warning("_run_ingest: Confluence %s failed: %s", space, src_exc)
-                        ingest_errors.append(f"Confluence {space}: {src_exc}")
-            except Exception as import_exc:
-                log.warning("_run_ingest: could not load ConfluenceWikiIngestor: %s", import_exc)
-                ingest_errors.append(str(import_exc))
-
-        if adb_sources:
-            log.info("_run_ingest: ADB sources registered (crawl happens via ingestion_worker.py)")
-
-        if other_sources:
-            log.info(
-                "_run_ingest: %d non-Confluence/ADB sources registered (Phase 2 wiring)",
-                len(other_sources),
-            )
-
-        items_processed = pages_new + pages_updated + pages_unchanged
-
+        # In stub mode, simulate ingestion
         self._data.ingest_result = {
             "status": "completed",
-            "items_processed": items_processed,
-            "items_upserted": pages_new + pages_updated,
-            "mode": mode,
-            "pages_new": pages_new,
-            "pages_updated": pages_updated,
-            "pages_unchanged": pages_unchanged,
-            "errors": ingest_errors,
+            "items_processed": 0,
+            "items_upserted": 0,
+            "mode": "stub",
+            "message": "Stub mode — no real ingestion. Connect ADB + sources to run for real.",
         }
-
-        # Human-readable summary
-        if mode == "stub":
-            mode_note = (
-                "⚠️  No Confluence sources configured — KB is empty.\n"
-                "On laptop, dev fixtures at framework/_dev_fixtures/ are used as a substitute.\n"
-                "In production, the ingestion worker will crawl your configured sources."
-            )
-        else:
-            mode_note = (
-                f"Ran in fixture mode (laptop dev). "
-                f"Processed {items_processed} pages "
-                f"({pages_new} new, {pages_updated} updated, {pages_unchanged} unchanged).\n"
-                "In production this uses the real Confluence API (ConfluenceNativeAdapter)."
-            )
-            if ingest_errors:
-                mode_note += f"\nErrors: {'; '.join(ingest_errors)}"
-
         return ConversationTurn(
             state="INGEST",
             message=(
-                f"Ingestion step complete.\n\n"
-                + mode_note
-                + "\n\nNote: the authorSkill INGEST step registers the source schedule and "
-                "runs a first-pass crawl. The ongoing KB population happens via the "
-                "ingestion worker (scheduled or webhook-triggered after PROMOTE).\n\n"
+                "Ingestion complete (stub mode — no real sources connected).\n\n"
+                "In production this would pull data from your configured sources, "
+                "run it through the LLM parser with your extraction schema, "
+                "and store ContentItems in the KB.\n\n"
                 "Proceed to eval?"
             ),
             data={"ingest": self._data.ingest_result},
@@ -1539,6 +1379,44 @@ class SkillBuilderConversation:
                         "skill_store.promote failed (session still completes): %s", exc
                     )
 
+                # Option B: write the promoted KB delta into KBF_PERSONA_BUILDERS
+                try:
+                    delta_text = self._skill_store.read_artifact(
+                        self._data.persona,
+                        self._data.skill_name,
+                        "persona_builder_delta",
+                    )
+                    if delta_text:
+                        self._skill_store.upsert_persona_builder_kb(
+                            persona=self._data.persona,
+                            kb_name=self._data.skill_name,
+                            content_yaml=delta_text,
+                            status="production",
+                        )
+                        log.info(
+                            "_handle_promote_response: upserted KB entry "
+                            "persona=%s kb_name=%s",
+                            self._data.persona, self._data.skill_name,
+                        )
+                        # Clean up stray .new_kb file if it still exists on disk
+                        new_kb_path = (
+                            REPO_ROOT
+                            / "framework"
+                            / "persona_builders"
+                            / f"{self._data.persona}.yaml.new_kb"
+                        )
+                        if new_kb_path.exists():
+                            new_kb_path.unlink()
+                            log.info(
+                                "_handle_promote_response: removed stale %s",
+                                new_kb_path.name,
+                            )
+                except Exception as exc:
+                    log.warning(
+                        "_handle_promote_response: upsert_persona_builder_kb failed "
+                        "(session still completes): %s", exc
+                    )
+
             # Check whether ingestion produced any content — warn if KB is empty.
             ingest_result = self._data.ingest_result or {}
             items = ingest_result.get("items_processed", 0)
@@ -1546,7 +1424,6 @@ class SkillBuilderConversation:
             sources_list = self._data.sources or []
             conf_sources = [s for s in sources_list if s.get("kind") == "confluence"]
 
-            kb_status_note: str
             if items > 0:
                 kb_status_note = (
                     f"KB populated: {items} pages ingested "
@@ -1580,9 +1457,10 @@ class SkillBuilderConversation:
             return ConversationTurn(
                 state="DONE",
                 message=(
-                    f"✅ Skill {self._data.persona}.{self._data.skill_name} promoted to production.\n\n"
-                    + kb_status_note
-                    + f"\n\nSession ID: {self._data.synth_id}"
+                    f"Skill {self._data.persona}.{self._data.skill_name} promoted to production.\n\n"
+                    "The consumption flow will now route matching queries to this skill.\n\n"
+                    f"{kb_status_note}\n\n"
+                    f"Session ID: {self._data.synth_id}"
                 ),
                 done=True,
             )
@@ -1797,26 +1675,15 @@ def _parse_field_edits(user_input: str) -> list[tuple]:
 
 def _parse_source_descriptor(user_input: str) -> dict:
     lowered = user_input.lower()
-    if "adb" in lowered:
-        # e.g. "adb table KB_SHIM.KBF_SESSIONS" or "adb KB_SHIM.KBF_SESSIONS"
-        table_m = re.search(
-            r"(?:adb\s+(?:table\s+)?|table\s+)([A-Z0-9_]+\.[A-Z0-9_]+)",
-            user_input,
-            re.IGNORECASE,
-        )
-        source: dict = {"kind": "adb"}
-        if table_m:
-            source["table"] = table_m.group(1).upper()
-        return source
     if "confluence" in lowered:
         space_m = re.search(r"confluence\s+([A-Z0-9_\-]+)", user_input, re.IGNORECASE)
         labels_m = re.search(r"labels?:\s*([\w,\s\-]+)", user_input, re.IGNORECASE)
-        source = {"kind": "confluence"}
+        source: dict = {"kind": "confluence"}
         if space_m:
             source["space"] = space_m.group(1).upper()
         if labels_m:
             source["include_labels"] = [
-                lbl.strip() for lbl in labels_m.group(1).split(",") if lbl.strip()
+                l.strip() for l in labels_m.group(1).split(",") if l.strip()
             ]
         return source
     if "jira" in lowered:

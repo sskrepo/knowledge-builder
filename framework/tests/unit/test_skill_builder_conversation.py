@@ -200,6 +200,7 @@ class TestConstructorDefault:
 class TestHandlePromoteResponse:
     def test_promote_yes_calls_skill_store_promote(self):
         mock_store = MagicMock()
+        mock_store.read_artifact.return_value = None  # no delta
         conv = SkillBuilderConversation(persona="tpm", skill_store=mock_store)
         conv._data.persona = "tpm"
         conv._data.skill_name = "weekly_report"
@@ -240,42 +241,76 @@ class TestHandlePromoteResponse:
         turn = conv._handle_promote_response("yes, promote")
         assert turn.done is True
 
-    def test_promote_with_empty_kb_shows_warning(self):
-        """Promoting with no ingested items must include a warning in the DONE message."""
-        conv = SkillBuilderConversation(persona="tpm", skill_store=None)
+    def test_promote_calls_upsert_persona_builder_kb_when_delta_exists(self, tmp_path):
+        """Option B: PROMOTE must write the delta to KBF_PERSONA_BUILDERS."""
+        delta_yaml = "name: weekly_report\nkind: vector\n"
+        mock_store = MagicMock()
+        mock_store.read_artifact.return_value = delta_yaml
+
+        conv = SkillBuilderConversation(persona="tpm", skill_store=mock_store)
         conv._data.persona = "tpm"
         conv._data.skill_name = "weekly_report"
-        conv._data.synth_id = "synth-warn"
-        conv._data.sources = [{"kind": "confluence", "space": "OCIFACP"}]
-        conv._data.ingest_result = {
-            "status": "completed", "items_processed": 0, "items_upserted": 0,
-            "mode": "stub", "pages_new": 0, "pages_updated": 0, "pages_unchanged": 0,
-        }
+        conv._data.synth_id = "synth-x"
+
+        turn = conv._handle_promote_response("yes, promote")
+
+        assert turn.done is True
+        mock_store.read_artifact.assert_called_once_with(
+            "tpm", "weekly_report", "persona_builder_delta"
+        )
+        mock_store.upsert_persona_builder_kb.assert_called_once_with(
+            persona="tpm",
+            kb_name="weekly_report",
+            content_yaml=delta_yaml,
+            status="production",
+        )
+
+    def test_promote_skips_upsert_when_no_delta(self, tmp_path):
+        """PROMOTE with no persona_builder_delta must not call upsert."""
+        mock_store = MagicMock()
+        mock_store.read_artifact.return_value = None  # no delta stored
+
+        conv = SkillBuilderConversation(persona="tpm", skill_store=mock_store)
+        conv._data.persona = "tpm"
+        conv._data.skill_name = "weekly_report"
+        conv._data.synth_id = "synth-x"
+
+        conv._handle_promote_response("yes, promote")
+        mock_store.upsert_persona_builder_kb.assert_not_called()
+
+    def test_promote_removes_stray_new_kb_file(self, tmp_path):
+        """PROMOTE must delete the stale .new_kb file if it exists on disk."""
+        new_kb_path = tmp_path / "framework" / "persona_builders" / "tpm.yaml.new_kb"
+        new_kb_path.parent.mkdir(parents=True, exist_ok=True)
+        new_kb_path.write_text("name: weekly_report\n")
+
+        delta_yaml = "name: weekly_report\nkind: vector\n"
+        mock_store = MagicMock()
+        mock_store.read_artifact.return_value = delta_yaml
+
+        conv = SkillBuilderConversation(persona="tpm", skill_store=mock_store)
+        conv._data.persona = "tpm"
+        conv._data.skill_name = "weekly_report"
+        conv._data.synth_id = "synth-x"
+
+        with patch("framework.skill_builder.conversation.REPO_ROOT", tmp_path):
+            conv._handle_promote_response("yes, promote")
+
+        assert not new_kb_path.exists(), ".new_kb file must be removed after PROMOTE"
+
+    def test_promote_upsert_failure_does_not_crash(self):
+        """upsert_persona_builder_kb failure must not propagate (session still completes)."""
+        mock_store = MagicMock()
+        mock_store.read_artifact.return_value = "name: weekly_report\n"
+        mock_store.upsert_persona_builder_kb.side_effect = RuntimeError("ADB down")
+
+        conv = SkillBuilderConversation(persona="tpm", skill_store=mock_store)
+        conv._data.persona = "tpm"
+        conv._data.skill_name = "weekly_report"
+        conv._data.synth_id = "synth-x"
 
         turn = conv._handle_promote_response("yes, promote")
         assert turn.done is True
-        # Should mention that KB is empty and how to populate it
-        assert "empty" in turn.message.lower() or "no content" in turn.message.lower() or "⚠" in turn.message, (
-            "Promote DONE message must warn about empty KB"
-        )
-
-    def test_promote_with_ingested_items_no_warning(self):
-        """Promoting with items ingested must NOT show the empty-KB warning."""
-        conv = SkillBuilderConversation(persona="tpm", skill_store=None)
-        conv._data.persona = "tpm"
-        conv._data.skill_name = "weekly_report"
-        conv._data.synth_id = "synth-ok"
-        conv._data.sources = [{"kind": "confluence", "space": "OCIFACP"}]
-        conv._data.ingest_result = {
-            "status": "completed", "items_processed": 5, "items_upserted": 5,
-            "mode": "fixture", "pages_new": 5, "pages_updated": 0, "pages_unchanged": 0,
-        }
-
-        turn = conv._handle_promote_response("yes, promote")
-        assert turn.done is True
-        assert "KB populated" in turn.message, (
-            "Promote DONE message must confirm KB is populated when items > 0"
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -934,124 +969,3 @@ class TestSlugify:
         slug = _slugify(intent)
         import re as _re
         assert _re.fullmatch(r"[a-z0-9_]+", slug), f"invalid chars in slug: {slug!r}"
-
-
-# ---------------------------------------------------------------------------
-# TestConfigureSources — persona-aware hints + no-source block
-# ---------------------------------------------------------------------------
-
-
-class TestConfigureSources:
-    """Verify CONFIGURE_SOURCES persona-aware hints and the empty-source guard."""
-
-    def _make_conv(self, persona: str = "tpm") -> SkillBuilderConversation:
-        conv = SkillBuilderConversation(persona=persona, skill_store=None)
-        conv._data.persona = persona
-        conv._state = "CONFIGURE_SOURCES"
-        return conv
-
-    # ------------------------------------------------------------------
-    # Persona-aware prompts
-    # ------------------------------------------------------------------
-
-    def test_kbf_ops_advance_shows_adb_options(self):
-        """CONFIGURE_SOURCES prompt for kbf_ops must offer ADB table options."""
-        conv = self._make_conv("kbf_ops")
-        turn = conv._advance_to_configure_sources()
-        assert "adb" in turn.message.lower(), (
-            "kbf_ops configure-sources must mention ADB sources"
-        )
-        assert any("adb" in opt.lower() for opt in turn.options), (
-            "kbf_ops configure-sources options must include at least one ADB option"
-        )
-        assert "confluence" not in turn.message.lower(), (
-            "kbf_ops configure-sources should not suggest Confluence (wrong source type)"
-        )
-
-    def test_tpm_advance_shows_confluence_jira_options(self):
-        """CONFIGURE_SOURCES prompt for tpm must offer Confluence + Jira options."""
-        conv = self._make_conv("tpm")
-        turn = conv._advance_to_configure_sources()
-        assert "confluence" in turn.message.lower()
-        assert any("confluence" in opt.lower() for opt in turn.options)
-
-    def test_unknown_persona_falls_back_to_generic_hints(self):
-        """Unknown persona should use generic hints, not crash."""
-        conv = self._make_conv("new_persona_xyz")
-        turn = conv._advance_to_configure_sources()
-        assert turn.state == "CONFIGURE_SOURCES"
-        assert "done" in [opt.lower() for opt in turn.options]
-
-    # ------------------------------------------------------------------
-    # No-source guard — done with empty list must block
-    # ------------------------------------------------------------------
-
-    def test_done_with_no_sources_blocks(self):
-        """Typing 'done' with no sources must return CONFIGURE_SOURCES, not advance."""
-        conv = self._make_conv("tpm")
-        assert conv._data.sources == [], "sources must start empty"
-        turn = conv._handle_configure_sources_response("done")
-        assert turn.state == "CONFIGURE_SOURCES", (
-            "'done' with no sources must stay in CONFIGURE_SOURCES"
-        )
-
-    def test_done_with_no_sources_shows_persona_hints(self):
-        """Block message for kbf_ops must mention ADB, not Confluence."""
-        conv = self._make_conv("kbf_ops")
-        turn = conv._handle_configure_sources_response("done")
-        assert "adb" in turn.message.lower(), (
-            "Block message for kbf_ops must suggest ADB sources"
-        )
-        assert "confluence" not in turn.message.lower(), (
-            "Block message for kbf_ops must NOT suggest Confluence"
-        )
-
-    def test_done_with_no_sources_does_not_add_placeholder(self):
-        """Blocking done must NOT silently inject the REPLACE_ME placeholder."""
-        conv = self._make_conv("tpm")
-        conv._handle_configure_sources_response("done")
-        assert conv._data.sources == [], (
-            "sources must stay empty — REPLACE_ME placeholder must not be injected"
-        )
-
-    def test_done_with_sources_advances_to_configure_triggers(self):
-        """Once a source is added, 'done' must advance to CONFIGURE_TRIGGERS."""
-        conv = self._make_conv("tpm")
-        conv._handle_configure_sources_response("confluence OCIFACP labels: weekly-status")
-        turn = conv._handle_configure_sources_response("done")
-        assert turn.state == "CONFIGURE_TRIGGERS", (
-            "'done' with at least one source must advance to CONFIGURE_TRIGGERS"
-        )
-
-    # ------------------------------------------------------------------
-    # ADB source parsing
-    # ------------------------------------------------------------------
-
-    def test_parse_adb_table_with_schema(self):
-        """'adb table KB_SHIM.KBF_SESSIONS' must parse to kind=adb, table=..."""
-        from framework.skill_builder.conversation import _parse_source_descriptor
-        src = _parse_source_descriptor("adb table KB_SHIM.KBF_SESSIONS")
-        assert src["kind"] == "adb"
-        assert src["table"] == "KB_SHIM.KBF_SESSIONS"
-
-    def test_parse_adb_without_table_keyword(self):
-        """'adb KB_SHIM.KBF_BUG_REPORTS' must also parse correctly."""
-        from framework.skill_builder.conversation import _parse_source_descriptor
-        src = _parse_source_descriptor("adb KB_SHIM.KBF_BUG_REPORTS")
-        assert src["kind"] == "adb"
-        assert src["table"] == "KB_SHIM.KBF_BUG_REPORTS"
-
-    def test_adb_source_added_correctly(self):
-        """Full flow: adding an ADB source should store the parsed dict."""
-        conv = self._make_conv("kbf_ops")
-        conv._handle_configure_sources_response("adb table KB_SHIM.KBF_SESSIONS")
-        assert len(conv._data.sources) == 1
-        assert conv._data.sources[0]["kind"] == "adb"
-        assert conv._data.sources[0]["table"] == "KB_SHIM.KBF_SESSIONS"
-
-    def test_kbf_ops_full_source_then_done_advances(self):
-        """kbf_ops: add one ADB source, then 'done' advances to CONFIGURE_TRIGGERS."""
-        conv = self._make_conv("kbf_ops")
-        conv._handle_configure_sources_response("adb table KB_SHIM.KBF_BUG_REPORTS")
-        turn = conv._handle_configure_sources_response("done")
-        assert turn.state == "CONFIGURE_TRIGGERS"

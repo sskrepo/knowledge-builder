@@ -12,6 +12,9 @@ Layout under REPO_ROOT:
   eval/gold_sets/{persona}-{skill_name}-workflow.jsonl             (eval_workflow)
   framework/parsers/schemas/{persona}/{skill_name}/v1.json         (extraction_schema)
 
+Persona builder KB store layout (Option B, migration 008):
+  ~/.kbf/persona_builders/{persona}/{kb_name}.yaml                 (upsert_persona_builder_kb)
+
 read_artifact loads the file back from disk.
 promote is a no-op in filestore mode (no status column).
 list_skills scans REPO_ROOT for workflow_skills/*.yaml.
@@ -20,11 +23,14 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
 
 from ._base import ARTIFACT_TYPES, SkillStore, make_artifact_id
+
+_PB_STORE_ROOT = Path.home() / ".kbf" / "persona_builders"
 
 log = logging.getLogger(__name__)
 
@@ -131,7 +137,6 @@ class FilestoreSkillStore(SkillStore):
                 )
                 try:
                     mtime = skill_file.stat().st_mtime
-                    from datetime import datetime, timezone
                     updated = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
                 except OSError:
                     updated = ""
@@ -163,3 +168,66 @@ class FilestoreSkillStore(SkillStore):
                         "FilestoreSkillStore.delete: could not remove %s: %s", full, exc
                     )
         return deleted_types
+
+    def upsert_persona_builder_kb(
+        self,
+        persona: str,
+        kb_name: str,
+        content_yaml: str,
+        status: str = "draft",
+    ) -> None:
+        """Write KB entry to ~/.kbf/persona_builders/{persona}/{kb_name}.yaml."""
+        dest_dir = _PB_STORE_ROOT / persona
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"{kb_name}.yaml"
+        # Wrap with status metadata so list_persona_builder_kbs can reconstruct it
+        wrapper = {
+            "persona":      persona,
+            "kb_name":      kb_name,
+            "status":       status,
+            "updated_at":   datetime.now(tz=timezone.utc).isoformat(),
+            "content_yaml": content_yaml,
+        }
+        dest.write_text(yaml.safe_dump(wrapper, allow_unicode=True), encoding="utf-8")
+        log.info(
+            "FilestoreSkillStore.upsert_persona_builder_kb: wrote %s", dest
+        )
+
+    def list_persona_builder_kbs(
+        self,
+        persona: str | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
+        """Read KB entries from ~/.kbf/persona_builders/."""
+        results: list[dict] = []
+
+        if persona:
+            search_dirs = [_PB_STORE_ROOT / persona]
+        else:
+            if not _PB_STORE_ROOT.exists():
+                return results
+            search_dirs = [d for d in _PB_STORE_ROOT.iterdir() if d.is_dir()]
+
+        for persona_dir in search_dirs:
+            if not persona_dir.is_dir():
+                continue
+            for kb_file in sorted(persona_dir.glob("*.yaml")):
+                try:
+                    wrapper = yaml.safe_load(kb_file.read_text(encoding="utf-8")) or {}
+                except Exception as exc:
+                    log.warning(
+                        "FilestoreSkillStore.list_persona_builder_kbs: "
+                        "could not read %s: %s", kb_file, exc
+                    )
+                    continue
+                entry_status = wrapper.get("status", "draft")
+                if status is not None and entry_status != status:
+                    continue
+                results.append({
+                    "persona":      wrapper.get("persona", persona_dir.name),
+                    "kb_name":      wrapper.get("kb_name", kb_file.stem),
+                    "content_yaml": wrapper.get("content_yaml", ""),
+                    "status":       entry_status,
+                    "updated_at":   wrapper.get("updated_at", ""),
+                })
+        return results
