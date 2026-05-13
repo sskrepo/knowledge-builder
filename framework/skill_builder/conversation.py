@@ -1356,6 +1356,7 @@ class SkillBuilderConversation:
         confluence_adapter = _build_confluence_adapter(kbf_env, REPO_ROOT)
         mode = "live" if confluence_adapter is not None else "fixture"
         ingestor = ConfluenceWikiIngestor(adapter=confluence_adapter)
+        # mode may be overridden to "fixture-fallback" inside the loop if live adapter fails
 
         total_new = 0
         total_updated = 0
@@ -1379,7 +1380,22 @@ class SkillBuilderConversation:
                     total_updated += stats["pages_updated"]
                     total_unchanged += stats["pages_unchanged"]
                 except Exception as exc:
-                    log.error("_run_ingest: Confluence %s failed: %s", space, exc)
+                    log.error("_run_ingest: Confluence %s failed: %s — retrying with fixture fallback", space, exc)
+                    # Live adapter failed (e.g. codex proxy timeout). Fall back to fixture
+                    # mode so the skill session still gets seed content on laptop.
+                    try:
+                        fixture_ingestor = ConfluenceWikiIngestor(adapter=None)
+                        stats = fixture_ingestor.ingest_space(space, labels or None)
+                        log.info(
+                            "_run_ingest: fixture fallback Confluence %s new=%d updated=%d unchanged=%d",
+                            space, stats["pages_new"], stats["pages_updated"], stats["pages_unchanged"],
+                        )
+                        total_new += stats["pages_new"]
+                        total_updated += stats["pages_updated"]
+                        total_unchanged += stats["pages_unchanged"]
+                        mode = "fixture-fallback"
+                    except Exception as fix_exc:
+                        log.error("_run_ingest: fixture fallback also failed for %s: %s", space, fix_exc)
             elif kind == "adb":
                 log.info("_run_ingest: source kind=adb table=%s — query-time retrieval, no ingest needed",
                          src.get("table", "?"))
