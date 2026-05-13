@@ -229,11 +229,19 @@ export KBF_ENV=laptop
 export KBF_ADB_ADMIN_PASSWORD
 export WALLET_PASSWORD
 
+# ── Build version banner ─────────────────────────────────────
+KBF_GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+KBF_GIT_DIRTY=$(git status --porcelain 2>/dev/null | head -1)
+KBF_GIT_SUBJECT=$(git log -1 --format="%s" 2>/dev/null || echo "")
+KBF_GIT_DATE=$(git log -1 --format="%cs" 2>/dev/null || echo "")
+[[ -n "$KBF_GIT_DIRTY" ]] && KBF_GIT_SHA="${KBF_GIT_SHA}-dirty"
+
 # Print the interaction cheatsheet before handing off to uvicorn
 cat << CHEATSHEET
 ${CYN}${BLD}─────────────────────────────────────────────────────────${NC}
   KBF MCP server starting on http://localhost:${PORT}
   Bearer token: dev-only-token-replace-me
+  Build: ${BLD}${KBF_GIT_SHA}${NC} — ${KBF_GIT_SUBJECT} (${KBF_GIT_DATE})
 ${CYN}─────────────────────────────────────────────────────────${NC}
 
   Health check:

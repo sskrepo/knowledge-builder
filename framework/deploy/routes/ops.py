@@ -18,7 +18,6 @@ All responses use to_camel_response() per the camelCase external-API rule.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Annotated, Optional
@@ -27,8 +26,13 @@ from fastapi import APIRouter, Query, Request
 
 from ..auth.middleware import get_consumer, require_scope
 from ..serialization import to_camel_response
+from ...version import API_VERSION, GIT_SHA, BUILD_REF, SCHEMA_VERSION
 
 log = logging.getLogger(__name__)
+
+# Emit the build ref once at import time so it appears in the server startup log
+# alongside uvicorn's "Application startup complete" message.
+log.info("KBF build: %s", BUILD_REF)
 
 # Wall-clock start time — used for uptimeSeconds computation.
 _PROCESS_START = time.monotonic()
@@ -103,7 +107,9 @@ async def healthz(request: Request):
         "status": status,
         "checks": checks,
         "uptime_seconds": uptime_seconds,
-        "version": "1.0.0",
+        "version": SCHEMA_VERSION,
+        "git_sha": GIT_SHA,
+        "build_ref": BUILD_REF,
     }
     http_status = 503 if any_error else 200
     return to_camel_response(payload, status_code=http_status)
@@ -117,11 +123,11 @@ async def healthz(request: Request):
 @router.get("/api/v1/version", tags=["Operations"])
 async def get_version():
     """Return API/schema/build version — no auth required."""
-    build_sha = os.environ.get("KBF_BUILD_SHA", "unknown")
     payload = {
-        "api_version": "v1",
-        "schema_version": "1.0.0",
-        "build_sha": build_sha,
+        "api_version": API_VERSION,
+        "schema_version": SCHEMA_VERSION,
+        "git_sha": GIT_SHA,
+        "build_ref": BUILD_REF,
     }
     return to_camel_response(payload)
 

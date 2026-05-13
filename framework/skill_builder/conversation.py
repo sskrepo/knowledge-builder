@@ -1077,6 +1077,27 @@ class SkillBuilderConversation:
         # KB that was authored in this session but not yet promoted to disk.
         # (BUG-queue-6c173 — fixes validate step for new-KB skills.)
         merged_pb_dir_str = str(pb_dir)
+
+        def _make_merged_pb_dir(delta_entry: dict) -> str:
+            """Wrap a raw KB entry dict in a full persona-builder YAML, copy
+            existing *.yaml builders alongside it, and return the temp dir path."""
+            synthetic_pb = {
+                "persona": self._data.persona,
+                "knowledge_bases": [delta_entry],
+            }
+            tmp = tempfile.mkdtemp(prefix="kbf_validate_pb_")
+            if pb_dir.exists():
+                for fs_yaml in pb_dir.glob("*.yaml"):
+                    shutil.copy2(str(fs_yaml), tmp)
+            synth_path = os.path.join(tmp, f"insession_{self._data.persona}.yaml")
+            with open(synth_path, "w", encoding="utf-8") as fp:
+                yaml.safe_dump(synthetic_pb, fp, sort_keys=False, allow_unicode=True)
+            return tmp
+
+        # Path 1 — ADB skill_store: read persona_builder_delta artifact.
+        # Without this, the validator fails with "unknown KB" for any KB that
+        # was authored in this session but not yet promoted to disk.
+        # (BUG-queue-6c173 — fixes validate step for new-KB skills.)
         if self._skill_store is not None:
             try:
                 delta_content = self._skill_store.read_artifact(
@@ -1086,37 +1107,42 @@ class SkillBuilderConversation:
                 )
                 if delta_content is not None:
                     delta_entry = yaml.safe_load(delta_content) or {}
-                    # Wrap the single KB-entry dict in a full persona-builder YAML
-                    # so _build_kb_index() can parse it.
-                    synthetic_pb = {
-                        "persona": self._data.persona,
-                        "knowledge_bases": [delta_entry],
-                    }
-                    _tmp_pb_dir = tempfile.mkdtemp(prefix="kbf_validate_pb_")
-                    # Copy existing filesystem persona builders
-                    if pb_dir.exists():
-                        for fs_yaml in pb_dir.glob("*.yaml"):
-                            shutil.copy2(str(fs_yaml), _tmp_pb_dir)
-                    # Write the synthetic builder for the newly authored KB
-                    synth_pb_path = os.path.join(
-                        _tmp_pb_dir,
-                        f"insession_{self._data.persona}.yaml",
-                    )
-                    with open(synth_pb_path, "w", encoding="utf-8") as fp:
-                        yaml.safe_dump(
-                            synthetic_pb, fp, sort_keys=False, allow_unicode=True
-                        )
+                    _tmp_pb_dir = _make_merged_pb_dir(delta_entry)
                     merged_pb_dir_str = _tmp_pb_dir
                     log.debug(
-                        "_run_validate: augmented pb_dir with in-session delta → %s",
-                        synth_pb_path,
+                        "_run_validate: augmented pb_dir with ADB delta → %s",
+                        _tmp_pb_dir,
                     )
             except Exception as exc:
                 log.warning(
-                    "_run_validate: could not load persona_builder_delta (%s) — "
-                    "validation will use filesystem persona builders only",
+                    "_run_validate: could not load persona_builder_delta from ADB (%s) — "
+                    "falling through to filesystem .new_kb check",
                     exc,
                 )
+
+        # Path 2 — Filesystem fallback: read {persona}.yaml.new_kb from disk.
+        # *.yaml.new_kb files are raw KB entry dicts (not full persona builders),
+        # so they must be wrapped before being passed to _build_kb_index().
+        # (BUG-queue-51dd3 / 3d13e / 1b0c0 / 30b34 — belt-and-suspenders fix
+        # for when skill_store is unavailable or returned no delta.)
+        if _tmp_pb_dir is None:
+            new_kb_path = pb_dir / f"{self._data.persona}.yaml.new_kb"
+            if new_kb_path.exists():
+                try:
+                    delta_entry = yaml.safe_load(new_kb_path.read_text()) or {}
+                    if isinstance(delta_entry, dict) and delta_entry.get("name"):
+                        _tmp_pb_dir = _make_merged_pb_dir(delta_entry)
+                        merged_pb_dir_str = _tmp_pb_dir
+                        log.debug(
+                            "_run_validate: augmented pb_dir with filesystem .new_kb → %s",
+                            _tmp_pb_dir,
+                        )
+                except Exception as exc:
+                    log.warning(
+                        "_run_validate: could not load .new_kb from filesystem (%s) — "
+                        "validation will use base persona builders only",
+                        exc,
+                    )
 
         try:
             errors = validate_workflow_links(wf_path_str, merged_pb_dir_str)

@@ -118,6 +118,13 @@ def _build_kb_index(builders_dir: Path) -> dict[str, dict]:
             log.warning("failed to load %s: %s", yaml_path, e)
             continue
 
+        # *.yaml.new_kb files are raw KB entry dicts written by COMMIT
+        # (not full persona builders).  Wrap them so the index can parse them.
+        # e.g. "tpm.yaml.new_kb" → persona="tpm", knowledge_bases=[<entry>]
+        if yaml_path.name.endswith(".yaml.new_kb") and "name" in cfg and "persona" not in cfg:
+            persona_name = yaml_path.name.split(".")[0]
+            cfg = {"persona": persona_name, "knowledge_bases": [cfg]}
+
         persona = cfg.get("persona")
         if not persona:
             continue
