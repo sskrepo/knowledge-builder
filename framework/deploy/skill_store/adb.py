@@ -7,13 +7,15 @@ Column mapping:
   synth_id        — authoring session ID
   persona         — persona slug
   skill_name      — skill slug
-  artifact_type   — one of the 4 types defined in _base.py
+  artifact_type   — one of the 5 types defined in _base.py
   rel_path        — relative filesystem path (for kb-cli export-skills)
   content         — CLOB with full artifact text
   status          — 'draft' | 'promoted' | 'archived'
   created_at / updated_at — TIMESTAMP
 
-When pool=None (stub mode), all operations are safe no-ops.
+CONTRACT: pool is REQUIRED. ADB is the source of truth — if ADB is unavailable
+the app fails to start. There is no "stub mode" / no-op fallback. Constructing
+this class with pool=None raises ValueError.
 """
 from __future__ import annotations
 
@@ -156,11 +158,20 @@ def _rel_path(persona: str, skill_name: str, artifact_type: str) -> str:
 class AdbSkillStore(SkillStore):
     """Oracle ADB-backed skill artifact store.
 
-    pool: oracledb connection pool (synchronous). When None, all operations are
-    no-ops — stub mode for dev/testing without a live ADB connection.
+    pool: oracledb connection pool (synchronous). REQUIRED — passing None raises
+    ValueError. ADB is the source of truth; there is no stub-mode / filesystem
+    fallback in production. If ADB is unavailable the app must fail to start,
+    not silently degrade.
     """
 
     def __init__(self, pool) -> None:
+        if pool is None:
+            raise ValueError(
+                "AdbSkillStore: pool is required. ADB is the source of truth — "
+                "there is no stub-mode / no-op fallback. If ADB is unavailable, "
+                "the app must not start. (Previously, pool=None silently dropped "
+                "writes, hiding the synth-tpm-14a54555-class of data-loss bug.)"
+            )
         self._pool = pool
 
     @staticmethod
@@ -196,12 +207,6 @@ class AdbSkillStore(SkillStore):
             and refuse to advance the session past PREVIEW state. Never report
             "committed" to the user unless this method returns successfully.
         """
-        if self._pool is None:
-            log.warning(
-                "AdbSkillStore: no pool — write_artifacts is a no-op (stub mode)"
-            )
-            return
-
         # Fail fast on bad input — retrying won't fix this.
         for artifact_type, content in artifacts.items():
             if artifact_type not in ARTIFACT_TYPES:
@@ -282,9 +287,6 @@ class AdbSkillStore(SkillStore):
         skill_name: str,
         artifact_type: str,
     ) -> str | None:
-        if self._pool is None:
-            return None
-
         art_id = make_artifact_id(persona, skill_name, artifact_type)
 
         with self._pool.acquire() as conn:
@@ -304,10 +306,13 @@ class AdbSkillStore(SkillStore):
         return raw
 
     def promote(self, persona: str, skill_name: str) -> None:
-        if self._pool is None:
-            log.warning("AdbSkillStore: no pool — promote is a no-op (stub mode)")
-            return
+        """Promote all draft artifacts for (persona, skill_name) to 'promoted'.
 
+        Raises ValueError if no rows match — promoting a non-existent skill
+        is almost always a bug (e.g. silent commit failure earlier in the
+        session). Previously this was a silent UPDATE no-op which let
+        session synth-tpm-14a54555 reach DONE with nothing in ADB.
+        """
         now = self._now()
         with self._pool.acquire() as conn:
             with conn.cursor() as cur:
@@ -316,16 +321,25 @@ class AdbSkillStore(SkillStore):
                     "persona":    persona,
                     "skill_name": skill_name,
                 })
+                rowcount = cur.rowcount
             conn.commit()
 
+        if rowcount == 0:
+            raise ValueError(
+                f"AdbSkillStore.promote: 0 rows updated for "
+                f"persona={persona!r} skill_name={skill_name!r}. "
+                f"The skill is not in KBF_SKILL_ARTIFACTS — promotion cannot "
+                f"silently no-op. Check that COMMIT actually wrote to ADB; if "
+                f"the upstream session reported 'Committed N' without writing, "
+                f"that is the real bug."
+            )
+
         log.info(
-            "AdbSkillStore.promote: persona=%s skill=%s", persona, skill_name
+            "AdbSkillStore.promote: persona=%s skill=%s rows_updated=%d",
+            persona, skill_name, rowcount,
         )
 
     def list_skills(self, persona: str | None = None) -> list[dict]:
-        if self._pool is None:
-            return []
-
         sql = _SQL_LIST_PERSONA if persona else _SQL_LIST_ALL
         params = {"persona": persona} if persona else {}
 
@@ -347,9 +361,6 @@ class AdbSkillStore(SkillStore):
         return results
 
     def delete(self, persona: str, skill_name: str) -> list[str]:
-        if self._pool is None:
-            log.warning("AdbSkillStore: no pool — delete is a no-op (stub mode)")
-            return []
 
         params = {"persona": persona, "skill_name": skill_name}
 
@@ -372,11 +383,6 @@ class AdbSkillStore(SkillStore):
         return deleted_types
 
     def delete_persona_builder_kb(self, persona: str, kb_name: str) -> bool:
-        if self._pool is None:
-            log.warning(
-                "AdbSkillStore: no pool — delete_persona_builder_kb is a no-op (stub mode)"
-            )
-            return False
         with self._pool.acquire() as conn:
             with conn.cursor() as cur:
                 cur.execute(_SQL_DELETE_PB, {"persona": persona, "kb_name": kb_name})
@@ -395,12 +401,6 @@ class AdbSkillStore(SkillStore):
         content_yaml: str,
         status: str = "draft",
     ) -> None:
-        if self._pool is None:
-            log.warning(
-                "AdbSkillStore: no pool — upsert_persona_builder_kb is a no-op (stub mode)"
-            )
-            return
-
         now = self._now()
         params = {
             "persona":      persona,
@@ -426,9 +426,6 @@ class AdbSkillStore(SkillStore):
         persona: str | None = None,
         status: str | None = None,
     ) -> list[dict]:
-        if self._pool is None:
-            return []
-
         if persona and status:
             sql = _SQL_LIST_PB_PERSONA_STATUS
             params: dict = {"persona": persona, "status": status}

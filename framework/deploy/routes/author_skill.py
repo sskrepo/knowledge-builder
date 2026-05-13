@@ -186,10 +186,10 @@ def _start_or_continue_session(
     user_id: str,
     synth_id: str | None,
     user_input: str | None,
+    skill_store,
     persona: str = "",
     intent_description: str = "",
     artifact_store=None,
-    skill_store=None,
 ) -> dict:
     """Start a new authoring session or advance an existing one.
 
@@ -214,6 +214,16 @@ def _start_or_continue_session(
         artifacts_preview, progress, done, status, last_turn.
     """
     from ...skill_builder.conversation import SkillBuilderConversation  # relative import
+
+    if skill_store is None:
+        # Loud guard at the choke-point: every entry point (REST route and MCP
+        # tool handler) MUST pass app.state.skill_store. Forgetting it was the
+        # silent root cause of synth-tpm-14a54555.
+        raise RuntimeError(
+            "_start_or_continue_session: skill_store is required. "
+            "Caller must pass app.state.skill_store. ADB is the source of "
+            "truth — there is no filesystem-only / stub mode."
+        )
 
     if synth_id:
         # Resume existing session

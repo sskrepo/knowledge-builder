@@ -31,7 +31,14 @@ from framework.skill_builder.conversation import SkillBuilderConversation
 
 
 def _make_conversation(tmp_path, skill_store=None, persona="tpm", skill_name="weekly_report") -> SkillBuilderConversation:
-    """Build a SkillBuilderConversation with pre-seeded synthesized_artifacts."""
+    """Build a SkillBuilderConversation with pre-seeded synthesized_artifacts.
+
+    skill_store is REQUIRED by the conversation constructor (ADB is the source
+    of truth in production). Tests that pass skill_store=None here will now get
+    a MagicMock — the previous "stub mode" path is gone.
+    """
+    if skill_store is None:
+        skill_store = MagicMock()
     conv = SkillBuilderConversation(
         persona=persona,
         user_id="user-test",
@@ -61,41 +68,34 @@ def _make_conversation(tmp_path, skill_store=None, persona="tpm", skill_name="we
 
 
 # ---------------------------------------------------------------------------
-# _write_artifacts — skill_store=None (no regression)
+# skill_store is REQUIRED — the conversation refuses to construct without it.
+# ADB is the source of truth (no filesystem-only / stub mode). Forgetting to
+# wire skill_store was the silent root cause of synth-tpm-14a54555.
 # ---------------------------------------------------------------------------
 
 
-class TestWriteArtifactsNoSkillStore:
-    def test_writes_files_to_filesystem(self, tmp_path):
-        conv = _make_conversation(tmp_path, skill_store=None)
+class TestSkillStoreRequired:
+    def test_constructor_raises_when_skill_store_is_none(self):
+        with pytest.raises(ValueError, match="skill_store is required"):
+            SkillBuilderConversation(persona="tpm", skill_store=None)
 
-        with patch(
-            "framework.skill_builder.conversation.REPO_ROOT",
-            tmp_path,
-        ):
-            committed = conv._write_artifacts()
+    def test_constructor_raises_when_skill_store_omitted(self):
+        # Default value is None — same fail as explicit None.
+        with pytest.raises(ValueError, match="skill_store is required"):
+            SkillBuilderConversation(persona="tpm")  # noqa: skill_store missing on purpose
 
-        assert len(committed) == 4
-        # Verify at least the workflow_skill file exists
-        wf_path = tmp_path / "framework" / "workflow_skills" / "tpm" / "weekly_report.yaml"
-        assert wf_path.exists()
+    def test_from_dict_raises_when_skill_store_is_none(self):
+        # Build a valid dict via to_dict() on a properly-constructed conv.
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        d = conv.to_dict()
+        with pytest.raises(ValueError, match="skill_store is required"):
+            SkillBuilderConversation.from_dict(d, skill_store=None)
 
-    def test_returns_list_of_rel_paths(self, tmp_path):
-        conv = _make_conversation(tmp_path, skill_store=None)
-        with patch("framework.skill_builder.conversation.REPO_ROOT", tmp_path):
-            committed = conv._write_artifacts()
-        assert all(isinstance(p, str) for p in committed)
-        assert any("workflow_skills" in p for p in committed)
-
-    def test_skill_store_not_called_when_none(self, tmp_path):
-        mock_store = MagicMock()
-        conv = _make_conversation(tmp_path, skill_store=None)
-        # Explicitly set to None (the default)
-        conv._skill_store = None
-        with patch("framework.skill_builder.conversation.REPO_ROOT", tmp_path):
-            conv._write_artifacts()
-        # skill_store was not injected so write_artifacts should NOT be called
-        mock_store.write_artifacts.assert_not_called()
+    def test_from_dict_raises_when_skill_store_omitted(self):
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        d = conv.to_dict()
+        with pytest.raises(ValueError, match="skill_store is required"):
+            SkillBuilderConversation.from_dict(d)
 
 
 # ---------------------------------------------------------------------------
@@ -181,20 +181,13 @@ class TestWriteArtifactsWithSkillStore:
 # ---------------------------------------------------------------------------
 
 
-class TestConstructorDefault:
-    def test_init_skill_store_defaults_to_none(self):
-        conv = SkillBuilderConversation(persona="tpm")
-        assert conv._skill_store is None
-
-    def test_from_dict_skill_store_defaults_to_none(self):
-        conv = SkillBuilderConversation(persona="tpm")
-        d = conv.to_dict()
-        restored = SkillBuilderConversation.from_dict(d)
-        assert restored._skill_store is None
+class TestConstructorWiring:
+    # Replaces TestConstructorDefault. The "defaults_to_none" behavior is gone;
+    # those cases now belong to TestSkillStoreRequired above.
 
     def test_from_dict_accepts_skill_store(self):
         mock_store = MagicMock()
-        conv = SkillBuilderConversation(persona="tpm")
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
         d = conv.to_dict()
         restored = SkillBuilderConversation.from_dict(d, skill_store=mock_store)
         assert restored._skill_store is mock_store
@@ -228,7 +221,12 @@ class TestHandlePromoteResponse:
         mock_store.promote.assert_not_called()
         assert turn.done is True
 
-    def test_promote_skill_store_failure_does_not_crash(self):
+    def test_promote_skill_store_failure_parks_at_promote(self):
+        """Hard-fail contract: if ADB promote fails (incl. 0-row no-op from
+        AdbSkillStore.promote raising ValueError), the session stays at
+        PROMOTE state with retry option — does NOT advance to DONE on a
+        phantom promotion (the synth-tpm-14a54555 silent-success bug).
+        """
         mock_store = MagicMock()
         mock_store.promote.side_effect = RuntimeError("ADB down")
         conv = SkillBuilderConversation(persona="tpm", skill_store=mock_store)
@@ -236,18 +234,14 @@ class TestHandlePromoteResponse:
         conv._data.skill_name = "weekly_report"
         conv._data.synth_id = "synth-x"
 
-        # Must not propagate the exception
         turn = conv._handle_promote_response("yes, promote")
-        assert turn.done is True
+        # Session must NOT be marked done — user needs to retry.
+        assert turn.state == "PROMOTE"
+        assert turn.done is not True
+        assert "ADB down" in turn.message or "failed" in turn.message.lower()
 
-    def test_promote_no_skill_store_still_completes(self):
-        conv = SkillBuilderConversation(persona="tpm", skill_store=None)
-        conv._data.persona = "tpm"
-        conv._data.skill_name = "weekly_report"
-        conv._data.synth_id = "synth-x"
-
-        turn = conv._handle_promote_response("yes, promote")
-        assert turn.done is True
+    # test_promote_no_skill_store_still_completes was removed — skill_store=None
+    # is no longer valid (see TestSkillStoreRequired above).
 
     def test_promote_calls_upsert_persona_builder_kb_when_delta_exists(self, tmp_path):
         """Option B: PROMOTE must write the delta to KBF_PERSONA_BUILDERS."""
@@ -306,8 +300,12 @@ class TestHandlePromoteResponse:
 
         assert not new_kb_path.exists(), ".new_kb file must be removed after PROMOTE"
 
-    def test_promote_upsert_failure_does_not_crash(self):
-        """upsert_persona_builder_kb failure must not propagate (session still completes)."""
+    def test_promote_upsert_failure_parks_at_promote(self):
+        """upsert_persona_builder_kb failure must keep the session at PROMOTE
+        — previously it was swallowed and the session completed silently, which
+        is the synth-tpm-14a54555 class of bug. New contract: any ADB failure
+        during promote keeps the session at PROMOTE with retry option.
+        """
         mock_store = MagicMock()
         mock_store.read_artifact.return_value = "name: weekly_report\n"
         mock_store.upsert_persona_builder_kb.side_effect = RuntimeError("ADB down")
@@ -318,7 +316,8 @@ class TestHandlePromoteResponse:
         conv._data.synth_id = "synth-x"
 
         turn = conv._handle_promote_response("yes, promote")
-        assert turn.done is True
+        assert turn.state == "PROMOTE"
+        assert turn.done is not True
 
 
 # ---------------------------------------------------------------------------
@@ -376,19 +375,9 @@ class TestRunValidateSkillStore:
         # Fallback: the filesystem path was used (which doesn't exist → exception caught)
         assert turn.state == "VALIDATE"
 
-    def test_validate_no_skill_store_uses_filesystem(self, tmp_path):
-        conv = SkillBuilderConversation(persona="tpm", skill_store=None)
-        conv._data.persona = "tpm"
-        conv._data.skill_name = "weekly_report"
-        conv._data.synth_id = "synth-x"
-
-        with patch(
-            "framework.skill_builder.validate_links.validate_workflow_links",
-            return_value=[],
-        ):
-            turn = conv._run_validate()
-
-        assert turn.state == "VALIDATE"
+    # test_validate_no_skill_store_uses_filesystem removed — skill_store=None
+    # is no longer a valid mode (TestSkillStoreRequired covers the new
+    # construction-time error).
 
     def test_validate_merges_persona_builder_delta_into_pb_dir(self, tmp_path):
         """BUG-009: validator should find newly authored KBs even before PROMOTE.
@@ -459,7 +448,7 @@ class TestReviewSchemaBulkEdits:
 
     def _make_conv(self, fields=None):
         from framework.skill_builder.conversation import SkillBuilderConversation
-        conv = SkillBuilderConversation(persona="tpm")
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
         conv._state = "REVIEW_SCHEMA"
         conv._data.fields = fields or ["schedule_health", "key_accomplishments", "dependencies"]
         conv._data.field_specs = {
@@ -565,7 +554,7 @@ class TestLlmAnalyzeArtifact:
         return llm
 
     def _make_conv(self, llm=None) -> SkillBuilderConversation:
-        conv = SkillBuilderConversation(persona="tpm", llm=llm)
+        conv = SkillBuilderConversation(persona="tpm", llm=llm, skill_store=MagicMock())
         conv._data.intent_description = "Weekly exec review PPT"
         return conv
 
@@ -669,7 +658,7 @@ class TestAdvanceToReviewSchemaWithLlmSpecs:
     """Tests for two-pass _advance_to_review_schema using llm_suggested_specs."""
 
     def _make_conv(self, fields=None, llm_specs=None, llm=None) -> SkillBuilderConversation:
-        conv = SkillBuilderConversation(persona="tpm", llm=llm)
+        conv = SkillBuilderConversation(persona="tpm", llm=llm, skill_store=MagicMock())
         conv._state = "REVIEW_FIELDS"
         conv._data.intent_description = "Weekly exec review"
         conv._data.fields = fields or ["schedule_health", "key_accomplishments"]
@@ -802,7 +791,7 @@ class TestLlmSuggestedSpecsPersistence:
     """Tests for to_dict / from_dict round-trip of llm_suggested_specs."""
 
     def test_to_dict_includes_llm_suggested_specs_when_non_empty(self):
-        conv = SkillBuilderConversation(persona="tpm")
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
         conv._data.llm_suggested_specs = {
             "title": {"type": "string", "description": "Slide title."}
         }
@@ -811,18 +800,18 @@ class TestLlmSuggestedSpecsPersistence:
         assert d["llm_suggested_specs"]["title"]["description"] == "Slide title."
 
     def test_to_dict_omits_llm_suggested_specs_when_empty(self):
-        conv = SkillBuilderConversation(persona="tpm")
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
         conv._data.llm_suggested_specs = {}
         d = conv.to_dict()
         assert "llm_suggested_specs" not in d
 
     def test_from_dict_restores_llm_suggested_specs(self):
-        original = SkillBuilderConversation(persona="tpm")
+        original = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
         original._data.llm_suggested_specs = {
             "schedule_health": {"type": "string", "description": "RAG status."}
         }
         d = original.to_dict()
-        restored = SkillBuilderConversation.from_dict(d)
+        restored = SkillBuilderConversation.from_dict(d, skill_store=MagicMock())
         assert restored._data.llm_suggested_specs == {
             "schedule_health": {"type": "string", "description": "RAG status."}
         }
@@ -850,7 +839,7 @@ class TestLlmSuggestedSpecsPersistence:
             "created_at": "",
             "updated_at": "",
         }
-        conv = SkillBuilderConversation.from_dict(d)
+        conv = SkillBuilderConversation.from_dict(d, skill_store=MagicMock())
         assert conv._data.llm_suggested_specs == {}
 
 
@@ -879,7 +868,7 @@ class TestManualFieldEntryLlmCall:
             "overall_rag": {"type": "string", "description": "Overall RAG status (Red/Amber/Green)."},
         }
         llm = self._make_mock_llm(llm_response)
-        conv = SkillBuilderConversation(persona="tpm", llm=llm)
+        conv = SkillBuilderConversation(persona="tpm", llm=llm, skill_store=MagicMock())
         conv._state = "ANALYZE_ARTIFACT"
         conv._data.intent_description = "Weekly exec review PPT"
 
@@ -906,7 +895,7 @@ class TestManualFieldEntryLlmCall:
             },
         }
         llm = self._make_mock_llm(llm_response)
-        conv = SkillBuilderConversation(persona="tpm", llm=llm)
+        conv = SkillBuilderConversation(persona="tpm", llm=llm, skill_store=MagicMock())
         conv._state = "ANALYZE_ARTIFACT"
         conv._data.intent_description = "Weekly exec review PPT"
 
@@ -1021,7 +1010,7 @@ class TestRenameSkillCommand:
 
     def _make_conv(self, state: str, **kwargs) -> SkillBuilderConversation:
         """Build a minimal SkillBuilderConversation in the given state."""
-        conv = SkillBuilderConversation(persona="tpm")
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
         conv._data.persona = "tpm"
         conv._data.skill_name = kwargs.get("skill_name", "old_name")
         conv._state = state
@@ -1074,7 +1063,7 @@ class TestRunIngest:
     """Tests for the replaced _run_ingest() implementation."""
 
     def _make_conv(self, sources=None) -> SkillBuilderConversation:
-        conv = SkillBuilderConversation(persona="tpm")
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
         conv._data.persona = "tpm"
         conv._data.skill_name = "weekly_report"
         conv._data.sources = sources if sources is not None else []

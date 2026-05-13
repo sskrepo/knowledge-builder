@@ -179,25 +179,16 @@ def _make_mock_pool():
     return mock_pool, mock_conn, mock_cur
 
 
-class TestAdbSkillStoreNullPool:
-    def test_write_no_pool_is_noop(self):
-        store = AdbSkillStore(pool=None)
-        # Should not raise
-        store.write_artifacts("s", "tpm", "skill", {"workflow_skill": "content"})
+class TestAdbSkillStoreRequiresPool:
+    """ADB is the source of truth — there is no stub-mode / no-op fallback.
+    Constructing AdbSkillStore with pool=None must fail at construction so
+    the app cannot silently degrade. This is the contract that prevents the
+    synth-tpm-14a54555-class of data-loss bug.
+    """
 
-    def test_read_no_pool_returns_none(self):
-        store = AdbSkillStore(pool=None)
-        result = store.read_artifact("tpm", "skill", "workflow_skill")
-        assert result is None
-
-    def test_promote_no_pool_is_noop(self):
-        store = AdbSkillStore(pool=None)
-        store.promote("tpm", "skill")
-
-    def test_list_no_pool_returns_empty(self):
-        store = AdbSkillStore(pool=None)
-        result = store.list_skills()
-        assert result == []
+    def test_constructor_raises_on_none_pool(self):
+        with pytest.raises(ValueError, match="pool is required"):
+            AdbSkillStore(pool=None)
 
 
 class TestAdbSkillStoreWriteArtifacts:
@@ -366,6 +357,7 @@ class TestAdbSkillStoreRead:
 class TestAdbSkillStorePromote:
     def test_promote_issues_update_with_correct_binds(self):
         mock_pool, mock_conn, mock_cur = _make_mock_pool()
+        mock_cur.rowcount = 1  # must be >0 to satisfy the no-row-update guard
         store = AdbSkillStore(pool=mock_pool)
 
         store.promote("ops_eng", "incident_summary")
@@ -378,6 +370,19 @@ class TestAdbSkillStorePromote:
         assert params["persona"] == "ops_eng"
         assert params["skill_name"] == "incident_summary"
         mock_conn.commit.assert_called_once()
+
+    def test_promote_raises_when_zero_rows_updated(self):
+        """Hard-fail contract: promoting a skill that doesn't exist in ADB
+        must raise — never silently no-op. This is the guard that catches
+        the synth-tpm-14a54555 class of bug, where an earlier silent COMMIT
+        failure leaves no row to promote.
+        """
+        mock_pool, mock_conn, mock_cur = _make_mock_pool()
+        mock_cur.rowcount = 0
+        store = AdbSkillStore(pool=mock_pool)
+
+        with pytest.raises(ValueError, match="0 rows updated"):
+            store.promote("tpm", "skill_that_was_never_committed")
 
 
 # ---------------------------------------------------------------------------
@@ -496,10 +501,8 @@ class TestAdbSkillStoreDelete:
         # Only SELECT was called, no DELETE
         assert cur.execute.call_count == 1
 
-    def test_delete_is_noop_when_pool_is_none(self):
-        store = AdbSkillStore(pool=None)
-        deleted = store.delete("ops_eng", "some_skill")
-        assert deleted == []
+    # test_delete_is_noop_when_pool_is_none removed — AdbSkillStore(pool=None)
+    # now raises at construction; see TestAdbSkillStoreRequiresPool above.
 
 
 # ---------------------------------------------------------------------------
@@ -607,10 +610,8 @@ class TestAdbPersonaBuilderKbs:
         assert "weekly_status" in params["content_yaml"]
         mock_conn.commit.assert_called_once()
 
-    def test_upsert_no_pool_is_noop(self):
-        store = AdbSkillStore(pool=None)
-        # Must not raise
-        store.upsert_persona_builder_kb("tpm", "skill", "yaml content\n")
+    # test_upsert_no_pool_is_noop removed — AdbSkillStore(pool=None) now raises
+    # at construction; see TestAdbSkillStoreRequiresPool.
 
     def test_list_all_issues_select(self):
         mock_pool, mock_conn, mock_cur = _make_mock_pool()
@@ -657,10 +658,8 @@ class TestAdbPersonaBuilderKbs:
         assert "KBF_PERSONA_BUILDERS" in sql
         assert params.get("status") == "production"
 
-    def test_list_no_pool_returns_empty(self):
-        store = AdbSkillStore(pool=None)
-        result = store.list_persona_builder_kbs()
-        assert result == []
+    # test_list_no_pool_returns_empty removed — AdbSkillStore(pool=None) now
+    # raises at construction; see TestAdbSkillStoreRequiresPool.
 
     def test_list_materialises_lob_content_yaml(self):
         mock_pool, mock_conn, mock_cur = _make_mock_pool()

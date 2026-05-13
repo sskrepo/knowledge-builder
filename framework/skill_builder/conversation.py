@@ -203,6 +203,20 @@ class SkillBuilderConversation:
     """
 
     def __init__(self, persona: str = "", user_id: str = "", llm=None, artifact_store=None, skill_store=None):
+        # skill_store is REQUIRED. ADB is the source of truth — there is no
+        # filesystem-only / stub-mode operating mode. Passing skill_store=None
+        # silently dropped ADB writes in older code (see synth-tpm-14a54555 /
+        # BUG-queue-e8298), so we now fail fast at construction. Tests must
+        # supply a MagicMock or a real SkillStore.
+        if skill_store is None:
+            raise ValueError(
+                "SkillBuilderConversation: skill_store is required. "
+                "ADB is the source of truth — there is no filesystem-only "
+                "mode. If you reached this from a real request, the route "
+                "handler forgot to pass app.state.skill_store (this was the "
+                "exact bug behind synth-tpm-14a54555). In tests, pass a "
+                "MagicMock())."
+            )
         self._persona = persona
         self._llm = llm
         self._artifact_store = artifact_store
@@ -334,7 +348,19 @@ class SkillBuilderConversation:
 
     @classmethod
     def from_dict(cls, d: dict, llm=None, artifact_store=None, skill_store=None) -> "SkillBuilderConversation":
-        """Restore a session from a persisted dict."""
+        """Restore a session from a persisted dict.
+
+        skill_store is REQUIRED. See __init__ docstring for rationale.
+        Restoring a session without skill_store would mean any subsequent
+        COMMIT in this session would silently lose the ADB write — exactly
+        the synth-tpm-14a54555 bug.
+        """
+        if skill_store is None:
+            raise ValueError(
+                "SkillBuilderConversation.from_dict: skill_store is required. "
+                "Restoring a session without it would let the next COMMIT "
+                "silently lose ADB writes (the synth-tpm-14a54555 bug)."
+            )
         obj = cls.__new__(cls)
         obj._persona = d.get("persona", "")
         obj._llm = llm
@@ -1623,60 +1649,78 @@ class SkillBuilderConversation:
 
     def _handle_promote_response(self, user_input: str) -> ConversationTurn:
         lowered = user_input.lower().strip()
-        self._state = "DONE"
+        is_yes = any(kw in lowered for kw in ("yes", "promote", "ok", "go"))
 
-        if any(kw in lowered for kw in ("yes", "promote", "ok", "go")):
-            # Update status in skill_store (ADB) when available; no-op otherwise
-            if self._skill_store is not None:
-                try:
-                    self._skill_store.promote(self._data.persona, self._data.skill_name)
-                    log.info(
-                        "skill_store.promote: persona=%s skill=%s",
-                        self._data.persona, self._data.skill_name,
-                    )
-                except Exception as exc:
-                    log.warning(
-                        "skill_store.promote failed (session still completes): %s", exc
-                    )
+        if is_yes:
+            # ADB is the source of truth. Promote MUST succeed against ADB.
+            # Previously a try/except turned every failure (skill missing,
+            # ADB unreachable, constraint) into log.warning while the session
+            # advanced to DONE — letting users believe the promotion landed
+            # when ADB had nothing (synth-tpm-14a54555). Now: any failure
+            # raises out, the state stays at PROMOTE, and the user sees the
+            # real error in the turn message.
+            try:
+                self._skill_store.promote(self._data.persona, self._data.skill_name)
+                log.info(
+                    "skill_store.promote: persona=%s skill=%s",
+                    self._data.persona, self._data.skill_name,
+                )
 
                 # Option B: write the promoted KB delta into KBF_PERSONA_BUILDERS
-                try:
-                    delta_text = self._skill_store.read_artifact(
-                        self._data.persona,
-                        self._data.skill_name,
-                        "persona_builder_delta",
+                delta_text = self._skill_store.read_artifact(
+                    self._data.persona,
+                    self._data.skill_name,
+                    "persona_builder_delta",
+                )
+                if delta_text:
+                    self._skill_store.upsert_persona_builder_kb(
+                        persona=self._data.persona,
+                        kb_name=self._data.skill_name,
+                        content_yaml=delta_text,
+                        status="production",
                     )
-                    if delta_text:
-                        self._skill_store.upsert_persona_builder_kb(
-                            persona=self._data.persona,
-                            kb_name=self._data.skill_name,
-                            content_yaml=delta_text,
-                            status="production",
-                        )
+                    log.info(
+                        "_handle_promote_response: upserted KB entry "
+                        "persona=%s kb_name=%s",
+                        self._data.persona, self._data.skill_name,
+                    )
+                    # Clean up stray .new_kb file if it still exists on disk
+                    new_kb_path = (
+                        REPO_ROOT
+                        / "framework"
+                        / "persona_builders"
+                        / f"{self._data.persona}.yaml.new_kb"
+                    )
+                    if new_kb_path.exists():
+                        new_kb_path.unlink()
                         log.info(
-                            "_handle_promote_response: upserted KB entry "
-                            "persona=%s kb_name=%s",
-                            self._data.persona, self._data.skill_name,
+                            "_handle_promote_response: removed stale %s",
+                            new_kb_path.name,
                         )
-                        # Clean up stray .new_kb file if it still exists on disk
-                        new_kb_path = (
-                            REPO_ROOT
-                            / "framework"
-                            / "persona_builders"
-                            / f"{self._data.persona}.yaml.new_kb"
-                        )
-                        if new_kb_path.exists():
-                            new_kb_path.unlink()
-                            log.info(
-                                "_handle_promote_response: removed stale %s",
-                                new_kb_path.name,
-                            )
-                except Exception as exc:
-                    log.warning(
-                        "_handle_promote_response: upsert_persona_builder_kb failed "
-                        "(session still completes): %s", exc
-                    )
+            except Exception as exc:
+                log.error(
+                    "_handle_promote_response: promotion FAILED — session stays "
+                    "at PROMOTE. synth_id=%s persona=%s skill=%s err=%s",
+                    self._data.synth_id, self._data.persona,
+                    self._data.skill_name, exc,
+                )
+                # Leave self._state at PROMOTE so the user can retry.
+                return ConversationTurn(
+                    state="PROMOTE",
+                    message=(
+                        f"❌ Promotion failed — skill is NOT live.\n\n"
+                        f"  {type(exc).__name__}: {exc}\n\n"
+                        f"The skill remains in its previous state. Likely cause: "
+                        f"the upstream COMMIT did not actually write to ADB (check "
+                        f"server logs for write_artifacts errors). Fix the root "
+                        f"cause and retry."
+                    ),
+                    options=["retry promote", "stop here"],
+                )
 
+        self._state = "DONE"
+
+        if is_yes:
             # Check whether ingestion produced any content — warn if KB is empty.
             ingest_result = self._data.ingest_result or {}
             items = ingest_result.get("items_processed", 0)
@@ -1858,27 +1902,12 @@ class SkillBuilderConversation:
             log.info("wrote %s", full)
             committed.append(rel_path)
 
-        # Write to skill_store (ADB-backed in production). HARD-FAIL if this
-        # write does not succeed: previously a try/except turned ADB failures
-        # into log.warning, leaving the session reporting "Committed N" while
-        # ADB had nothing. That made "committed" silently mean "filesystem only,
-        # not durable" — exactly the bug that lost session synth-tpm-6523a9c4's
-        # work. If ADB is the source of truth, the session must fail here so
-        # the user can fix the underlying issue and retry, instead of advancing
-        # to VALIDATE/INGEST/PROMOTE on a phantom commit.
-        if self._skill_store is None:
-            # Distinct from "stub mode" — this means the caller forgot to wire
-            # the skill_store. We saw this happen with the MCP authorSkill
-            # handler (mcp_tools.py:_make_author_skill_handler not passing
-            # app.state.skill_store), which silently lost session 14a54555's
-            # work. Loud warning so the symptom is visible next time.
-            log.warning(
-                "_write_artifacts: NO skill_store wired — durable ADB write SKIPPED. "
-                "synth_id=%s persona=%s skill=%s. Filesystem files were written "
-                "but the session is NOT durably committed.",
-                self._data.synth_id, self._data.persona, self._data.skill_name,
-            )
-        elif typed_artifacts:
+        # Write to skill_store (ADB). HARD-FAIL on failure: ADB is the source
+        # of truth. Caller (_handle_commit) catches the exception and keeps
+        # the session at PREVIEW state — never advancing past PREVIEW on a
+        # phantom commit. (See synth-tpm-6523a9c4 / synth-tpm-14a54555.)
+        # _skill_store cannot be None — __init__/from_dict already rejected that.
+        if typed_artifacts:
             self._skill_store.write_artifacts(
                 synth_id=self._data.synth_id,
                 persona=self._data.persona,
