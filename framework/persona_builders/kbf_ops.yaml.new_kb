@@ -1,0 +1,25 @@
+name: review_all_open_bugs_on_the_kb_framework_and_produ
+kind: vector
+extraction_schema: framework/parsers/schemas/kbf_ops/review_all_open_bugs_on_the_kb_framework_and_produ/v1.json
+provides_fields:
+- report_id
+- generated_at
+- time_window
+- total_open_bugs
+- bugs_by_tool
+- bugs_by_severity
+- top_bugs
+- recurring_failure_modes
+- recommended_actions
+sources:
+- kind: jira
+  jql: 'JQL: project = KBF AND status in ("Open", "In Progress", "Triage") AND component
+    in ("askKnowledgeBase", "authorSkill", "uploadArtifact", "reportBug", "reviewSkillSession",
+    "deleteSkill") ORDER BY priority DESC, created DESC'
+retrieval_tools:
+- vector_search
+kb_card:
+  summary: Synthesized by skill_builder. Refine after first dry-run.
+  use_when: Queries about report_id, generated_at, time_window.
+  input_shape: Natural-language question with optional filters.
+  output_shape: Cited passages with structured metadata.

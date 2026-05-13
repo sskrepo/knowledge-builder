@@ -1,0 +1,72 @@
+workflow_skill: review_all_open_bugs_on_the_kb_framework_and_produ
+persona: kbf_ops
+status: draft
+trigger:
+  on_request:
+    enabled: true
+    inputs:
+    - name: input
+      type: string
+      description: Query or filter input
+    output_format: markdown
+    response_mode: artifact_url
+skill_card:
+  summary: review all open bugs on the KB framework and produce a consolidated summary
+  use_when: 'User asks for: review all open bugs on the KB framework and produce a
+    consolidated summary'
+  example_invocations:
+  - review all open bugs on the KB framework and produce a consolidated summary
+  do_not_use_for: Single-fact lookups (use vector_search). Live operational data (use
+    query_fleet).
+requires_extractions:
+- kb: kbf_ops.review_all_open_bugs_on_the_kb_framework_and_produ
+  required_fields:
+  - report_id
+  - generated_at
+  - time_window
+  - total_open_bugs
+  - bugs_by_tool
+  - bugs_by_severity
+  - top_bugs
+  - recurring_failure_modes
+  - recommended_actions
+synthesis:
+  output_format: markdown
+  template: synthesis/templates/review_all_open_bugs_on_the_kb_framework_and_produ.markdown
+  slide_mapping: synthesis/mappings/review_all_open_bugs_on_the_kb_framework_and_produ.yaml
+  field_mapping:
+    report_id:
+      section: Report Id
+      source_field: report_id
+    generated_at:
+      section: Generated At
+      source_field: generated_at
+    time_window:
+      section: Time Window
+      source_field: time_window
+    total_open_bugs:
+      section: Total Open Bugs
+      source_field: total_open_bugs
+    bugs_by_tool:
+      section: Bugs By Tool
+      source_field: bugs_by_tool
+    bugs_by_severity:
+      section: Bugs By Severity
+      source_field: bugs_by_severity
+    top_bugs:
+      section: Top Bugs
+      source_field: top_bugs
+    recurring_failure_modes:
+      section: Recurring Failure Modes
+      source_field: recurring_failure_modes
+    recommended_actions:
+      section: Recommended Actions
+      source_field: recommended_actions
+delivery:
+  kind: filesystem
+  path: ~/.kbf/outputs/review_all_open_bugs_on_the_kb_framework_and_produ.markdown
+eval:
+  gold_set: eval/gold_sets/kbf_ops-review_all_open_bugs_on_the_kb_framework_and_produ-workflow.jsonl
+  exit_criteria:
+    field_accuracy: 0.85
+    delivery_success_rate: 0.99

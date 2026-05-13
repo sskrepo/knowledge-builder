@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/kbf_ops/review_all_open_bugs_on_the_kb_framework_and_produ/v1.json",
+  "title": "kbf_ops \u2014 review_all_open_bugs_on_the_kb_framework_and_produ \u2014 v1",
+  "description": "Synthesized by skill_builder for persona=kbf_ops, kb=review_all_open_bugs_on_the_kb_framework_and_produ. Refine before promoting.",
+  "type": "object",
+  "required": [
+    "report_id",
+    "generated_at",
+    "time_window",
+    "total_open_bugs",
+    "bugs_by_tool",
+    "bugs_by_severity",
+    "top_bugs",
+    "recurring_failure_modes",
+    "recommended_actions"
+  ],
+  "properties": {
+    "report_id": {
+      "type": "string",
+      "description": "Extract the unique report identifier exactly as shown (e.g., an ID, code, or filename-like token). Return only the ID string with no extra text.",
+      "maxLength": 64
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Extract the report generation timestamp exactly as written in the document. Preserve the original format (e.g., ISO-8601, 'May 3, 2026 14:05 UTC') and return it as a single string."
+    },
+    "time_window": {
+      "type": "string",
+      "description": "Extract the time range the report covers (start and end dates/times) exactly as stated. Return as a single string (e.g., '2026-05-01 to 2026-05-07' or 'Last 7 days').",
+      "maxLength": 500
+    },
+    "total_open_bugs": {
+      "type": "integer",
+      "description": "Extract the total count of open bugs reported for the time window. Return only the numeric value as an integer.",
+      "maxLength": 500
+    },
+    "bugs_by_tool": {
+      "type": "array",
+      "description": "Extract the breakdown of open bugs by tool/component as a list. Return an array of strings in the form 'tool_name: count' for each tool mentioned, preserving the tool names as written.",
+      "maxLength": 500
+    },
+    "bugs_by_severity": {
+      "type": "array",
+      "description": "Extract the breakdown of open bugs by severity level. Return an array of strings in the form 'severity: count' for each severity category shown (e.g., P0, Critical, High, Medium, Low).",
+      "maxLength": 500
+    },
+    "top_bugs": {
+      "type": "array",
+      "description": "Extract the list of the most important/open bugs highlighted (e.g., highest severity, most frequent, or explicitly labeled 'top'). Return an array where each item is a single-line string including bug ID (if present) and a short title/summary; append severity and tool in parentheses if provided.",
+      "maxLength": 500
+    },
+    "recurring_failure_modes": {
+      "type": "array",
+      "description": "Extract recurring failure patterns or root-cause themes explicitly called out (e.g., 'timeout in parser', 'schema mismatch', 'rate limiting'). Return an array of concise strings, one per failure mode, using the document\u2019s wording where possible.",
+      "maxLength": 500
+    },
+    "recommended_actions": {
+      "type": "array",
+      "description": "Extract the recommended next steps or remediation actions listed in the report. Return an array of action strings; include any stated owner/team and timeframe in the same string if present (e.g., 'Add retry w/ backoff for API calls \u2014 Owner: Platform \u2014 ETA: 2w').",
+      "maxLength": 500
+    }
+  },
+  "additionalProperties": false
+}
