@@ -14,7 +14,7 @@
 
 name: dev-local
 token: "dev-only-token-replace-me"
-scopes: [read, write]
+scopes: [read, write, admin]
 personaAllowlist: []
 rpmCap: 120
 tokenBudgetPerRequest: 16000
