@@ -100,7 +100,16 @@ def _build_kb_index(builders_dir: Path) -> dict[str, dict]:
     - _persona_visibility: the read-ACL list
     """
     index: dict[str, dict] = {}
-    for yaml_path in sorted(builders_dir.glob("*.yaml")):
+    # Also pick up *.yaml.new_kb files — these are in-session persona builder
+    # candidates written by COMMIT before they are promoted to *.yaml.  The
+    # *.yaml glob does NOT match *.yaml.new_kb (different suffix), so without
+    # this line a newly authored KB is invisible to the validator when the ADB
+    # skill_store fallback is unavailable.  (BUG-queue-51dd3 / BUG-queue-3d13e
+    # / BUG-queue-1b0c0 — belt-and-suspenders fix.)
+    candidate_paths = sorted(builders_dir.glob("*.yaml")) + sorted(
+        builders_dir.glob("*.yaml.new_kb")
+    )
+    for yaml_path in candidate_paths:
         if yaml_path.name.startswith("_"):
             continue
         try:
