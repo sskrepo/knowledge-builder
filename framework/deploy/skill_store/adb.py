@@ -140,19 +140,37 @@ _SQL_LIST_PB_PERSONA_STATUS = """
     ORDER BY updated_at DESC
 """
 
-# Maps artifact_type → relative path template
+# Maps artifact_type → relative path template.
+# MUST cover every entry in ARTIFACT_TYPES (framework/deploy/skill_store/_base.py)
+# and the chk_ksa_artifact_type DB constraint (framework/db/migrations/006_*.sql).
+# A missing key → KeyError when _rel_path is called → the entire write fails.
+# This was the actual cause of session synth-tpm-5bd6eb13's commit failure
+# (extraction_schema was added to ARTIFACT_TYPES but not added here).
 _REL_PATH_TEMPLATES: dict[str, str] = {
     "workflow_skill":         "framework/workflow_skills/{persona}/{skill_name}.yaml",
     "persona_builder_delta":  "framework/persona_builders/{persona}.yaml.new_kb",
     "eval_extraction":        "eval/gold_sets/{persona}-{skill_name}-extraction.jsonl",
     "eval_workflow":          "eval/gold_sets/{persona}-{skill_name}-workflow.jsonl",
+    "extraction_schema":      "framework/parsers/schemas/{persona}/{skill_name}/v1.json",
 }
 
 
 def _rel_path(persona: str, skill_name: str, artifact_type: str) -> str:
-    return _REL_PATH_TEMPLATES[artifact_type].format(
-        persona=persona, skill_name=skill_name
-    )
+    try:
+        template = _REL_PATH_TEMPLATES[artifact_type]
+    except KeyError as exc:
+        # Loud-fail with context: this is a wiring bug between ARTIFACT_TYPES
+        # and _REL_PATH_TEMPLATES, not user error. Tell the dev exactly what
+        # to fix instead of letting a bare KeyError leak through.
+        known = sorted(_REL_PATH_TEMPLATES.keys())
+        raise KeyError(
+            f"_REL_PATH_TEMPLATES is missing entry for artifact_type={artifact_type!r}. "
+            f"Known types: {known}. Add a template to "
+            f"framework/deploy/skill_store/adb.py _REL_PATH_TEMPLATES and ensure "
+            f"the type is also in ARTIFACT_TYPES (_base.py) and the "
+            f"chk_ksa_artifact_type DB constraint (migration 006)."
+        ) from exc
+    return template.format(persona=persona, skill_name=skill_name)
 
 
 class AdbSkillStore(SkillStore):

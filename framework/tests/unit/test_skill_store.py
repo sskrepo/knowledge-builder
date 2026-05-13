@@ -191,6 +191,48 @@ class TestAdbSkillStoreRequiresPool:
             AdbSkillStore(pool=None)
 
 
+class TestRelPathTemplatesCoverArtifactTypes:
+    """Regression for session synth-tpm-5bd6eb13: commit failed with
+    KeyError: 'extraction_schema' because the type was added to
+    ARTIFACT_TYPES but not to AdbSkillStore._REL_PATH_TEMPLATES. The two
+    sets must always agree — otherwise write_artifacts raises mid-write.
+    """
+
+    def test_every_artifact_type_has_a_rel_path_template(self):
+        from framework.deploy.skill_store._base import ARTIFACT_TYPES
+        from framework.deploy.skill_store.adb import _REL_PATH_TEMPLATES
+
+        missing = ARTIFACT_TYPES - set(_REL_PATH_TEMPLATES.keys())
+        assert not missing, (
+            f"_REL_PATH_TEMPLATES is missing entries for: {sorted(missing)}. "
+            f"Every type in ARTIFACT_TYPES must have a rel-path template."
+        )
+
+    def test_no_orphan_templates_not_in_artifact_types(self):
+        from framework.deploy.skill_store._base import ARTIFACT_TYPES
+        from framework.deploy.skill_store.adb import _REL_PATH_TEMPLATES
+
+        orphans = set(_REL_PATH_TEMPLATES.keys()) - ARTIFACT_TYPES
+        assert not orphans, (
+            f"_REL_PATH_TEMPLATES has entries not in ARTIFACT_TYPES: "
+            f"{sorted(orphans)}. Either remove from the template dict or "
+            f"add to ARTIFACT_TYPES."
+        )
+
+    def test_rel_path_raises_helpful_error_on_unknown_type(self):
+        from framework.deploy.skill_store.adb import _rel_path
+        with pytest.raises(KeyError, match="_REL_PATH_TEMPLATES is missing"):
+            _rel_path("tpm", "skill", "nonexistent_artifact_type")
+
+    def test_extraction_schema_template_points_to_parsers_schemas(self):
+        """The specific bug from synth-tpm-5bd6eb13: extraction_schema must
+        map to framework/parsers/schemas/{persona}/{skill_name}/v1.json.
+        """
+        from framework.deploy.skill_store.adb import _rel_path
+        path = _rel_path("tpm", "weekly_report", "extraction_schema")
+        assert path == "framework/parsers/schemas/tpm/weekly_report/v1.json"
+
+
 class TestAdbSkillStoreWriteArtifacts:
     def test_merge_sql_called_for_each_artifact(self):
         mock_pool, mock_conn, mock_cur = _make_mock_pool()
