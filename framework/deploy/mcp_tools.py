@@ -376,6 +376,7 @@ def _make_ask_handler(app):
 def _make_author_skill_handler(app):
     """Build the authorSkill MCP tool handler."""
 
+    import asyncio
     from .routes.author_skill import _start_or_continue_session
 
     async def author_skill_handler(
@@ -419,7 +420,21 @@ def _make_author_skill_handler(app):
             "present" if skill_store is not None else "MISSING",
         )
 
-        result = _start_or_continue_session(
+        # CRITICAL: _start_or_continue_session is fully synchronous. It chains
+        # into _run_ingest → ConfluenceWikiIngestor.ingest_space → codex CLI
+        # subprocess with a 180s timeout, and into ADB cursor.execute calls.
+        # Running that inline on the asyncio event loop would freeze the entire
+        # uvicorn worker — listSkills, getSkill, healthz, EVERYTHING stops
+        # responding while INGEST waits on codex. That was the visible failure
+        # mode in BUG-queue-d3ec0: PIDs 95859→96394→96629→96950 cycling as the
+        # MCP client timed out, uvicorn keepalive killed unresponsive workers,
+        # and subsequent requests got "Unable to connect" / HTTP 000.
+        #
+        # Fix: run the blocking call in a worker thread so the event loop stays
+        # responsive. The handler is now properly cooperative — other tools
+        # (listSkills etc.) continue to serve while INGEST is in flight.
+        result = await asyncio.to_thread(
+            _start_or_continue_session,
             session_store=session_store,
             llm=llm,
             artifact_store=artifact_store,

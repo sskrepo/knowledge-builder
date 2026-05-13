@@ -23,6 +23,7 @@ tool can call the same function without going through HTTP.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Request
@@ -68,7 +69,11 @@ async def author_skill_start_or_continue(req: Request):
     persona = body.get("persona", "")
     intent = body.get("intentDescription") or body.get("intent_description", "")
 
-    result = _start_or_continue_session(
+    # _start_or_continue_session is fully sync and may take 60-180s when the
+    # state machine reaches INGEST (codex subprocess). Off-load to a worker
+    # thread so the FastAPI event loop stays responsive. See BUG-queue-d3ec0.
+    result = await asyncio.to_thread(
+        _start_or_continue_session,
         session_store=req.app.state.session_store,
         llm=getattr(req.app.state, "llm", None),
         artifact_store=getattr(req.app.state, "artifact_store", None),
@@ -293,7 +298,11 @@ def _start_or_continue_session(
 
 async def _handle_continue(req: Request, consumer, synth_id: str, user_input: str):
     """Shared implementation for the two POST-continue routes."""
-    result = _start_or_continue_session(
+    # See BUG-queue-d3ec0: _start_or_continue_session is sync + may block the
+    # event loop for minutes during INGEST. Run in a thread to keep the
+    # uvicorn worker responsive for other requests.
+    result = await asyncio.to_thread(
+        _start_or_continue_session,
         session_store=req.app.state.session_store,
         llm=getattr(req.app.state, "llm", None),
         artifact_store=getattr(req.app.state, "artifact_store", None),
