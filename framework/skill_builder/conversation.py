@@ -1866,7 +1866,19 @@ class SkillBuilderConversation:
         # work. If ADB is the source of truth, the session must fail here so
         # the user can fix the underlying issue and retry, instead of advancing
         # to VALIDATE/INGEST/PROMOTE on a phantom commit.
-        if self._skill_store is not None and typed_artifacts:
+        if self._skill_store is None:
+            # Distinct from "stub mode" — this means the caller forgot to wire
+            # the skill_store. We saw this happen with the MCP authorSkill
+            # handler (mcp_tools.py:_make_author_skill_handler not passing
+            # app.state.skill_store), which silently lost session 14a54555's
+            # work. Loud warning so the symptom is visible next time.
+            log.warning(
+                "_write_artifacts: NO skill_store wired — durable ADB write SKIPPED. "
+                "synth_id=%s persona=%s skill=%s. Filesystem files were written "
+                "but the session is NOT durably committed.",
+                self._data.synth_id, self._data.persona, self._data.skill_name,
+            )
+        elif typed_artifacts:
             self._skill_store.write_artifacts(
                 synth_id=self._data.synth_id,
                 persona=self._data.persona,

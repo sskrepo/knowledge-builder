@@ -404,10 +404,19 @@ def _make_author_skill_handler(app):
         session_store = app.state.session_store
         llm = getattr(app.state, "llm", None)
         artifact_store = getattr(app.state, "artifact_store", None)
+        # CRITICAL: must pass skill_store. Forgetting this means the conversation
+        # runs with _skill_store=None, so _write_artifacts silently skips the ADB
+        # write entirely (no exception, no log) and "Committed N" is reported to
+        # the user while KBF_SKILL_ARTIFACTS gets nothing. This was the actual
+        # root cause behind session synth-tpm-14a54555 and the recurring
+        # BUG-queue-e8298 symptom — the retry-then-fail fix is fine, but it can
+        # only protect writes that are actually attempted.
+        skill_store = getattr(app.state, "skill_store", None)
 
         log.info(
-            "mcp:authorSkill consumer=%s synth_id=%s",
+            "mcp:authorSkill consumer=%s synth_id=%s skill_store=%s",
             consumer.name, synthId or "(new)",
+            "present" if skill_store is not None else "MISSING",
         )
 
         result = _start_or_continue_session(
@@ -417,6 +426,7 @@ def _make_author_skill_handler(app):
             user_id=user_id,
             synth_id=synthId if synthId else None,
             user_input=input,
+            skill_store=skill_store,
         )
 
         return result

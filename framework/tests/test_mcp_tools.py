@@ -351,6 +351,38 @@ class TestAuthorSkillHandler:
         call_kwargs = save_args[1]
         assert call_kwargs.get("user_id") == "specific-user-99"
 
+    def test_handler_passes_skill_store_to_session(self):
+        """Regression for session synth-tpm-14a54555: MCP authorSkill handler
+        previously failed to pass app.state.skill_store into
+        _start_or_continue_session. The conversation ran with _skill_store=None,
+        the ADB write was silently skipped, and the user saw "Committed N"
+        while KBF_SKILL_ARTIFACTS got nothing. This test locks the wiring.
+        """
+        # Patch at the source module — _make_author_skill_handler does a local
+        # `from .routes.author_skill import _start_or_continue_session` each
+        # time it's called, so we must patch before build_external_tool_registry.
+        with patch(
+            "framework.deploy.routes.author_skill._start_or_continue_session",
+            return_value={"synth_id": "x", "state": "X", "done": False},
+        ) as mock_start:
+            store = self._make_session_store()
+            app = _make_mock_app(session_store=store)
+            sentinel_skill_store = MagicMock(name="skill_store_sentinel")
+            app.state.skill_store = sentinel_skill_store
+
+            registry = build_external_tool_registry(app)
+            handler = registry["authorSkill"]
+
+            _run(handler(input="anything"))
+
+        mock_start.assert_called_once()
+        call_kwargs = mock_start.call_args.kwargs
+        assert call_kwargs.get("skill_store") is sentinel_skill_store, (
+            "MCP authorSkill handler must pass app.state.skill_store; "
+            "forgetting this causes silent durable-write loss (BUG-queue-e8298 / "
+            "session synth-tpm-14a54555)."
+        )
+
     def test_anonymous_consumer_fallback(self):
         store = self._make_session_store()
         app = _make_mock_app(session_store=store)
