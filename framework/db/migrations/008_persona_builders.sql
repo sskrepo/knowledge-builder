@@ -20,4 +20,5 @@ CREATE TABLE KB_SHIM.KBF_PERSONA_BUILDERS (
     CONSTRAINT pk_kpb PRIMARY KEY (persona, kb_name)
 );
 
-GRANT SELECT, INSERT, UPDATE ON KB_SHIM.KBF_PERSONA_BUILDERS TO kbf_runtime;
+-- NOTE: no GRANT needed — the runtime connects as Admin which owns KB_SHIM.
+-- Add a GRANT here when a dedicated kbf_runtime role is created (future).
