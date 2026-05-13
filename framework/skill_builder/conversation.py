@@ -1308,21 +1308,94 @@ class SkillBuilderConversation:
 
     def _run_ingest(self) -> ConversationTurn:
         self._state = "INGEST"
-        # In stub mode, simulate ingestion
+        # Attempt real ingestion via ConfluenceWikiIngestor for each Confluence source.
+        # On laptop (no real adapter configured) the ingestor uses dev fixture HTML files.
+        # Jira/ADB/Git sources are logged but not yet crawled (Phase 2).
+        confluence_sources = [s for s in self._data.sources if s.get("kind") == "confluence"]
+        adb_sources = [s for s in self._data.sources if s.get("kind") == "adb"]
+        other_sources = [
+            s for s in self._data.sources
+            if s.get("kind") not in ("confluence", "adb")
+        ]
+
+        pages_new = 0
+        pages_updated = 0
+        pages_unchanged = 0
+        ingest_errors: list[str] = []
+        mode = "stub"
+
+        if confluence_sources:
+            try:
+                from ..ingestion.confluence_wiki_ingest import ConfluenceWikiIngestor
+                ingestor = ConfluenceWikiIngestor(adapter=None)  # fixture mode on laptop
+                for src in confluence_sources:
+                    space = src.get("space", "")
+                    labels = src.get("include_labels") or []
+                    try:
+                        stats = ingestor.ingest_space(space, labels or None)
+                        pages_new += stats.get("pages_new", 0)
+                        pages_updated += stats.get("pages_updated", 0)
+                        pages_unchanged += stats.get("pages_unchanged", 0)
+                        mode = "fixture"
+                        log.info(
+                            "_run_ingest: Confluence %s → new=%d updated=%d unchanged=%d",
+                            space, stats.get("pages_new", 0),
+                            stats.get("pages_updated", 0), stats.get("pages_unchanged", 0),
+                        )
+                    except Exception as src_exc:
+                        log.warning("_run_ingest: Confluence %s failed: %s", space, src_exc)
+                        ingest_errors.append(f"Confluence {space}: {src_exc}")
+            except Exception as import_exc:
+                log.warning("_run_ingest: could not load ConfluenceWikiIngestor: %s", import_exc)
+                ingest_errors.append(str(import_exc))
+
+        if adb_sources:
+            log.info("_run_ingest: ADB sources registered (crawl happens via ingestion_worker.py)")
+
+        if other_sources:
+            log.info(
+                "_run_ingest: %d non-Confluence/ADB sources registered (Phase 2 wiring)",
+                len(other_sources),
+            )
+
+        items_processed = pages_new + pages_updated + pages_unchanged
+
         self._data.ingest_result = {
             "status": "completed",
-            "items_processed": 0,
-            "items_upserted": 0,
-            "mode": "stub",
-            "message": "Stub mode — no real ingestion. Connect ADB + sources to run for real.",
+            "items_processed": items_processed,
+            "items_upserted": pages_new + pages_updated,
+            "mode": mode,
+            "pages_new": pages_new,
+            "pages_updated": pages_updated,
+            "pages_unchanged": pages_unchanged,
+            "errors": ingest_errors,
         }
+
+        # Human-readable summary
+        if mode == "stub":
+            mode_note = (
+                "⚠️  No Confluence sources configured — KB is empty.\n"
+                "On laptop, dev fixtures at framework/_dev_fixtures/ are used as a substitute.\n"
+                "In production, the ingestion worker will crawl your configured sources."
+            )
+        else:
+            mode_note = (
+                f"Ran in fixture mode (laptop dev). "
+                f"Processed {items_processed} pages "
+                f"({pages_new} new, {pages_updated} updated, {pages_unchanged} unchanged).\n"
+                "In production this uses the real Confluence API (ConfluenceNativeAdapter)."
+            )
+            if ingest_errors:
+                mode_note += f"\nErrors: {'; '.join(ingest_errors)}"
+
         return ConversationTurn(
             state="INGEST",
             message=(
-                "Ingestion complete (stub mode — no real sources connected).\n\n"
-                "In production this would pull data from your configured sources, "
-                "run it through the LLM parser with your extraction schema, "
-                "and store ContentItems in the KB.\n\n"
+                f"Ingestion step complete.\n\n"
+                + mode_note
+                + "\n\nNote: the authorSkill INGEST step registers the source schedule and "
+                "runs a first-pass crawl. The ongoing KB population happens via the "
+                "ingestion worker (scheduled or webhook-triggered after PROMOTE).\n\n"
                 "Proceed to eval?"
             ),
             data={"ingest": self._data.ingest_result},
@@ -1466,12 +1539,50 @@ class SkillBuilderConversation:
                         "skill_store.promote failed (session still completes): %s", exc
                     )
 
+            # Check whether ingestion produced any content — warn if KB is empty.
+            ingest_result = self._data.ingest_result or {}
+            items = ingest_result.get("items_processed", 0)
+            ingest_mode = ingest_result.get("mode", "stub")
+            sources_list = self._data.sources or []
+            conf_sources = [s for s in sources_list if s.get("kind") == "confluence"]
+
+            kb_status_note: str
+            if items > 0:
+                kb_status_note = (
+                    f"KB populated: {items} pages ingested "
+                    f"(mode: {ingest_mode}). Routing will return real content."
+                )
+            elif conf_sources:
+                spaces = ", ".join(s.get("space", "?") for s in conf_sources)
+                kb_status_note = (
+                    f"⚠️  KB is empty — no content was ingested yet.\n"
+                    f"The skill routes correctly but askKnowledgeBase will return "
+                    f"'no relevant context found' until the Confluence space(s) "
+                    f"({spaces}) have been crawled.\n\n"
+                    f"To populate the KB on this instance:\n"
+                    f"  python -m framework.deploy.ingestion_worker  "
+                    f"  # or trigger via webhook after a Confluence page update\n\n"
+                    f"On laptop with dev fixtures: check "
+                    f"framework/_dev_fixtures/ for fixture data that matches your skill's KB name."
+                )
+            elif any(s.get("kind") == "adb" for s in sources_list):
+                kb_status_note = (
+                    "⚠️  KB is empty — ADB sources are registered but not yet crawled.\n"
+                    "Run the ingestion worker to populate: "
+                    "python -m framework.deploy.ingestion_worker"
+                )
+            else:
+                kb_status_note = (
+                    "⚠️  No sources configured. KB is empty.\n"
+                    "Configure sources and re-run ingestion before querying this skill."
+                )
+
             return ConversationTurn(
                 state="DONE",
                 message=(
-                    f"Skill {self._data.persona}.{self._data.skill_name} promoted to production.\n\n"
-                    "The consumption flow will now route matching queries to this skill.\n"
-                    f"Session ID: {self._data.synth_id}"
+                    f"✅ Skill {self._data.persona}.{self._data.skill_name} promoted to production.\n\n"
+                    + kb_status_note
+                    + f"\n\nSession ID: {self._data.synth_id}"
                 ),
                 done=True,
             )

@@ -1,0 +1,49 @@
+{
+  "id": "fixture-26ai-exec-review-2026-W20",
+  "source": "confluence",
+  "source_id": "26ai-exec-review-2026-W20",
+  "space": "OCIFACP",
+  "labels": ["26ai", "weekly-status", "exec-review"],
+  "title": "26ai Weekly Exec Review — Week 2026-W20",
+  "project_name": "26ai (OCI Foundational AI)",
+  "overall_rag": "amber",
+  "executive_summary": "26ai closed Week 20 at AMBER: GPU capacity provisioning in PHX is 85% complete (target was 100%), creating a soft dependency risk for the LLM inference ramp scheduled for W21. All other workstreams are tracking green. The embedding pipeline v2 shipped on schedule; eval harness is live and showing recall@5 of 0.87 across 3 personas. Primary exec ask: approve PHX capacity expansion to clear the W21 gate.",
+  "key_accomplishments": [
+    "Embedding pipeline v2 deployed to staging — 40% latency improvement vs v1 (owner: Platform)",
+    "Eval harness live across PM, TPM, Architect personas — recall@5 = 0.87 (owner: QA)",
+    "KBF authorSkill MCP tool shipped — 3 persona skills authored end-to-end (owner: Dev)",
+    "Confluence adapter healthcheck passing in staging (owner: Infra)"
+  ],
+  "upcoming_milestones": [
+    "2026-05-19 — PHX GPU capacity: provision remaining 15% (owner: Infra)",
+    "2026-05-19 — LLM inference ramp: begin W21 load test (owner: Platform, blocked on PHX capacity)",
+    "2026-05-26 — Persona KB eval exit criteria met (recall@5 ≥ 0.90 across 5 personas)",
+    "2026-06-02 — Phase 2 checkpoint: Jira adapter + incremental ingest (owner: Dev)"
+  ],
+  "schedule_health": "Amber — PHX GPU provisioning is 1 week behind plan. All other tracks on schedule. Risk: LLM inference ramp (W21) is hard-gated on PHX capacity.",
+  "scope_health": "Green — scope stable. No scope changes since W18 kickoff. Phase 2 (Jira adapter) remains deferred to W22 as planned.",
+  "resource_health": "Green — full team onboarded. One senior dev on PTO W21; coverage confirmed. No open headcount requests.",
+  "top_risks": [
+    "PHX GPU capacity (P1): provisioning at 85%; W21 LLM ramp blocked. Mitigation: Infra escalated to OCI capacity team, ETA W20 EOD resolution.",
+    "Confluence rate limits (P2): production crawl may hit 120 RPM cap on large spaces. Mitigation: exponential back-off implemented; monitor W21 staging run.",
+    "Eval harness coverage gap (P3): kbf_ops persona has 0 gold-set entries. Mitigation: bugBash skill authoring underway this week."
+  ],
+  "metrics_snapshot": "recall@5: 0.87 (target 0.90) | p95 latency: 420ms (target 500ms) | faithfulness: 0.91 (target 0.90) | cost per query: $0.0031 (target <$0.005) | ingestion cost/day: 180k tokens (alarm at 500k)",
+  "workstream_status": "Platform: Green (embedding v2 shipped) | Infra: Amber (PHX GPU 85%) | Dev: Green (authorSkill live) | QA: Green (eval harness live) | Security: Green (ACL placeholders on all ContentItems)",
+  "week_id": "2026-W20",
+  "blockers": [
+    "PHX GPU capacity not yet at 100% — blocks W21 LLM inference ramp (owner: Infra, ETA W20 EOD)",
+    "kbf_ops eval gold set empty — blocks kbf_ops exit criteria (owner: QA, ETA W21)"
+  ],
+  "exec_asks": [
+    "Approve PHX capacity expansion request (OCI capacity team, owner: Infra lead)",
+    "Confirm Phase 2 scope: Jira adapter deferred to W22 — or pull forward if priority changes?"
+  ],
+  "dependencies": [
+    "OCI capacity team: PHX GPU provisioning (ETA W20 EOD)",
+    "Legal: no open items W20",
+    "Security: ACL review of persona_visibility schema (scheduled W22)"
+  ],
+  "updated_at": "2026-05-16T09:00:00Z",
+  "url": "https://confluence.example.com/display/OCIFACP/26ai+Exec+Review+2026-W20"
+}

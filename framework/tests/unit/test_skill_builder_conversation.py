@@ -240,6 +240,43 @@ class TestHandlePromoteResponse:
         turn = conv._handle_promote_response("yes, promote")
         assert turn.done is True
 
+    def test_promote_with_empty_kb_shows_warning(self):
+        """Promoting with no ingested items must include a warning in the DONE message."""
+        conv = SkillBuilderConversation(persona="tpm", skill_store=None)
+        conv._data.persona = "tpm"
+        conv._data.skill_name = "weekly_report"
+        conv._data.synth_id = "synth-warn"
+        conv._data.sources = [{"kind": "confluence", "space": "OCIFACP"}]
+        conv._data.ingest_result = {
+            "status": "completed", "items_processed": 0, "items_upserted": 0,
+            "mode": "stub", "pages_new": 0, "pages_updated": 0, "pages_unchanged": 0,
+        }
+
+        turn = conv._handle_promote_response("yes, promote")
+        assert turn.done is True
+        # Should mention that KB is empty and how to populate it
+        assert "empty" in turn.message.lower() or "no content" in turn.message.lower() or "⚠" in turn.message, (
+            "Promote DONE message must warn about empty KB"
+        )
+
+    def test_promote_with_ingested_items_no_warning(self):
+        """Promoting with items ingested must NOT show the empty-KB warning."""
+        conv = SkillBuilderConversation(persona="tpm", skill_store=None)
+        conv._data.persona = "tpm"
+        conv._data.skill_name = "weekly_report"
+        conv._data.synth_id = "synth-ok"
+        conv._data.sources = [{"kind": "confluence", "space": "OCIFACP"}]
+        conv._data.ingest_result = {
+            "status": "completed", "items_processed": 5, "items_upserted": 5,
+            "mode": "fixture", "pages_new": 5, "pages_updated": 0, "pages_unchanged": 0,
+        }
+
+        turn = conv._handle_promote_response("yes, promote")
+        assert turn.done is True
+        assert "KB populated" in turn.message, (
+            "Promote DONE message must confirm KB is populated when items > 0"
+        )
+
 
 # ---------------------------------------------------------------------------
 # _run_validate — skill_store integration

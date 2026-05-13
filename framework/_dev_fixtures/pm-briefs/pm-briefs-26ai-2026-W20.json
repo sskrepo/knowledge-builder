@@ -1,0 +1,21 @@
+{
+  "id": "fixture-pm-briefs-26ai-2026-W20",
+  "source": "confluence",
+  "source_id": "pm-briefs-26ai-2026-W20",
+  "space": "PRODUCT",
+  "labels": ["26ai", "pm-brief", "weekly"],
+  "title": "26ai PM Brief — Week 2026-W20",
+  "project_name": "26ai (OCI Foundational AI)",
+  "week_id": "2026-W20",
+  "dependencies": [
+    "OCI capacity team: PHX GPU slot allocation — 26ai blocked on W21 inference ramp (P1, ETA W20 EOD)",
+    "Security: persona_visibility ACL schema review — non-blocking, scheduled W22",
+    "Legal: Orion SDK license audit — resolved W19, no action required"
+  ],
+  "upcoming_decisions": [
+    "Phase 2 scope lock: confirm Jira adapter deferred to W22 vs. pull-forward (owner: PM, DRI: TPM)",
+    "eval exit criteria bar: raise recall@5 target from 0.90 to 0.92 for production gate? (owner: PM)"
+  ],
+  "updated_at": "2026-05-16T08:00:00Z",
+  "url": "https://confluence.example.com/display/PRODUCT/26ai+PM+Brief+2026-W20"
+}
