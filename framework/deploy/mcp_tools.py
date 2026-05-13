@@ -244,7 +244,11 @@ EXTERNAL_TOOLS_SCHEMA = [
             "analysis during an authorSkill session. Call this BEFORE providing "
             "an artifact reference in an authorSkill turn. "
             "Returns an artifactId — include it in the next authorSkill input as: "
-            "'artifact:<filename> id:<artifactId>'"
+            "'artifact:<filename> id:<artifactId>'\n\n"
+            "Analyzer capability: extracts text-based structure (slide titles, "
+            "headings, bullet text). Image-only slides (e.g. a JPG embedded in a "
+            "PPTX) yield only placeholder field names — in that case, replace the "
+            "stub fields with your real field list at the REVIEW_FIELDS step."
         ),
         "inputSchema": {
             "type": "object",
@@ -889,6 +893,24 @@ def _make_delete_skill_handler(app):
                 "skillName": skill_name,
                 "status": "not_found",
             }
+
+        # Mirror delete to filesystem so _list_available_personas() stays accurate
+        # (BUG-queue-4fd5e — ADB delete alone leaves disk stale)
+        from pathlib import Path as _Path
+        _fs_root = _Path(__file__).resolve().parents[2]
+        _FS_TEMPLATES = {
+            "workflow_skill":  "framework/workflow_skills/{persona}/{skill_name}.yaml",
+            "eval_extraction": "eval/gold_sets/{persona}-{skill_name}-extraction.jsonl",
+            "eval_workflow":   "eval/gold_sets/{persona}-{skill_name}-workflow.jsonl",
+        }
+        for _tmpl in _FS_TEMPLATES.values():
+            _fp = _fs_root / _tmpl.format(persona=persona, skill_name=skill_name)
+            if _fp.exists():
+                try:
+                    _fp.unlink()
+                    log.info("mcp:deleteSkill removed filesystem artifact: %s", _fp.name)
+                except OSError as _exc:
+                    log.warning("mcp:deleteSkill fs cleanup failed for %s: %s", _fp.name, _exc)
 
         # Remove the promoted KB entry from KBF_PERSONA_BUILDERS so ShimKb
         # stops routing queries to this skill's KB.

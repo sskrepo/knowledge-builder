@@ -702,16 +702,18 @@ class TestAdvanceToReviewSchemaWithLlmSpecs:
         assert "extra_notes" in turn.message
 
     def test_removed_field_note_shown_when_user_dropped_llm_field(self):
-        """Delta note shows removed fields if LLM originally found them."""
+        """Delta note shows removed fields if LLM originally found them from a real artifact."""
         llm_specs = {
             "schedule_health": {"type": "string", "description": "RAG status."},
             "budget_health": {"type": "string", "description": "Budget RAG."},
         }
-        # User dropped budget_health
+        # User dropped budget_health; artifact_path must be set so the note fires
+        # (BUG-938f0 / BUG-9c3d9: without an artifact, "removed from artifact" is misleading)
         conv = self._make_conv(
             fields=["schedule_health"],
             llm_specs=llm_specs,
         )
+        conv._data.artifact_path = "/tmp/fake_artifact.pptx"
         turn = conv._advance_to_review_schema()
         assert "budget_health" in turn.message  # removed note
 

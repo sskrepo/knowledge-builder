@@ -187,6 +187,17 @@ class SkillBuilderConversation:
         user_input = user_input.strip()
         self._data.updated_at = _now_iso()
 
+        # Cross-cutting command: "rename skill to <name>" — valid before COMMIT
+        _PRE_COMMIT_STATES = frozenset({
+            "IDENTIFY_PERSONA", "ANALYZE_ARTIFACT", "REVIEW_FIELDS",
+            "REVIEW_SCHEMA", "CHECK_REUSE", "CONFIGURE_SOURCES",
+            "CONFIGURE_TRIGGERS", "PREVIEW", "CONFIRM",
+        })
+        if self._state in _PRE_COMMIT_STATES:
+            _rename_m = re.match(r"(?i)rename\s+skill\s+to\s+(\S+)", user_input)
+            if _rename_m:
+                return self._turn(self._handle_rename_skill(_rename_m.group(1)))
+
         handler = {
             "IDENTIFY_PERSONA": self._handle_identify_persona,
             "ANALYZE_ARTIFACT": self._handle_analyze_artifact,
@@ -357,6 +368,27 @@ class SkillBuilderConversation:
             ),
         )
 
+    def _handle_rename_skill(self, new_name: str) -> ConversationTurn:
+        """Apply 'rename skill to <name>' command — valid at any pre-COMMIT state."""
+        old_name = self._data.skill_name
+        new_slug = _slugify(new_name)
+        if not new_slug or new_slug == "unnamed_skill":
+            return ConversationTurn(
+                state=self._state,
+                message=(
+                    f"'{new_name}' is not a valid skill name. "
+                    "Use a short descriptive snake_case name (e.g. 'weekly_exec_review')."
+                ),
+            )
+        self._data.skill_name = new_slug
+        return ConversationTurn(
+            state=self._state,
+            message=(
+                f"✓ Skill renamed: '{old_name}' → '{new_slug}'.\n\n"
+                "Now continue — re-send your previous input to proceed."
+            ),
+        )
+
     def _handle_analyze_artifact_prompt(self) -> ConversationTurn:
         slug = self._data.skill_name
         slug_notice = ""
@@ -369,9 +401,6 @@ class SkillBuilderConversation:
                 f"\n\nNote: your skill has been auto-named '{slug}'. "
                 "You can type 'rename skill to <shorter_name>' at any point before COMMIT "
                 "to use a shorter, more descriptive name."
-                # TODO(follow-up): implement 'rename skill' command handler in
-                # _handle_analyze_artifact / _handle_review_fields_response so the
-                # above instruction is actionable (OPS-CD461C27).
             )
         return ConversationTurn(
             state="ANALYZE_ARTIFACT",
@@ -666,18 +695,26 @@ class SkillBuilderConversation:
         return self._prompt_review_schema(delta_fields=delta_fields if delta_fields else None)
 
     def _prompt_review_schema(self, delta_fields: list[str] | None = None) -> ConversationTurn:
-        # Build delta note when user added fields not in original LLM analysis
         delta_note = ""
-        if delta_fields:
-            delta_note = (
-                f"\n⚠️ {len(delta_fields)} field(s) were added after the artifact analysis "
-                f"({', '.join(delta_fields)}) — their descriptions were synthesised from "
-                "context and may need more refinement than the rest.\n"
-            )
-
-        # Build removed note: fields the LLM originally found but user dropped
         original_fields = set(self._data.llm_suggested_specs.keys())
-        if original_fields:
+        artifact_was_analyzed = bool(self._data.artifact_path)
+
+        # "added after artifact analysis" — only meaningful when a real artifact was
+        # uploaded AND the original LLM-suggested fields overlap with the final set.
+        # Without an artifact, delta_fields just means the LLM didn't pre-spec them,
+        # not that they were added "after" anything (BUG-938f0, BUG-9c3d9).
+        if delta_fields and artifact_was_analyzed:
+            retained_original = original_fields & set(self._data.fields)
+            if retained_original:
+                delta_note = (
+                    f"\n⚠️ {len(delta_fields)} field(s) were added after the artifact analysis "
+                    f"({', '.join(delta_fields)}) — their descriptions were synthesised from "
+                    "context and may need more refinement than the rest.\n"
+                )
+
+        # "removed from artifact" — only show when artifact produced original fields
+        # that the user then dropped (not meaningful when no artifact was uploaded).
+        if artifact_was_analyzed and original_fields:
             removed = original_fields - set(self._data.fields)
             if removed:
                 delta_note += (
