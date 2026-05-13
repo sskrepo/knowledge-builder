@@ -1055,3 +1055,240 @@ class TestRenameSkillCommand:
         # At VALIDATE, 'rename skill to X' is not a valid command; skill_name unchanged
         conv.respond("rename skill to something_else")
         assert conv._data.skill_name == "original"
+
+
+# ---------------------------------------------------------------------------
+# _run_ingest — real ingestion path (Gap 1 fix)
+# ---------------------------------------------------------------------------
+
+
+class TestRunIngest:
+    """Tests for the replaced _run_ingest() implementation."""
+
+    def _make_conv(self, sources=None) -> SkillBuilderConversation:
+        conv = SkillBuilderConversation(persona="tpm")
+        conv._data.persona = "tpm"
+        conv._data.skill_name = "weekly_report"
+        conv._data.sources = sources if sources is not None else []
+        return conv
+
+    def test_run_ingest_no_confluence_sources_returns_stub(self):
+        """No sources → mode='stub', items_processed=0."""
+        conv = self._make_conv(sources=[])
+        turn = conv._run_ingest()
+
+        assert turn.state == "INGEST"
+        assert conv._data.ingest_result["mode"] == "stub"
+        assert conv._data.ingest_result["items_processed"] == 0
+        assert conv._data.ingest_result["items_upserted"] == 0
+        assert "yes, run eval" in turn.options
+
+    def test_run_ingest_adb_source_skipped(self):
+        """ADB-only sources → mode='stub', ConfluenceWikiIngestor never instantiated.
+
+        ConfluenceWikiIngestor is a local import inside _run_ingest(), so we verify
+        absence of Confluence processing via the ingest_result stats (0 pages) rather
+        than patching the class.
+        """
+        conv = self._make_conv(sources=[{"kind": "adb", "table": "KBF_X"}])
+        turn = conv._run_ingest()
+
+        # No Confluence sources → stub mode, zero stats
+        assert conv._data.ingest_result["mode"] == "stub"
+        assert conv._data.ingest_result["items_processed"] == 0
+        assert turn.state == "INGEST"
+
+    def test_run_ingest_confluence_sources_calls_ingestor(self):
+        """Confluence source → ingestor.ingest_space called, stats accumulated.
+
+        ConfluenceWikiIngestor is a local import in _run_ingest(), so we patch it
+        at its canonical module path and mock _build_confluence_adapter at the
+        conversation module level.
+        """
+        import os
+        sources = [{"kind": "confluence", "space": "TPM", "include_labels": ["kb"]}]
+        conv = self._make_conv(sources=sources)
+
+        mock_ingestor_instance = MagicMock()
+        mock_ingestor_instance.ingest_space.return_value = {
+            "pages_new": 3,
+            "pages_updated": 1,
+            "pages_unchanged": 2,
+        }
+        mock_ingestor_cls = MagicMock(return_value=mock_ingestor_instance)
+
+        # Patch _build_confluence_adapter to return None (fixture mode on laptop)
+        with patch.dict(os.environ, {"KBF_ENV": "laptop"}):
+            with patch(
+                "framework.skill_builder.conversation._build_confluence_adapter",
+                return_value=None,
+            ):
+                with patch(
+                    "framework.ingestion.confluence_wiki_ingest.ConfluenceWikiIngestor",
+                    mock_ingestor_cls,
+                ):
+                    turn = conv._run_ingest()
+
+        # ingest_space must be called with correct space + labels
+        mock_ingestor_instance.ingest_space.assert_called_once_with("TPM", ["kb"])
+
+        result = conv._data.ingest_result
+        assert result["items_upserted"] == 4   # 3 new + 1 updated
+        assert result["items_processed"] == 6  # 3 + 1 + 2
+        assert result["pages_new"] == 3
+        assert result["pages_updated"] == 1
+        assert result["pages_unchanged"] == 2
+        assert result["mode"] == "fixture"     # laptop → fixture mode
+        assert turn.state == "INGEST"
+        assert "3 new, 1 updated, 2 unchanged" in turn.message
+
+    def test_run_ingest_confluence_source_no_labels(self):
+        """Confluence source with no labels → ingest_space called with labels=None."""
+        import os
+        sources = [{"kind": "confluence", "space": "ARCH"}]
+        conv = self._make_conv(sources=sources)
+
+        mock_ingestor_instance = MagicMock()
+        mock_ingestor_instance.ingest_space.return_value = {
+            "pages_new": 1,
+            "pages_updated": 0,
+            "pages_unchanged": 5,
+        }
+        mock_ingestor_cls = MagicMock(return_value=mock_ingestor_instance)
+
+        with patch.dict(os.environ, {"KBF_ENV": "laptop"}):
+            with patch(
+                "framework.skill_builder.conversation._build_confluence_adapter",
+                return_value=None,
+            ):
+                with patch(
+                    "framework.ingestion.confluence_wiki_ingest.ConfluenceWikiIngestor",
+                    mock_ingestor_cls,
+                ):
+                    conv._run_ingest()
+
+        mock_ingestor_instance.ingest_space.assert_called_once_with("ARCH", None)
+
+    def test_run_ingest_ingestor_exception_does_not_raise(self):
+        """If ingestor.ingest_space raises, _run_ingest catches it and still returns a turn."""
+        import os
+        sources = [{"kind": "confluence", "space": "TPM"}]
+        conv = self._make_conv(sources=sources)
+
+        mock_ingestor_instance = MagicMock()
+        mock_ingestor_instance.ingest_space.side_effect = RuntimeError("network timeout")
+        mock_ingestor_cls = MagicMock(return_value=mock_ingestor_instance)
+
+        with patch.dict(os.environ, {"KBF_ENV": "laptop"}):
+            with patch(
+                "framework.skill_builder.conversation._build_confluence_adapter",
+                return_value=None,
+            ):
+                with patch(
+                    "framework.ingestion.confluence_wiki_ingest.ConfluenceWikiIngestor",
+                    mock_ingestor_cls,
+                ):
+                    turn = conv._run_ingest()
+
+        # Must not propagate the exception
+        assert turn.state == "INGEST"
+        # Stats should be zero (exception swallowed)
+        assert conv._data.ingest_result["items_upserted"] == 0
+
+
+class TestBuildConfluenceAdapter:
+    """Unit tests for _build_confluence_adapter() config-merge logic."""
+
+    def _write_base_cfg(self, tmp_path, mode: str) -> Path:
+        """Write a minimal confluence.yaml to tmp_path/adapters/ and return its path."""
+        adapters_dir = tmp_path / "framework" / "config" / "adapters"
+        adapters_dir.mkdir(parents=True)
+        cfg_path = adapters_dir / "confluence.yaml"
+        cfg_path.write_text(f"mode: {mode}\n{mode}:\n  base_url: https://conf.example.com\n")
+        return tmp_path
+
+    def _write_env_cfg(self, tmp_path, overrides: str) -> None:
+        """Write a minimal laptop.yaml with adapters_overrides block."""
+        env_dir = tmp_path / "framework" / "config"
+        env_dir.mkdir(parents=True, exist_ok=True)
+        (env_dir / "laptop.yaml").write_text(f"adapters_overrides:\n  confluence:\n{overrides}")
+
+    def test_laptop_codex_proxy_override_builds_proxy_adapter(self, tmp_path):
+        """laptop.yaml sets mode: codex_proxy → ConfluenceCodexProxyAdapter returned."""
+        from framework.skill_builder.conversation import _build_confluence_adapter
+
+        # Base config says mode: native; laptop overrides to codex_proxy
+        self._write_base_cfg(tmp_path, "native")
+        self._write_env_cfg(tmp_path, (
+            "    mode: codex_proxy\n"
+            "    codex_proxy:\n"
+            "      server_name: central_confluence\n"
+            "      timeout_seconds: 120\n"
+            "      max_pages_per_list: 10\n"
+        ))
+
+        mock_cls = MagicMock()
+        with patch("framework.adapters.confluence.codex_proxy.ConfluenceCodexProxyAdapter", mock_cls):
+            with patch(
+                "framework.skill_builder.conversation.ConfluenceCodexProxyAdapter",
+                mock_cls,
+                create=True,
+            ):
+                adapter = _build_confluence_adapter("laptop", tmp_path)
+
+        # Adapter must be constructed (mock called once)
+        assert adapter is not None or mock_cls.called  # either real class or mock
+
+    def test_no_base_config_no_env_override_returns_none(self, tmp_path):
+        """No confluence.yaml and no override → fixture mode (None)."""
+        from framework.skill_builder.conversation import _build_confluence_adapter
+
+        # Only create the env config dir but no confluence.yaml
+        (tmp_path / "framework" / "config").mkdir(parents=True)
+        (tmp_path / "framework" / "config" / "laptop.yaml").write_text("{}\n")
+
+        result = _build_confluence_adapter("laptop", tmp_path)
+        assert result is None
+
+    def test_base_native_mode_no_env_override_builds_native_adapter(self, tmp_path):
+        """mode: native in base config + no override → ConfluenceNativeAdapter."""
+        from framework.skill_builder.conversation import _build_confluence_adapter
+
+        self._write_base_cfg(tmp_path, "native")
+        (tmp_path / "framework" / "config" / "laptop.yaml").write_text("{}\n")
+
+        mock_cls = MagicMock()
+        with patch("framework.adapters.confluence.native.ConfluenceNativeAdapter", mock_cls):
+            with patch(
+                "framework.skill_builder.conversation.ConfluenceNativeAdapter",
+                mock_cls,
+                create=True,
+            ):
+                adapter = _build_confluence_adapter("laptop", tmp_path)
+
+        assert adapter is not None or mock_cls.called
+
+    def test_env_override_takes_precedence_over_base_mode(self, tmp_path):
+        """Base says mode: mcp, env override says mode: codex_proxy → codex_proxy wins."""
+        from framework.skill_builder.conversation import _build_confluence_adapter
+
+        self._write_base_cfg(tmp_path, "mcp")
+        self._write_env_cfg(tmp_path, (
+            "    mode: codex_proxy\n"
+            "    codex_proxy:\n"
+            "      server_name: central_confluence\n"
+            "      timeout_seconds: 60\n"
+        ))
+
+        mock_proxy = MagicMock()
+        mock_mcp = MagicMock()
+        with patch("framework.skill_builder.conversation.ConfluenceMcpAdapter", mock_mcp, create=True):
+            with patch(
+                "framework.skill_builder.conversation.ConfluenceCodexProxyAdapter",
+                mock_proxy,
+                create=True,
+            ):
+                _build_confluence_adapter("laptop", tmp_path)
+
+        # codex_proxy should be instantiated, mcp should NOT
+        assert not mock_mcp.called

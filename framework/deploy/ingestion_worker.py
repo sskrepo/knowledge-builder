@@ -23,6 +23,68 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 # ---------------------------------------------------------------------------
+# Confluence adapter builder
+# ---------------------------------------------------------------------------
+
+def _build_confluence_adapter(cfg: dict, kbf_env: str):
+    """Build the Confluence adapter from config.
+
+    cfg is the already-loaded env YAML (laptop.yaml / staging.yaml / prod.yaml).
+    Merges base framework/config/adapters/confluence.yaml with
+    cfg["adapters_overrides"]["confluence"] so that laptop can set
+    mode: codex_proxy and production can set mode: native / mcp.
+    Returns None only when no Confluence config exists (fixture HTML fallback).
+    """
+    try:
+        import yaml as _yaml
+
+        # Load base adapter config
+        base_path = REPO_ROOT / "framework" / "config" / "adapters" / "confluence.yaml"
+        base_cfg: dict = {}
+        if base_path.exists():
+            base_cfg = _yaml.safe_load(base_path.read_text()) or {}
+
+        # Env-specific overrides from the already-loaded cfg
+        overrides = cfg.get("adapters_overrides", {}).get("confluence", {})
+
+        # Merge: base first, env overrides on top
+        merged = {**base_cfg, **overrides}
+        mode = merged.get("mode", "")
+
+        if not mode:
+            log.info("Confluence mode not configured — using fixture mode")
+            return None
+
+        if mode == "codex_proxy":
+            from ..adapters.confluence.codex_proxy import ConfluenceCodexProxyAdapter
+            cp_cfg = {**merged.get("codex_proxy", {}), **overrides.get("codex_proxy", {})}
+            log.info("ingestion_worker: Confluence codex_proxy server_name=%s", cp_cfg.get("server_name"))
+            return ConfluenceCodexProxyAdapter(cp_cfg)
+
+        if mode == "codex_cli":
+            from ..adapters.confluence.codex_cli import ConfluenceCodexCLIAdapter
+            cc_cfg = {**merged.get("codex_cli", {}), **overrides.get("codex_cli", {})}
+            log.info("ingestion_worker: Confluence codex_cli server_name=%s", cc_cfg.get("server_name"))
+            return ConfluenceCodexCLIAdapter(cc_cfg)
+
+        if mode == "mcp":
+            from ..adapters.confluence.mcp import ConfluenceMcpAdapter
+            log.info("ingestion_worker: Confluence mcp endpoint=%s", merged.get("mcp", {}).get("endpoint"))
+            return ConfluenceMcpAdapter(merged.get("mcp", {}))
+
+        if mode == "native":
+            from ..adapters.confluence.native import ConfluenceNativeAdapter
+            log.info("ingestion_worker: Confluence native base_url=%s", merged.get("native", {}).get("base_url"))
+            return ConfluenceNativeAdapter(merged.get("native", {}))
+
+        log.info("ingestion_worker: Confluence mode=%r not recognised — using fixture mode", mode)
+        return None
+    except Exception as exc:
+        log.info("ingestion_worker: could not build Confluence adapter (%s) — using fixture mode", exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # KB entry loading — ADB primary, disk fallback
 # ---------------------------------------------------------------------------
 
@@ -193,8 +255,12 @@ def main(persona_builder: str | None = None, skill_store=None):
         return {"pages_new": 0, "pages_updated": 0, "pages_unchanged": 0, "skipped_builders": 0}
 
     # ── Ingest each KB entry ───────────────────────────────────────────────
-    # Fixture mode on laptop (adapter=None); real adapter wired in production.
-    ingestor = ConfluenceWikiIngestor(adapter=None)
+    confluence_adapter = _build_confluence_adapter(cfg, kbf_env)
+    ingestor = ConfluenceWikiIngestor(adapter=confluence_adapter)
+    log.info(
+        "ingestion_worker: Confluence adapter mode=%s",
+        "live" if confluence_adapter is not None else "fixture",
+    )
 
     total_stats = {"pages_new": 0, "pages_updated": 0, "pages_unchanged": 0, "skipped_builders": 0}
 

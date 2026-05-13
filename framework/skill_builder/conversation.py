@@ -30,6 +30,68 @@ log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+
+def _build_confluence_adapter(kbf_env: str, repo_root: "Path"):
+    """Build the Confluence adapter from config.
+
+    Merges base framework/config/adapters/confluence.yaml with env-specific
+    adapters_overrides.confluence from {kbf_env}.yaml (e.g. laptop.yaml sets
+    mode: codex_proxy for eMCP via Codex CLI).  Returns None only when no
+    Confluence config exists at all (falls back to fixture HTML).
+    """
+    try:
+        import yaml as _yaml
+
+        # Load base adapter config
+        base_path = repo_root / "framework" / "config" / "adapters" / "confluence.yaml"
+        base_cfg: dict = {}
+        if base_path.exists():
+            base_cfg = _yaml.safe_load(base_path.read_text()) or {}
+
+        # Load env-specific overrides (laptop.yaml, staging.yaml, prod.yaml)
+        env_path = repo_root / "framework" / "config" / f"{kbf_env}.yaml"
+        env_cfg: dict = {}
+        if env_path.exists():
+            env_cfg = _yaml.safe_load(env_path.read_text()) or {}
+        overrides = env_cfg.get("adapters_overrides", {}).get("confluence", {})
+
+        # Merge: base first, env overrides on top
+        merged = {**base_cfg, **overrides}
+        mode = merged.get("mode", "")
+
+        if not mode:
+            log.info("Confluence mode not configured — using fixture mode")
+            return None
+
+        if mode == "codex_proxy":
+            from ..adapters.confluence.codex_proxy import ConfluenceCodexProxyAdapter
+            cp_cfg = {**merged.get("codex_proxy", {}), **overrides.get("codex_proxy", {})}
+            log.info("Confluence adapter: codex_proxy server_name=%s", cp_cfg.get("server_name"))
+            return ConfluenceCodexProxyAdapter(cp_cfg)
+
+        if mode == "codex_cli":
+            from ..adapters.confluence.codex_cli import ConfluenceCodexCLIAdapter
+            cc_cfg = {**merged.get("codex_cli", {}), **overrides.get("codex_cli", {})}
+            log.info("Confluence adapter: codex_cli server_name=%s", cc_cfg.get("server_name"))
+            return ConfluenceCodexCLIAdapter(cc_cfg)
+
+        if mode == "mcp":
+            from ..adapters.confluence.mcp import ConfluenceMcpAdapter
+            log.info("Confluence adapter: mcp endpoint=%s", merged.get("mcp", {}).get("endpoint"))
+            return ConfluenceMcpAdapter(merged.get("mcp", {}))
+
+        if mode == "native":
+            from ..adapters.confluence.native import ConfluenceNativeAdapter
+            log.info("Confluence adapter: native base_url=%s", merged.get("native", {}).get("base_url"))
+            return ConfluenceNativeAdapter(merged.get("native", {}))
+
+        log.info("Confluence mode=%r not recognised — using fixture mode", mode)
+        return None
+    except Exception as exc:
+        log.warning("could not build Confluence adapter (%s) — using fixture mode", exc)
+        return None
+
+
 _ANALYZE_ARTIFACT_PROMPT = """\
 You are a Knowledge Builder Framework schema engineer. An artifact has been parsed \
 and its structural sections identified.
@@ -1257,22 +1319,91 @@ class SkillBuilderConversation:
     # -- INGEST ----------------------------------------------------------
 
     def _run_ingest(self) -> ConversationTurn:
+        import os as _os
+        from ..ingestion.confluence_wiki_ingest import ConfluenceWikiIngestor
+
         self._state = "INGEST"
-        # In stub mode, simulate ingestion
+
+        kbf_env = _os.environ.get("KBF_ENV", "laptop")
+        confluence_sources = [s for s in self._data.sources if s.get("kind") == "confluence"]
+
+        if not confluence_sources:
+            # No Confluence sources — nothing to ingest; other kinds are query-time or Phase 2
+            for src in self._data.sources:
+                kind = src.get("kind")
+                if kind == "adb":
+                    log.info("source kind=adb table=%s — query-time retrieval, no ingest needed",
+                             src.get("table", "?"))
+                elif kind in ("jira", "git"):
+                    log.info("source kind=%s — Phase 2, not yet wired", kind)
+            self._data.ingest_result = {
+                "status": "completed",
+                "items_processed": 0,
+                "items_upserted": 0,
+                "mode": "stub",
+                "message": "No Confluence sources configured — nothing to ingest.",
+            }
+            return ConversationTurn(
+                state="INGEST",
+                message=(
+                    "Ingestion complete (no Confluence sources configured).\n\n"
+                    "Proceed to eval?"
+                ),
+                data={"ingest": self._data.ingest_result},
+                options=["yes, run eval", "stop here"],
+            )
+
+        confluence_adapter = _build_confluence_adapter(kbf_env, REPO_ROOT)
+        mode = "live" if confluence_adapter is not None else "fixture"
+        ingestor = ConfluenceWikiIngestor(adapter=confluence_adapter)
+
+        total_new = 0
+        total_updated = 0
+        total_unchanged = 0
+
+        for src in self._data.sources:
+            kind = src.get("kind")
+            if kind == "confluence":
+                space = src.get("space", "")
+                labels = src.get("include_labels") or src.get("labels") or []
+                try:
+                    stats = ingestor.ingest_space(space, labels or None)
+                    log.info(
+                        "_run_ingest: Confluence %s new=%d updated=%d unchanged=%d",
+                        space,
+                        stats["pages_new"],
+                        stats["pages_updated"],
+                        stats["pages_unchanged"],
+                    )
+                    total_new += stats["pages_new"]
+                    total_updated += stats["pages_updated"]
+                    total_unchanged += stats["pages_unchanged"]
+                except Exception as exc:
+                    log.error("_run_ingest: Confluence %s failed: %s", space, exc)
+            elif kind == "adb":
+                log.info("_run_ingest: source kind=adb table=%s — query-time retrieval, no ingest needed",
+                         src.get("table", "?"))
+            elif kind in ("jira", "git"):
+                log.info("_run_ingest: source kind=%s — Phase 2, not yet wired", kind)
+
+        items_upserted = total_new + total_updated
+        items_processed = total_new + total_updated + total_unchanged
+
         self._data.ingest_result = {
             "status": "completed",
-            "items_processed": 0,
-            "items_upserted": 0,
-            "mode": "stub",
-            "message": "Stub mode — no real ingestion. Connect ADB + sources to run for real.",
+            "items_processed": items_processed,
+            "items_upserted": items_upserted,
+            "pages_new": total_new,
+            "pages_updated": total_updated,
+            "pages_unchanged": total_unchanged,
+            "mode": mode,
         }
         return ConversationTurn(
             state="INGEST",
             message=(
-                "Ingestion complete (stub mode — no real sources connected).\n\n"
-                "In production this would pull data from your configured sources, "
-                "run it through the LLM parser with your extraction schema, "
-                "and store ContentItems in the KB.\n\n"
+                f"Ingestion complete ({mode} mode).\n\n"
+                f"Processed {items_processed} pages: "
+                f"{total_new} new, {total_updated} updated, {total_unchanged} unchanged.\n\n"
                 "Proceed to eval?"
             ),
             data={"ingest": self._data.ingest_result},
