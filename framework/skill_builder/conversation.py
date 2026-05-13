@@ -1356,11 +1356,11 @@ class SkillBuilderConversation:
         confluence_adapter = _build_confluence_adapter(kbf_env, REPO_ROOT)
         mode = "live" if confluence_adapter is not None else "fixture"
         ingestor = ConfluenceWikiIngestor(adapter=confluence_adapter)
-        # mode may be overridden to "fixture-fallback" inside the loop if live adapter fails
 
         total_new = 0
         total_updated = 0
         total_unchanged = 0
+        failures: list[tuple[str, str]] = []  # (space, error_message)
 
         for src in self._data.sources:
             kind = src.get("kind")
@@ -1380,22 +1380,8 @@ class SkillBuilderConversation:
                     total_updated += stats["pages_updated"]
                     total_unchanged += stats["pages_unchanged"]
                 except Exception as exc:
-                    log.error("_run_ingest: Confluence %s failed: %s — retrying with fixture fallback", space, exc)
-                    # Live adapter failed (e.g. codex proxy timeout). Fall back to fixture
-                    # mode so the skill session still gets seed content on laptop.
-                    try:
-                        fixture_ingestor = ConfluenceWikiIngestor(adapter=None)
-                        stats = fixture_ingestor.ingest_space(space, labels or None)
-                        log.info(
-                            "_run_ingest: fixture fallback Confluence %s new=%d updated=%d unchanged=%d",
-                            space, stats["pages_new"], stats["pages_updated"], stats["pages_unchanged"],
-                        )
-                        total_new += stats["pages_new"]
-                        total_updated += stats["pages_updated"]
-                        total_unchanged += stats["pages_unchanged"]
-                        mode = "fixture-fallback"
-                    except Exception as fix_exc:
-                        log.error("_run_ingest: fixture fallback also failed for %s: %s", space, fix_exc)
+                    log.error("_run_ingest: Confluence %s failed: %s", space, exc)
+                    failures.append((space, str(exc)))
             elif kind == "adb":
                 log.info("_run_ingest: source kind=adb table=%s — query-time retrieval, no ingest needed",
                          src.get("table", "?"))
@@ -1404,6 +1390,35 @@ class SkillBuilderConversation:
 
         items_upserted = total_new + total_updated
         items_processed = total_new + total_updated + total_unchanged
+
+        # Hard-fail policy: if ANY Confluence source failed, do NOT advance.
+        # Session stays at INGEST; user can fix the upstream (e.g. codex proxy,
+        # Confluence creds, network) and retry. Promotion is blocked so the
+        # skill remains in its previous state (draft).
+        if failures:
+            self._data.ingest_result = {
+                "status": "failed",
+                "items_processed": items_processed,
+                "items_upserted": items_upserted,
+                "pages_new": total_new,
+                "pages_updated": total_updated,
+                "pages_unchanged": total_unchanged,
+                "mode": mode,
+                "failures": [{"space": sp, "error": err} for sp, err in failures],
+            }
+            failure_lines = "\n".join(f"  • {sp}: {err}" for sp, err in failures)
+            return ConversationTurn(
+                state="INGEST",
+                message=(
+                    f"❌ Ingestion failed for {len(failures)} source(s) — skill will NOT be promoted.\n\n"
+                    f"{failure_lines}\n\n"
+                    f"The skill remains in its previous state. Fix the upstream issue "
+                    f"(e.g. restart codex proxy, check Confluence access, network) "
+                    f"and retry, or stop the session and resume later."
+                ),
+                data={"ingest": self._data.ingest_result},
+                options=["retry ingestion", "stop here"],
+            )
 
         self._data.ingest_result = {
             "status": "completed",
@@ -1431,6 +1446,23 @@ class SkillBuilderConversation:
         if any(kw in lowered for kw in ("stop", "done", "exit")):
             self._state = "DONE"
             return ConversationTurn(state="DONE", message="Session paused.", done=True)
+
+        # If the previous INGEST run failed, only "retry" advances us — anything
+        # else loops back to the failure message. Promotion is blocked until
+        # ingestion succeeds.
+        last = self._data.ingest_result or {}
+        if last.get("status") == "failed":
+            if "retry" in lowered or "again" in lowered:
+                return self._run_ingest()
+            return ConversationTurn(
+                state="INGEST",
+                message=(
+                    "Ingestion is still in a failed state — cannot proceed to eval.\n"
+                    "Type 'retry ingestion' to re-run, or 'stop here' to pause."
+                ),
+                options=["retry ingestion", "stop here"],
+            )
+
         return self._run_eval()
 
     # -- EVAL ------------------------------------------------------------
@@ -1531,6 +1563,27 @@ class SkillBuilderConversation:
     # -- PROMOTE ---------------------------------------------------------
 
     def _run_promote(self) -> ConversationTurn:
+        # Belt-and-suspenders: refuse to enter PROMOTE if ingestion did not complete
+        # successfully. State stays at INGEST so the skill remains in its previous
+        # state until the upstream issue (codex proxy, Confluence access, etc.) is fixed.
+        ingest = self._data.ingest_result or {}
+        if ingest.get("status") == "failed":
+            self._state = "INGEST"
+            failures = ingest.get("failures") or []
+            failure_lines = "\n".join(
+                f"  • {f.get('space','?')}: {f.get('error','?')}" for f in failures
+            ) or "  (no detail recorded)"
+            return ConversationTurn(
+                state="INGEST",
+                message=(
+                    "❌ Cannot promote — ingestion failed and the KB is empty.\n\n"
+                    f"{failure_lines}\n\n"
+                    "Fix the upstream issue and type 'retry ingestion', or 'stop here' to pause."
+                ),
+                data={"ingest": ingest},
+                options=["retry ingestion", "stop here"],
+            )
+
         self._state = "PROMOTE"
         # Notify the skill_store that we are about to promote (user still confirms)
         # The actual promotion DB update happens in _handle_promote_response when
