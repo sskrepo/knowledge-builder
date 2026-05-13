@@ -200,6 +200,7 @@ class TestConstructorDefault:
 class TestHandlePromoteResponse:
     def test_promote_yes_calls_skill_store_promote(self):
         mock_store = MagicMock()
+        mock_store.read_artifact.return_value = None  # no delta
         conv = SkillBuilderConversation(persona="tpm", skill_store=mock_store)
         conv._data.persona = "tpm"
         conv._data.skill_name = "weekly_report"
@@ -233,6 +234,77 @@ class TestHandlePromoteResponse:
 
     def test_promote_no_skill_store_still_completes(self):
         conv = SkillBuilderConversation(persona="tpm", skill_store=None)
+        conv._data.persona = "tpm"
+        conv._data.skill_name = "weekly_report"
+        conv._data.synth_id = "synth-x"
+
+        turn = conv._handle_promote_response("yes, promote")
+        assert turn.done is True
+
+    def test_promote_calls_upsert_persona_builder_kb_when_delta_exists(self, tmp_path):
+        """Option B: PROMOTE must write the delta to KBF_PERSONA_BUILDERS."""
+        delta_yaml = "name: weekly_report\nkind: vector\n"
+        mock_store = MagicMock()
+        mock_store.read_artifact.return_value = delta_yaml
+
+        conv = SkillBuilderConversation(persona="tpm", skill_store=mock_store)
+        conv._data.persona = "tpm"
+        conv._data.skill_name = "weekly_report"
+        conv._data.synth_id = "synth-x"
+
+        turn = conv._handle_promote_response("yes, promote")
+
+        assert turn.done is True
+        mock_store.read_artifact.assert_called_once_with(
+            "tpm", "weekly_report", "persona_builder_delta"
+        )
+        mock_store.upsert_persona_builder_kb.assert_called_once_with(
+            persona="tpm",
+            kb_name="weekly_report",
+            content_yaml=delta_yaml,
+            status="production",
+        )
+
+    def test_promote_skips_upsert_when_no_delta(self, tmp_path):
+        """PROMOTE with no persona_builder_delta must not call upsert."""
+        mock_store = MagicMock()
+        mock_store.read_artifact.return_value = None  # no delta stored
+
+        conv = SkillBuilderConversation(persona="tpm", skill_store=mock_store)
+        conv._data.persona = "tpm"
+        conv._data.skill_name = "weekly_report"
+        conv._data.synth_id = "synth-x"
+
+        conv._handle_promote_response("yes, promote")
+        mock_store.upsert_persona_builder_kb.assert_not_called()
+
+    def test_promote_removes_stray_new_kb_file(self, tmp_path):
+        """PROMOTE must delete the stale .new_kb file if it exists on disk."""
+        new_kb_path = tmp_path / "framework" / "persona_builders" / "tpm.yaml.new_kb"
+        new_kb_path.parent.mkdir(parents=True, exist_ok=True)
+        new_kb_path.write_text("name: weekly_report\n")
+
+        delta_yaml = "name: weekly_report\nkind: vector\n"
+        mock_store = MagicMock()
+        mock_store.read_artifact.return_value = delta_yaml
+
+        conv = SkillBuilderConversation(persona="tpm", skill_store=mock_store)
+        conv._data.persona = "tpm"
+        conv._data.skill_name = "weekly_report"
+        conv._data.synth_id = "synth-x"
+
+        with patch("framework.skill_builder.conversation.REPO_ROOT", tmp_path):
+            conv._handle_promote_response("yes, promote")
+
+        assert not new_kb_path.exists(), ".new_kb file must be removed after PROMOTE"
+
+    def test_promote_upsert_failure_does_not_crash(self):
+        """upsert_persona_builder_kb failure must not propagate (session still completes)."""
+        mock_store = MagicMock()
+        mock_store.read_artifact.return_value = "name: weekly_report\n"
+        mock_store.upsert_persona_builder_kb.side_effect = RuntimeError("ADB down")
+
+        conv = SkillBuilderConversation(persona="tpm", skill_store=mock_store)
         conv._data.persona = "tpm"
         conv._data.skill_name = "weekly_report"
         conv._data.synth_id = "synth-x"

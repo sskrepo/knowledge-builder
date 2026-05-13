@@ -455,6 +455,183 @@ class TestAdbSkillStoreDelete:
 
 
 # ---------------------------------------------------------------------------
+# upsert_persona_builder_kb / list_persona_builder_kbs — FilestoreSkillStore
+# ---------------------------------------------------------------------------
+
+
+class TestFilestorePersonaBuilderKbs:
+    def test_upsert_writes_file(self, tmp_path, monkeypatch):
+        store = FilestoreSkillStore(repo_root=tmp_path)
+        # Redirect the global _PB_STORE_ROOT so we don't pollute ~/.kbf
+        pb_root = tmp_path / ".kbf" / "persona_builders"
+        import framework.deploy.skill_store.filestore as fs_mod
+        monkeypatch.setattr(fs_mod, "_PB_STORE_ROOT", pb_root)
+
+        store.upsert_persona_builder_kb(
+            persona="tpm",
+            kb_name="weekly_status",
+            content_yaml="name: weekly_status\nkind: vector\n",
+            status="production",
+        )
+
+        dest = pb_root / "tpm" / "weekly_status.yaml"
+        assert dest.exists()
+        wrapper = yaml.safe_load(dest.read_text())
+        assert wrapper["persona"] == "tpm"
+        assert wrapper["kb_name"] == "weekly_status"
+        assert wrapper["status"] == "production"
+        assert "weekly_status" in wrapper["content_yaml"]
+
+    def test_list_returns_matching_entries(self, tmp_path, monkeypatch):
+        store = FilestoreSkillStore(repo_root=tmp_path)
+        pb_root = tmp_path / ".kbf" / "persona_builders"
+        import framework.deploy.skill_store.filestore as fs_mod
+        monkeypatch.setattr(fs_mod, "_PB_STORE_ROOT", pb_root)
+
+        store.upsert_persona_builder_kb("tpm", "weekly_status", "name: ws\n", "production")
+        store.upsert_persona_builder_kb("tpm", "risk_report", "name: rr\n", "draft")
+        store.upsert_persona_builder_kb("ops_eng", "incident_summary", "name: is\n", "production")
+
+        all_kbs = store.list_persona_builder_kbs()
+        assert len(all_kbs) == 3
+
+        prod_kbs = store.list_persona_builder_kbs(status="production")
+        assert len(prod_kbs) == 2
+        assert all(k["status"] == "production" for k in prod_kbs)
+
+        tpm_kbs = store.list_persona_builder_kbs(persona="tpm")
+        assert len(tpm_kbs) == 2
+        assert all(k["persona"] == "tpm" for k in tpm_kbs)
+
+        tpm_prod = store.list_persona_builder_kbs(persona="tpm", status="production")
+        assert len(tpm_prod) == 1
+        assert tpm_prod[0]["kb_name"] == "weekly_status"
+
+    def test_list_returns_empty_when_no_kbs(self, tmp_path, monkeypatch):
+        store = FilestoreSkillStore(repo_root=tmp_path)
+        pb_root = tmp_path / ".kbf" / "persona_builders"
+        import framework.deploy.skill_store.filestore as fs_mod
+        monkeypatch.setattr(fs_mod, "_PB_STORE_ROOT", pb_root)
+
+        result = store.list_persona_builder_kbs()
+        assert result == []
+
+    def test_upsert_is_idempotent(self, tmp_path, monkeypatch):
+        store = FilestoreSkillStore(repo_root=tmp_path)
+        pb_root = tmp_path / ".kbf" / "persona_builders"
+        import framework.deploy.skill_store.filestore as fs_mod
+        monkeypatch.setattr(fs_mod, "_PB_STORE_ROOT", pb_root)
+
+        store.upsert_persona_builder_kb("tpm", "weekly_status", "v1 content\n", "draft")
+        store.upsert_persona_builder_kb("tpm", "weekly_status", "v2 content\n", "production")
+
+        results = store.list_persona_builder_kbs(persona="tpm")
+        assert len(results) == 1
+        assert results[0]["status"] == "production"
+        assert "v2 content" in results[0]["content_yaml"]
+
+
+# ---------------------------------------------------------------------------
+# upsert_persona_builder_kb / list_persona_builder_kbs — AdbSkillStore
+# ---------------------------------------------------------------------------
+
+
+class TestAdbPersonaBuilderKbs:
+    def test_upsert_issues_merge_sql(self):
+        mock_pool, mock_conn, mock_cur = _make_mock_pool()
+        store = AdbSkillStore(pool=mock_pool)
+
+        store.upsert_persona_builder_kb(
+            persona="tpm",
+            kb_name="weekly_status",
+            content_yaml="name: weekly_status\nkind: vector\n",
+            status="production",
+        )
+
+        assert mock_cur.execute.call_count == 1
+        sql = mock_cur.execute.call_args.args[0]
+        assert "MERGE INTO KB_SHIM.KBF_PERSONA_BUILDERS" in sql
+
+        params = mock_cur.execute.call_args.args[1]
+        assert params["persona"] == "tpm"
+        assert params["kb_name"] == "weekly_status"
+        assert params["status"] == "production"
+        assert "weekly_status" in params["content_yaml"]
+        mock_conn.commit.assert_called_once()
+
+    def test_upsert_no_pool_is_noop(self):
+        store = AdbSkillStore(pool=None)
+        # Must not raise
+        store.upsert_persona_builder_kb("tpm", "skill", "yaml content\n")
+
+    def test_list_all_issues_select(self):
+        mock_pool, mock_conn, mock_cur = _make_mock_pool()
+        mock_cur.description = [("persona",), ("kb_name",), ("content_yaml",), ("status",), ("updated_at",)]
+        mock_cur.fetchall.return_value = [
+            {"persona": "tpm", "kb_name": "ws", "content_yaml": "name: ws\n",
+             "status": "production", "updated_at": "2026-01-01"},
+        ]
+
+        store = AdbSkillStore(pool=mock_pool)
+        results = store.list_persona_builder_kbs()
+
+        assert mock_cur.execute.call_count == 1
+        sql = mock_cur.execute.call_args.args[0]
+        assert "KBF_PERSONA_BUILDERS" in sql
+        assert len(results) == 1
+        assert results[0]["persona"] == "tpm"
+        assert results[0]["kb_name"] == "ws"
+
+    def test_list_by_persona_uses_persona_filter(self):
+        mock_pool, mock_conn, mock_cur = _make_mock_pool()
+        mock_cur.description = [("persona",), ("kb_name",), ("content_yaml",), ("status",), ("updated_at",)]
+        mock_cur.fetchall.return_value = []
+
+        store = AdbSkillStore(pool=mock_pool)
+        store.list_persona_builder_kbs(persona="tpm")
+
+        sql = mock_cur.execute.call_args.args[0]
+        params = mock_cur.execute.call_args.args[1]
+        assert "KBF_PERSONA_BUILDERS" in sql
+        assert "persona" in sql.lower()
+        assert params.get("persona") == "tpm"
+
+    def test_list_by_status_uses_status_filter(self):
+        mock_pool, mock_conn, mock_cur = _make_mock_pool()
+        mock_cur.description = [("persona",), ("kb_name",), ("content_yaml",), ("status",), ("updated_at",)]
+        mock_cur.fetchall.return_value = []
+
+        store = AdbSkillStore(pool=mock_pool)
+        store.list_persona_builder_kbs(status="production")
+
+        sql = mock_cur.execute.call_args.args[0]
+        params = mock_cur.execute.call_args.args[1]
+        assert "KBF_PERSONA_BUILDERS" in sql
+        assert params.get("status") == "production"
+
+    def test_list_no_pool_returns_empty(self):
+        store = AdbSkillStore(pool=None)
+        result = store.list_persona_builder_kbs()
+        assert result == []
+
+    def test_list_materialises_lob_content_yaml(self):
+        mock_pool, mock_conn, mock_cur = _make_mock_pool()
+        lob = MagicMock()
+        lob.read.return_value = "name: ws\n"
+        mock_cur.description = [("persona",), ("kb_name",), ("content_yaml",), ("status",), ("updated_at",)]
+        mock_cur.fetchall.return_value = [
+            {"persona": "tpm", "kb_name": "ws", "content_yaml": lob,
+             "status": "production", "updated_at": "2026-01-01"},
+        ]
+
+        store = AdbSkillStore(pool=mock_pool)
+        results = store.list_persona_builder_kbs()
+
+        assert results[0]["content_yaml"] == "name: ws\n"
+        lob.read.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # deleteSkill MCP tool
 # ---------------------------------------------------------------------------
 

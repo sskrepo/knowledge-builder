@@ -292,6 +292,18 @@ async def _handle_continue(req: Request, consumer, synth_id: str, user_input: st
         synth_id=synth_id,
         user_input=user_input,
     )
+
+    # After a PROMOTE the session is done — reload ShimKb so newly promoted
+    # KBs are immediately visible without a server restart (Option B).
+    if result.get("done"):
+        shim_kb = getattr(req.app.state, "shim_kb", None)
+        if shim_kb is not None:
+            try:
+                shim_kb.reload()
+                log.info("shim_kb reloaded after session done: synth_id=%s", synth_id)
+            except Exception as exc:
+                log.warning("shim_kb.reload() failed: %s", exc)
+
     return _envelope_response(result)
 
 

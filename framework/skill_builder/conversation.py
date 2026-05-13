@@ -1379,6 +1379,44 @@ class SkillBuilderConversation:
                         "skill_store.promote failed (session still completes): %s", exc
                     )
 
+                # Option B: write the promoted KB delta into KBF_PERSONA_BUILDERS
+                try:
+                    delta_text = self._skill_store.read_artifact(
+                        self._data.persona,
+                        self._data.skill_name,
+                        "persona_builder_delta",
+                    )
+                    if delta_text:
+                        self._skill_store.upsert_persona_builder_kb(
+                            persona=self._data.persona,
+                            kb_name=self._data.skill_name,
+                            content_yaml=delta_text,
+                            status="production",
+                        )
+                        log.info(
+                            "_handle_promote_response: upserted KB entry "
+                            "persona=%s kb_name=%s",
+                            self._data.persona, self._data.skill_name,
+                        )
+                        # Clean up stray .new_kb file if it still exists on disk
+                        new_kb_path = (
+                            REPO_ROOT
+                            / "framework"
+                            / "persona_builders"
+                            / f"{self._data.persona}.yaml.new_kb"
+                        )
+                        if new_kb_path.exists():
+                            new_kb_path.unlink()
+                            log.info(
+                                "_handle_promote_response: removed stale %s",
+                                new_kb_path.name,
+                            )
+                except Exception as exc:
+                    log.warning(
+                        "_handle_promote_response: upsert_persona_builder_kb failed "
+                        "(session still completes): %s", exc
+                    )
+
             return ConversationTurn(
                 state="DONE",
                 message=(

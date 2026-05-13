@@ -91,6 +91,47 @@ _SQL_LIST_PERSONA = """
     ORDER BY MAX(updated_at) DESC
 """
 
+_SQL_UPSERT_PB = """
+    MERGE INTO KB_SHIM.KBF_PERSONA_BUILDERS tgt
+    USING DUAL ON (tgt.persona = :persona AND tgt.kb_name = :kb_name)
+    WHEN MATCHED THEN UPDATE SET
+        content_yaml = :content_yaml,
+        status       = :status,
+        updated_at   = :updated_at
+    WHEN NOT MATCHED THEN INSERT
+        (persona, kb_name, content_yaml, status, schema_version, created_at, updated_at)
+    VALUES
+        (:persona, :kb_name, :content_yaml, :status, 1, :created_at, :updated_at)
+"""
+
+_SQL_LIST_PB_ALL = """
+    SELECT persona, kb_name, content_yaml, status, updated_at
+    FROM KB_SHIM.KBF_PERSONA_BUILDERS
+    ORDER BY updated_at DESC
+"""
+
+_SQL_LIST_PB_PERSONA = """
+    SELECT persona, kb_name, content_yaml, status, updated_at
+    FROM KB_SHIM.KBF_PERSONA_BUILDERS
+    WHERE persona = :persona
+    ORDER BY updated_at DESC
+"""
+
+_SQL_LIST_PB_STATUS = """
+    SELECT persona, kb_name, content_yaml, status, updated_at
+    FROM KB_SHIM.KBF_PERSONA_BUILDERS
+    WHERE status = :status
+    ORDER BY updated_at DESC
+"""
+
+_SQL_LIST_PB_PERSONA_STATUS = """
+    SELECT persona, kb_name, content_yaml, status, updated_at
+    FROM KB_SHIM.KBF_PERSONA_BUILDERS
+    WHERE persona = :persona
+      AND status  = :status
+    ORDER BY updated_at DESC
+"""
+
 # Maps artifact_type → relative path template
 _REL_PATH_TEMPLATES: dict[str, str] = {
     "workflow_skill":         "framework/workflow_skills/{persona}/{skill_name}.yaml",
@@ -274,3 +315,78 @@ class AdbSkillStore(SkillStore):
             persona, skill_name, deleted_types,
         )
         return deleted_types
+
+    def upsert_persona_builder_kb(
+        self,
+        persona: str,
+        kb_name: str,
+        content_yaml: str,
+        status: str = "draft",
+    ) -> None:
+        if self._pool is None:
+            log.warning(
+                "AdbSkillStore: no pool — upsert_persona_builder_kb is a no-op (stub mode)"
+            )
+            return
+
+        now = self._now()
+        params = {
+            "persona":      persona,
+            "kb_name":      kb_name,
+            "content_yaml": content_yaml,
+            "status":       status,
+            "created_at":   now,
+            "updated_at":   now,
+        }
+
+        with self._pool.acquire() as conn:
+            with conn.cursor() as cur:
+                cur.execute(_SQL_UPSERT_PB, params)
+            conn.commit()
+
+        log.info(
+            "AdbSkillStore.upsert_persona_builder_kb: persona=%s kb_name=%s status=%s",
+            persona, kb_name, status,
+        )
+
+    def list_persona_builder_kbs(
+        self,
+        persona: str | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
+        if self._pool is None:
+            return []
+
+        if persona and status:
+            sql = _SQL_LIST_PB_PERSONA_STATUS
+            params: dict = {"persona": persona, "status": status}
+        elif persona:
+            sql = _SQL_LIST_PB_PERSONA
+            params = {"persona": persona}
+        elif status:
+            sql = _SQL_LIST_PB_STATUS
+            params = {"status": status}
+        else:
+            sql = _SQL_LIST_PB_ALL
+            params = {}
+
+        with self._pool.acquire() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                self._install_dict_rowfactory(cur)
+                rows = cur.fetchall()
+
+        results: list[dict] = []
+        for row in rows:
+            raw_yaml = row["content_yaml"]
+            # oracledb may return a LOB object; materialise it to str if needed
+            if hasattr(raw_yaml, "read"):
+                raw_yaml = raw_yaml.read()
+            results.append({
+                "persona":      row["persona"],
+                "kb_name":      row["kb_name"],
+                "content_yaml": raw_yaml,
+                "status":       row["status"],
+                "updated_at":   str(row["updated_at"]) if row["updated_at"] else "",
+            })
+        return results

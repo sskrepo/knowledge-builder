@@ -117,3 +117,37 @@ class SkillStore(ABC):
             List of artifact_type strings that were deleted (may be empty if skill
             was not found or had no artifacts).
         """
+
+    @abstractmethod
+    def upsert_persona_builder_kb(
+        self,
+        persona: str,
+        kb_name: str,
+        content_yaml: str,
+        status: str = "draft",
+    ) -> None:
+        """Persist a promoted KB entry into the persona builder store.
+
+        Args:
+            persona:      Persona slug (e.g. "tpm").
+            kb_name:      KB slug (e.g. "weekly_status_report").
+            content_yaml: Raw KB entry YAML text from persona_builder_delta artifact.
+            status:       "draft" or "production".
+        """
+
+    @abstractmethod
+    def list_persona_builder_kbs(
+        self,
+        persona: str | None = None,
+        status: str | None = None,
+    ) -> list[dict]:
+        """Return KB entries from the persona builder store.
+
+        Args:
+            persona: Optional filter by persona slug.
+            status:  Optional filter by status ("draft" or "production").
+
+        Returns:
+            List of dicts, each with keys:
+              persona, kb_name, content_yaml, status, updated_at
+        """
