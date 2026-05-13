@@ -897,3 +897,124 @@ class TestSlugify:
         slug = _slugify(intent)
         import re as _re
         assert _re.fullmatch(r"[a-z0-9_]+", slug), f"invalid chars in slug: {slug!r}"
+
+
+# ---------------------------------------------------------------------------
+# TestConfigureSources — persona-aware hints + no-source block
+# ---------------------------------------------------------------------------
+
+
+class TestConfigureSources:
+    """Verify CONFIGURE_SOURCES persona-aware hints and the empty-source guard."""
+
+    def _make_conv(self, persona: str = "tpm") -> SkillBuilderConversation:
+        conv = SkillBuilderConversation(persona=persona, skill_store=None)
+        conv._data.persona = persona
+        conv._state = "CONFIGURE_SOURCES"
+        return conv
+
+    # ------------------------------------------------------------------
+    # Persona-aware prompts
+    # ------------------------------------------------------------------
+
+    def test_kbf_ops_advance_shows_adb_options(self):
+        """CONFIGURE_SOURCES prompt for kbf_ops must offer ADB table options."""
+        conv = self._make_conv("kbf_ops")
+        turn = conv._advance_to_configure_sources()
+        assert "adb" in turn.message.lower(), (
+            "kbf_ops configure-sources must mention ADB sources"
+        )
+        assert any("adb" in opt.lower() for opt in turn.options), (
+            "kbf_ops configure-sources options must include at least one ADB option"
+        )
+        assert "confluence" not in turn.message.lower(), (
+            "kbf_ops configure-sources should not suggest Confluence (wrong source type)"
+        )
+
+    def test_tpm_advance_shows_confluence_jira_options(self):
+        """CONFIGURE_SOURCES prompt for tpm must offer Confluence + Jira options."""
+        conv = self._make_conv("tpm")
+        turn = conv._advance_to_configure_sources()
+        assert "confluence" in turn.message.lower()
+        assert any("confluence" in opt.lower() for opt in turn.options)
+
+    def test_unknown_persona_falls_back_to_generic_hints(self):
+        """Unknown persona should use generic hints, not crash."""
+        conv = self._make_conv("new_persona_xyz")
+        turn = conv._advance_to_configure_sources()
+        assert turn.state == "CONFIGURE_SOURCES"
+        assert "done" in [opt.lower() for opt in turn.options]
+
+    # ------------------------------------------------------------------
+    # No-source guard — done with empty list must block
+    # ------------------------------------------------------------------
+
+    def test_done_with_no_sources_blocks(self):
+        """Typing 'done' with no sources must return CONFIGURE_SOURCES, not advance."""
+        conv = self._make_conv("tpm")
+        assert conv._data.sources == [], "sources must start empty"
+        turn = conv._handle_configure_sources_response("done")
+        assert turn.state == "CONFIGURE_SOURCES", (
+            "'done' with no sources must stay in CONFIGURE_SOURCES"
+        )
+
+    def test_done_with_no_sources_shows_persona_hints(self):
+        """Block message for kbf_ops must mention ADB, not Confluence."""
+        conv = self._make_conv("kbf_ops")
+        turn = conv._handle_configure_sources_response("done")
+        assert "adb" in turn.message.lower(), (
+            "Block message for kbf_ops must suggest ADB sources"
+        )
+        assert "confluence" not in turn.message.lower(), (
+            "Block message for kbf_ops must NOT suggest Confluence"
+        )
+
+    def test_done_with_no_sources_does_not_add_placeholder(self):
+        """Blocking done must NOT silently inject the REPLACE_ME placeholder."""
+        conv = self._make_conv("tpm")
+        conv._handle_configure_sources_response("done")
+        assert conv._data.sources == [], (
+            "sources must stay empty — REPLACE_ME placeholder must not be injected"
+        )
+
+    def test_done_with_sources_advances_to_configure_triggers(self):
+        """Once a source is added, 'done' must advance to CONFIGURE_TRIGGERS."""
+        conv = self._make_conv("tpm")
+        conv._handle_configure_sources_response("confluence OCIFACP labels: weekly-status")
+        turn = conv._handle_configure_sources_response("done")
+        assert turn.state == "CONFIGURE_TRIGGERS", (
+            "'done' with at least one source must advance to CONFIGURE_TRIGGERS"
+        )
+
+    # ------------------------------------------------------------------
+    # ADB source parsing
+    # ------------------------------------------------------------------
+
+    def test_parse_adb_table_with_schema(self):
+        """'adb table KB_SHIM.KBF_SESSIONS' must parse to kind=adb, table=..."""
+        from framework.skill_builder.conversation import _parse_source_descriptor
+        src = _parse_source_descriptor("adb table KB_SHIM.KBF_SESSIONS")
+        assert src["kind"] == "adb"
+        assert src["table"] == "KB_SHIM.KBF_SESSIONS"
+
+    def test_parse_adb_without_table_keyword(self):
+        """'adb KB_SHIM.KBF_BUG_REPORTS' must also parse correctly."""
+        from framework.skill_builder.conversation import _parse_source_descriptor
+        src = _parse_source_descriptor("adb KB_SHIM.KBF_BUG_REPORTS")
+        assert src["kind"] == "adb"
+        assert src["table"] == "KB_SHIM.KBF_BUG_REPORTS"
+
+    def test_adb_source_added_correctly(self):
+        """Full flow: adding an ADB source should store the parsed dict."""
+        conv = self._make_conv("kbf_ops")
+        conv._handle_configure_sources_response("adb table KB_SHIM.KBF_SESSIONS")
+        assert len(conv._data.sources) == 1
+        assert conv._data.sources[0]["kind"] == "adb"
+        assert conv._data.sources[0]["table"] == "KB_SHIM.KBF_SESSIONS"
+
+    def test_kbf_ops_full_source_then_done_advances(self):
+        """kbf_ops: add one ADB source, then 'done' advances to CONFIGURE_TRIGGERS."""
+        conv = self._make_conv("kbf_ops")
+        conv._handle_configure_sources_response("adb table KB_SHIM.KBF_BUG_REPORTS")
+        turn = conv._handle_configure_sources_response("done")
+        assert turn.state == "CONFIGURE_TRIGGERS"

@@ -20,7 +20,7 @@
   "properties": {
     "project_name": {
       "type": "string",
-      "description": "Program/project name being reported on, typically '26ai",
+      "description": "Extract the project/program name as written in the header/title area (e.g., '26ai'). Output only the name, without extra qualifiers unless they are part of the official title.",
       "maxLength": 500
     },
     "overall_rag": {
@@ -30,16 +30,16 @@
         "amber",
         "green"
       ],
-      "description": "Overall project RAG (red/amber/green) reflecting combined schedule, scope and resource health"
+      "description": "Extract the overall status as a single value: 'Green', 'Amber', or 'Red' (or the exact equivalent used in the source). If the source uses icons/colors, map them to the corresponding word and output only that word."
     },
     "executive_summary": {
       "type": "string",
-      "description": "3-5 sentence narrative for execs covering what shipped this week, what slipped, and the single biggest signal they need to know",
+      "description": "Capture the executive summary narrative intended for leadership: 2\u20135 concise sentences covering what changed this week, why it matters, and the current trajectory. Keep it exec-readable and avoid copying long bullet lists verbatim.",
       "maxLength": 1000
     },
     "key_accomplishments": {
       "type": "array",
-      "description": "List of concrete deliverables completed this week, each phrased as an outcome with owner (e.g. 'GPU capacity provisioned in PHX \u2014 Infra')",
+      "description": "Extract the key accomplishments completed this week as a list of short bullets (strings), each starting with an action verb and including concrete deliverables or decisions. Keep each item to one line; exclude planned/future work.",
       "maxLength": 500
     },
     "upcoming_milestones": {
@@ -47,21 +47,21 @@
       "items": {
         "type": "string"
       },
-      "description": "Next 2-4 weeks of milestones, each formatted 'YYYY-MM-DD \u2014 milestone \u2014 owner"
+      "description": "Extract upcoming milestones as a list where each item includes milestone name plus target date (if present) in the same string (e.g., 'Beta launch \u2014 2026-06-01'). Include only forward-looking milestones not yet completed."
     },
     "schedule_health": {
       "type": "string",
-      "description": "RAG status for the schedule dimension with a 1-2 sentence justification referencing committed milestone dates",
+      "description": "Extract schedule health as 'Green', 'Amber', or 'Red' (or the exact label used), plus a brief justification in the same string if provided (e.g., 'Amber \u2014 Beta slipped 2 weeks due to X'). If only a color/icon is shown, output just the status word.",
       "maxLength": 500
     },
     "scope_health": {
       "type": "string",
-      "description": "RAG status for scope with 1-2 sentence justification noting any in-flight scope changes or descopes",
+      "description": "Extract scope health as 'Green', 'Amber', or 'Red' (or the exact label used), including any stated rationale such as scope changes, churn, or de-scopes. If only a color/icon is shown, output just the status word.",
       "maxLength": 500
     },
     "resource_health": {
       "type": "string",
-      "description": "RAG status for staffing/resources with 1-2 sentence justification noting hiring gaps, contractor ramp, or attrition",
+      "description": "Extract resource/people health as 'Green', 'Amber', or 'Red' (or the exact label used), including any noted staffing gaps, hiring needs, or bandwidth constraints. If only a color/icon is shown, output just the status word.",
       "maxLength": 500
     },
     "top_risks": {
@@ -69,17 +69,17 @@
       "items": {
         "type": "string"
       },
-      "description": "Top 3-5 program risks, each formatted 'risk \u2014 impact \u2014 mitigation \u2014 owner"
+      "description": "Extract the top risks as a list of concise bullets; each item should include the risk statement and (if present) impact/likelihood or mitigation in the same line. Keep ordering as shown (highest priority first) and do not include resolved risks unless explicitly still tracked."
     },
     "metrics_snapshot": {
-      "type": "string",
-      "description": "Key program KPIs vs targets (e.g. burn-up %, story-point velocity, defect counts open/closed, environment readiness %, capacity %), one metric per line as 'metric: value (target X, delta Y)",
-      "maxLength": 500
+      "type": "array",
+      "description": "Extract the metrics snapshot as a list of metric strings in 'Metric: value (trend/target if shown)' form (e.g., 'Latency p95: 220ms (\u219310ms WoW)'). Include only metrics explicitly shown; do not compute derived values.",
+      "maxLength": 2000
     },
     "workstream_status": {
       "type": "array",
-      "description": "Per-workstream RAG roll-up (e.g. Modeling, Data, Eval, Infra, Safety, GTM), each formatted 'workstream \u2014 RAG \u2014 one-line note",
-      "maxLength": 50
+      "description": "Extract per-workstream status as a list where each item contains 'Workstream \u2014 RAG \u2014 1-line update' (use the exact workstream names and statuses shown). Preserve the order from the source and keep each update to a single concise sentence.",
+      "maxLength": 2000
     }
   },
   "additionalProperties": false

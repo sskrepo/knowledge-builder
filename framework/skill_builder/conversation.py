@@ -57,6 +57,75 @@ justification citing specific milestone dates or blockers from the slide."
 }}
 """
 
+# ---------------------------------------------------------------------------
+# Persona-aware source hints — shown in CONFIGURE_SOURCES and used to block
+# silent empty-source advance.  Extend for each new persona as needed.
+# ---------------------------------------------------------------------------
+
+_PERSONA_SOURCE_HINTS: dict[str, dict] = {
+    "kbf_ops": {
+        "description": (
+            "KBF operational data lives in ADB tables (not wiki or ticket systems).\n"
+            "Use 'adb table <SCHEMA.TABLE>' to specify the source table."
+        ),
+        "examples": [
+            "adb table KB_SHIM.KBF_SESSIONS",
+            "adb table KB_SHIM.KBF_SKILL_ARTIFACTS",
+            "adb table KB_SHIM.KBF_BUG_REPORTS",
+        ],
+        "options": [
+            "adb table KB_SHIM.KBF_SESSIONS",
+            "adb table KB_SHIM.KBF_SKILL_ARTIFACTS",
+            "adb table KB_SHIM.KBF_BUG_REPORTS",
+            "done",
+        ],
+    },
+    "tpm": {
+        "description": "TPM data typically lives in Confluence (status pages) and Jira (tickets).",
+        "examples": [
+            "confluence OCIFACP with labels: weekly-status",
+            "jira JQL: project = OPS AND labels = tpm-weekly",
+        ],
+        "options": [
+            "confluence OCIFACP labels: weekly-status",
+            "jira project = OPS AND labels = tpm-weekly",
+            "done",
+        ],
+    },
+    "pm": {
+        "description": "PM data typically lives in Confluence (PRDs, meeting notes) and Jira.",
+        "examples": [
+            "confluence PRODUCT with labels: prd",
+            "jira JQL: project = PRODUCT AND issuetype = Story",
+        ],
+        "options": [
+            "confluence PRODUCT labels: prd",
+            "jira project = PRODUCT AND issuetype = Story",
+            "done",
+        ],
+    },
+}
+
+_DEFAULT_SOURCE_HINTS: dict = {
+    "description": "",
+    "examples": [
+        "confluence SPACE_KEY with labels: label1, label2",
+        "jira JQL: project = OPS AND labels = weekly-status",
+        "git repo org/my-repo paths: **/*.md",
+    ],
+    "options": [
+        "confluence PRODUCT labels: weekly-status",
+        "jira project = OPS AND labels = weekly-ops",
+        "done",
+    ],
+}
+
+
+def _get_source_hints(persona: str) -> dict:
+    """Return persona-specific source hint dict, falling back to generic defaults."""
+    return _PERSONA_SOURCE_HINTS.get(persona, _DEFAULT_SOURCE_HINTS)
+
+
 STATES = [
     "IDENTIFY_PERSONA",
     "ANALYZE_ARTIFACT",
@@ -901,28 +970,46 @@ class SkillBuilderConversation:
 
     def _advance_to_configure_sources(self) -> ConversationTurn:
         self._state = "CONFIGURE_SOURCES"
+        hints = _get_source_hints(self._data.persona or "")
+        hint_lines = "\n".join(f"  • {ex}" for ex in hints["examples"])
+        persona_note = (
+            f"\nNote: {hints['description']}\n" if hints.get("description") else ""
+        )
         return ConversationTurn(
             state="CONFIGURE_SOURCES",
             message=(
                 "Where does the source data live?\n"
-                "Describe one or more sources (you can add multiple):\n\n"
-                "  • Confluence: 'confluence SPACE_KEY with labels: label1, label2'\n"
-                "  • Jira: 'jira JQL: project = OPS AND labels = weekly-status'\n"
-                "  • Git: 'git repo org/my-repo paths: **/*.md'\n\n"
-                "Type 'done' when finished adding sources."
+                "Describe one or more sources (you can add multiple):\n"
+                + persona_note
+                + "\n"
+                + hint_lines
+                + "\n\nType 'done' when finished adding sources."
             ),
-            options=[
-                "confluence PRODUCT labels: weekly-status",
-                "jira project = OPS AND labels = weekly-ops",
-                "done",
-            ],
+            options=hints["options"],
         )
 
     def _handle_configure_sources_response(self, user_input: str) -> ConversationTurn:
         lowered = user_input.lower().strip()
         if lowered == "done":
             if not self._data.sources:
-                self._data.sources.append({"kind": "confluence", "space": "REPLACE_ME"})
+                # Block — don't silently add a placeholder. A workflow with no real
+                # source would produce empty extractions and fail at EVAL.
+                hints = _get_source_hints(self._data.persona or "")
+                hint_lines = "\n".join(f"  • {ex}" for ex in hints["examples"])
+                persona_note = (
+                    f"{hints['description']}\n\n" if hints.get("description") else ""
+                )
+                return ConversationTurn(
+                    state="CONFIGURE_SOURCES",
+                    message=(
+                        "At least one source is required — a workflow with no source "
+                        "will produce empty extractions and fail at evaluation.\n\n"
+                        + persona_note
+                        + "Please add at least one source:\n"
+                        + hint_lines
+                    ),
+                    options=hints["options"],
+                )
             return self._advance_to_configure_triggers()
 
         source = _parse_source_descriptor(user_input)
@@ -1599,15 +1686,26 @@ def _parse_field_edits(user_input: str) -> list[tuple]:
 
 def _parse_source_descriptor(user_input: str) -> dict:
     lowered = user_input.lower()
+    if "adb" in lowered:
+        # e.g. "adb table KB_SHIM.KBF_SESSIONS" or "adb KB_SHIM.KBF_SESSIONS"
+        table_m = re.search(
+            r"(?:adb\s+(?:table\s+)?|table\s+)([A-Z0-9_]+\.[A-Z0-9_]+)",
+            user_input,
+            re.IGNORECASE,
+        )
+        source: dict = {"kind": "adb"}
+        if table_m:
+            source["table"] = table_m.group(1).upper()
+        return source
     if "confluence" in lowered:
         space_m = re.search(r"confluence\s+([A-Z0-9_\-]+)", user_input, re.IGNORECASE)
         labels_m = re.search(r"labels?:\s*([\w,\s\-]+)", user_input, re.IGNORECASE)
-        source: dict = {"kind": "confluence"}
+        source = {"kind": "confluence"}
         if space_m:
             source["space"] = space_m.group(1).upper()
         if labels_m:
             source["include_labels"] = [
-                l.strip() for l in labels_m.group(1).split(",") if l.strip()
+                lbl.strip() for lbl in labels_m.group(1).split(",") if lbl.strip()
             ]
         return source
     if "jira" in lowered:
