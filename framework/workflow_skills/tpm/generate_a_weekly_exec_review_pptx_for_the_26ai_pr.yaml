@@ -12,14 +12,13 @@ trigger:
     response_mode: artifact_url
 skill_card:
   summary: generate a weekly exec-review .pptx for the "26ai" project from Confluence
-    status pages, styled like a polished version of slide 15 in the FAaaS-LCM weekly
-    deck (denser but still exec-readable)
+    status pages, denser than slide 15 of the FAaaS-LCM weekly deck but still exec-readable
   use_when: 'User asks for: generate a weekly exec-review .pptx for the "26ai" project
-    from Confluence status pages, styled like a polished version of slide 15 in the
-    FAaaS-LCM weekly deck (denser but still exec-readable)'
+    from Confluence status pages, denser than slide 15 of the FAaaS-LCM weekly deck
+    but still exec-readable'
   example_invocations:
   - generate a weekly exec-review .pptx for the "26ai" project from Confluence status
-    pages, styled like
+    pages, denser than
   do_not_use_for: Single-fact lookups (use vector_search). Live operational data (use
     query_fleet).
 requires_extractions:
