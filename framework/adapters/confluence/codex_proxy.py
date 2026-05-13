@@ -84,12 +84,18 @@ class ConfluenceCodexProxyAdapter:
             f"If no results, return {{\"results\": []}}. No prose. JSON only."
         )
 
-    def _prompt_fetch(self, page_id: str) -> str:
+    def _prompt_fetch(self, page_ref: str) -> str:
+        # page_ref may be a numeric page-id (e.g. "12345") OR a full URL
+        # (e.g. "https://confluence.example.com/display/SPACE/Page+Title").
+        # The Confluence MCP server can resolve either form; the LLM in the
+        # codex session converts the URL into the right tool-call argument.
         return (
             f"Use the {self.server_name} MCP server to fetch the Confluence "
-            f"page with id '{page_id}'. Include the page body (storage format "
-            f"if available), title, space key, version number, last-updated "
-            f"timestamp, and labels. "
+            f"page identified by '{page_ref}'. This value may be a numeric "
+            f"page id or a full Confluence URL — resolve it accordingly "
+            f"(e.g. parse pageId from the URL or call a search-by-URL tool). "
+            f"Include the page body (storage format if available), title, "
+            f"space key, version number, last-updated timestamp, and labels. "
             f"Return ONLY a JSON object exactly like: "
             f"{{\"id\": \"...\", \"title\": \"...\", \"space\": {{\"key\": \"...\"}}, "
             f"\"version\": {{\"number\": <int>, \"when\": \"<ISO-8601>\"}}, "

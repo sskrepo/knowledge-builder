@@ -1055,6 +1055,55 @@ class TestRenameSkillCommand:
 
 
 # ---------------------------------------------------------------------------
+# _parse_source_descriptor — Confluence page URL/ID recognition
+# (session synth-tpm-9c0b0a58: user wants to point at a specific Confluence
+# page, not "search by labels". The parser now recognizes pasted URLs and
+# page-ids and turns them into {kind: confluence, pages: [...]}.)
+# ---------------------------------------------------------------------------
+
+
+class TestParseSourceDescriptorConfluencePages:
+    def test_full_url_with_pages_segment_extracts_page_id(self):
+        from framework.skill_builder.conversation import _parse_source_descriptor
+        url = "https://confluence.example.com/wiki/spaces/SPACE/pages/12345/Page+Title"
+        result = _parse_source_descriptor(url)
+        assert result["kind"] == "confluence"
+        # The extracted numeric page-id is preferred over the URL for downstream fetch.
+        assert result["pages"] == ["12345"]
+        assert url in result.get("page_urls", [])
+
+    def test_url_with_pageid_query_param_extracts_page_id(self):
+        from framework.skill_builder.conversation import _parse_source_descriptor
+        url = "https://confluence.example.com/pages/viewpage.action?pageId=98765"
+        result = _parse_source_descriptor(url)
+        assert result["kind"] == "confluence"
+        assert result["pages"] == ["98765"]
+
+    def test_url_without_extractable_id_passes_full_url(self):
+        from framework.skill_builder.conversation import _parse_source_descriptor
+        url = "https://confluence.example.com/display/SPACE/Page+Title"
+        result = _parse_source_descriptor(url)
+        assert result["kind"] == "confluence"
+        # No /pages/<id>/ pattern — pass URL as-is for the adapter to resolve.
+        assert result["pages"] == [url]
+
+    def test_bare_page_id_recognized(self):
+        from framework.skill_builder.conversation import _parse_source_descriptor
+        result = _parse_source_descriptor("confluence page-id: 12345678")
+        assert result["kind"] == "confluence"
+        assert result["pages"] == ["12345678"]
+
+    def test_existing_space_labels_form_still_works(self):
+        from framework.skill_builder.conversation import _parse_source_descriptor
+        result = _parse_source_descriptor("confluence OCIFACP labels: 26ai, weekly-status")
+        assert result["kind"] == "confluence"
+        assert result["space"] == "OCIFACP"
+        assert result["include_labels"] == ["26ai", "weekly-status"]
+        # And critically: no `pages` field — this is the space-search path.
+        assert "pages" not in result
+
+
+# ---------------------------------------------------------------------------
 # _run_ingest — real ingestion path (Gap 1 fix)
 # ---------------------------------------------------------------------------
 
@@ -1239,6 +1288,81 @@ class TestRunIngest:
         assert turn.state == "INGEST"
         assert "retry ingestion" in (turn.options or []) or \
                "retry" in " ".join(turn.options or []).lower()
+
+    def test_run_ingest_pages_source_calls_ingest_pages_not_ingest_space(self):
+        """When a Confluence source has a 'pages' list (URLs/IDs), INGEST must
+        call ingestor.ingest_pages() and NOT ingestor.ingest_space(). The
+        user's intent was 'ingest THIS page', not 'search the space'.
+        This is the synth-tpm-9c0b0a58 fix.
+        """
+        import os
+        sources = [{
+            "kind": "confluence",
+            "pages": ["12345", "https://confluence.example.com/display/SPACE/Title"],
+            "page_urls": ["https://confluence.example.com/pages/12345/Title",
+                          "https://confluence.example.com/display/SPACE/Title"],
+        }]
+        conv = self._make_conv(sources=sources)
+
+        mock_ingestor_instance = MagicMock()
+        mock_ingestor_instance.ingest_pages.return_value = {
+            "pages_new": 2, "pages_updated": 0, "pages_unchanged": 0,
+        }
+        mock_ingestor_cls = MagicMock(return_value=mock_ingestor_instance)
+
+        with patch.dict(os.environ, {"KBF_ENV": "laptop"}):
+            with patch(
+                "framework.skill_builder.conversation._build_confluence_adapter",
+                return_value=None,
+            ):
+                with patch(
+                    "framework.ingestion.confluence_wiki_ingest.ConfluenceWikiIngestor",
+                    mock_ingestor_cls,
+                ):
+                    turn = conv._run_ingest()
+
+        # ingest_pages must be called with the pages list — NOT ingest_space.
+        mock_ingestor_instance.ingest_pages.assert_called_once_with(
+            ["12345", "https://confluence.example.com/display/SPACE/Title"]
+        )
+        mock_ingestor_instance.ingest_space.assert_not_called()
+
+        result = conv._data.ingest_result
+        assert result["status"] == "completed"
+        assert result["pages_new"] == 2
+        assert turn.state == "INGEST"
+
+    def test_run_ingest_pages_source_zero_results_still_treated_as_failed(self):
+        """The 'pages' path must enforce the same 0-pages-back = failed
+        contract as the space-labels path. Otherwise a wrong URL would
+        advance the session silently."""
+        import os
+        sources = [{"kind": "confluence", "pages": ["99999"]}]
+        conv = self._make_conv(sources=sources)
+
+        mock_ingestor_instance = MagicMock()
+        mock_ingestor_instance.ingest_pages.return_value = {
+            "pages_new": 0, "pages_updated": 0, "pages_unchanged": 0,
+        }
+        mock_ingestor_cls = MagicMock(return_value=mock_ingestor_instance)
+
+        with patch.dict(os.environ, {"KBF_ENV": "laptop"}):
+            with patch(
+                "framework.skill_builder.conversation._build_confluence_adapter",
+                return_value=None,
+            ):
+                with patch(
+                    "framework.ingestion.confluence_wiki_ingest.ConfluenceWikiIngestor",
+                    mock_ingestor_cls,
+                ):
+                    conv._run_ingest()
+
+        result = conv._data.ingest_result
+        assert result["status"] == "failed"
+        failures = result.get("failures") or []
+        assert any("99999" in str(f.get("space", "")) for f in failures), (
+            "the page-id 99999 should appear in the failure record"
+        )
 
     def test_run_ingest_one_source_with_pages_one_empty_both_fail(self):
         """When multiple Confluence sources are configured and ANY one comes

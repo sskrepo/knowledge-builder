@@ -1031,13 +1031,20 @@ class SkillBuilderConversation:
             message=(
                 "Where does the source data live?\n"
                 "Describe one or more sources (you can add multiple):\n\n"
-                "  • Confluence: 'confluence SPACE_KEY with labels: label1, label2'\n"
+                "  • Confluence specific page (recommended when you have a link):\n"
+                "      paste the page URL, e.g.\n"
+                "      'https://confluence.example.com/display/OCIFACP/26AI+Weekly+Status'\n"
+                "  • Confluence space + label filter:\n"
+                "      'confluence SPACE_KEY with labels: label1, label2'\n"
+                "  • Confluence by page id:\n"
+                "      'confluence page-id: 12345678'\n"
                 "  • Jira: 'jira JQL: project = OPS AND labels = weekly-status'\n"
                 "  • Git: 'git repo org/my-repo paths: **/*.md'\n\n"
                 "Type 'done' when finished adding sources."
             ),
             options=[
-                "confluence PRODUCT labels: weekly-status",
+                "https://confluence.example.com/display/SPACE/Page+Title",
+                "confluence SPACE labels: weekly-status",
                 "jira project = OPS AND labels = weekly-ops",
                 "done",
             ],
@@ -1416,8 +1423,18 @@ class SkillBuilderConversation:
             if kind == "confluence":
                 space = src.get("space", "")
                 labels = src.get("include_labels") or src.get("labels") or []
+                pages_explicit = src.get("pages") or []
+                # Label/source descriptor for the log + failure message
+                if pages_explicit:
+                    source_label = f"pages={pages_explicit}"
+                else:
+                    source_label = f"space '{space}' labels={labels or '(none)'}"
                 try:
-                    stats = ingestor.ingest_space(space, labels or None)
+                    if pages_explicit:
+                        # Specific page(s) by URL or page-id — fetch each directly.
+                        stats = ingestor.ingest_pages(pages_explicit)
+                    else:
+                        stats = ingestor.ingest_space(space, labels or None)
                     pages_total = (
                         stats["pages_new"]
                         + stats["pages_updated"]
@@ -1425,7 +1442,7 @@ class SkillBuilderConversation:
                     )
                     log.info(
                         "_run_ingest: Confluence %s new=%d updated=%d unchanged=%d total=%d",
-                        space,
+                        source_label,
                         stats["pages_new"],
                         stats["pages_updated"],
                         stats["pages_unchanged"],
@@ -1435,29 +1452,41 @@ class SkillBuilderConversation:
                     # not a success. Codex returning {"results": []} silently
                     # advanced the synth-tpm-14a54555 session through INGEST →
                     # PROMOTE with an empty KB. Possible causes:
-                    #   - label filters match no real pages (most common)
+                    #   - label filters match no real pages
                     #   - space key wrong / not accessible
+                    #   - page URL/ID wrong or not accessible
                     #   - codex MCP layer returned empty results without error
                     #   - fixture dir missing for the space (laptop fixture mode)
                     # Whatever the cause, advancing on an empty extraction is
                     # never correct — the user must fix the input and retry.
                     if pages_total == 0:
-                        labels_desc = labels if labels else "(no label filter)"
-                        msg = (
-                            f"adapter returned 0 pages for space '{space}' "
-                            f"with labels {labels_desc} (mode={mode}). "
-                            f"KB extraction yielded nothing — treating as failed. "
-                            f"Verify the space key, label filters, and codex/Confluence access."
-                        )
+                        if pages_explicit:
+                            msg = (
+                                f"adapter returned no content for pages "
+                                f"{pages_explicit} (mode={mode}). "
+                                f"KB extraction yielded nothing — treating as failed. "
+                                f"Verify the page URLs/IDs and codex/Confluence access."
+                            )
+                            failures.append((str(pages_explicit), msg))
+                        else:
+                            labels_desc = labels if labels else "(no label filter)"
+                            msg = (
+                                f"adapter returned 0 pages for space '{space}' "
+                                f"with labels {labels_desc} (mode={mode}). "
+                                f"KB extraction yielded nothing — treating as failed. "
+                                f"Verify the space key, label filters, and codex/Confluence access."
+                            )
+                            failures.append((space, msg))
                         log.error("_run_ingest: %s", msg)
-                        failures.append((space, msg))
                     else:
                         total_new += stats["pages_new"]
                         total_updated += stats["pages_updated"]
                         total_unchanged += stats["pages_unchanged"]
                 except Exception as exc:
-                    log.error("_run_ingest: Confluence %s failed: %s", space, exc)
-                    failures.append((space, str(exc)))
+                    log.error(
+                        "_run_ingest: Confluence %s failed: %s", source_label, exc,
+                    )
+                    failures.append((source_label, str(exc)))
             elif kind == "adb":
                 log.info("_run_ingest: source kind=adb table=%s — query-time retrieval, no ingest needed",
                          src.get("table", "?"))
@@ -2007,8 +2036,60 @@ def _parse_field_edits(user_input: str) -> list[tuple]:
     return edits
 
 
+def _extract_confluence_page_id(url: str) -> str | None:
+    """Extract numeric page-id from common Confluence URL formats; else None.
+
+    Recognises:
+      .../pages/12345/Title             (DC + Cloud)
+      .../viewpage.action?pageId=12345  (legacy)
+      .../wiki/spaces/SPACE/pages/12345 (Cloud)
+    """
+    m = re.search(r"/pages/(\d+)", url)
+    if m:
+        return m.group(1)
+    m = re.search(r"[?&]pageId=(\d+)", url)
+    if m:
+        return m.group(1)
+    return None
+
+
 def _parse_source_descriptor(user_input: str) -> dict:
     lowered = user_input.lower()
+
+    # ── Confluence specific page (URL or page-id) ───────────────────────────
+    # User pastes a URL like 'https://confluence.example.com/display/SPACE/Page'
+    # or 'https://.../wiki/spaces/SPACE/pages/12345/Title'. We ingest THAT page
+    # via adapter.fetch() — no label search, no space crawl. The user's intent
+    # is "this specific page", not "search the space by labels".
+    url_m = re.search(r"https?://\S+", user_input)
+    is_confluence_url = bool(url_m) and (
+        "confluence" in lowered
+        or "atlassian" in lowered
+        or "/display/" in (url_m.group(0) if url_m else "")
+        or "/spaces/" in (url_m.group(0) if url_m else "")
+        or "pageid=" in (url_m.group(0).lower() if url_m else "")
+    )
+    if is_confluence_url:
+        url = url_m.group(0).rstrip(".,;)")
+        page_id = _extract_confluence_page_id(url)
+        # Pass the extracted numeric id when we have one (more reliable for
+        # adapter.fetch); otherwise pass the URL itself — the codex_proxy
+        # adapter prompt accepts either form.
+        ref = page_id or url
+        return {
+            "kind": "confluence",
+            "pages": [ref],
+            # Keep URL too for human-readable display and so the ingestor can
+            # record source_url if the adapter response doesn't include one.
+            "page_urls": [url],
+        }
+
+    # ── Confluence "page-id: 12345" without a URL ───────────────────────────
+    pid_m = re.search(r"page[\-\s_]?id\s*[:=]\s*(\d+)", user_input, re.IGNORECASE)
+    if pid_m and "confluence" in lowered:
+        return {"kind": "confluence", "pages": [pid_m.group(1)]}
+
+    # ── Confluence space + labels (existing form) ───────────────────────────
     if "confluence" in lowered:
         space_m = re.search(r"confluence\s+([A-Z0-9_\-]+)", user_input, re.IGNORECASE)
         labels_m = re.search(r"labels?:\s*([\w,\s\-]+)", user_input, re.IGNORECASE)

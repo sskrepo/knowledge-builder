@@ -85,6 +85,47 @@ class ConfluenceWikiIngestor:
         )
         return stats
 
+    def ingest_pages(self, page_refs: list[str]) -> dict:
+        """Ingest specific Confluence pages by ID or URL.
+
+        Each ref is either a numeric page-id or a full Confluence URL. The
+        adapter's fetch() is expected to accept either form (the codex_proxy
+        prompt explicitly mentions both shapes; native/MCP adapters resolve
+        the page-id from the URL).
+
+        Use this when the user supplied a specific page (or list of pages) —
+        no label search, no space crawl. The user's intent is "ingest THIS
+        page", not "search the space".
+
+        Returns stats dict with the same shape as ingest_space().
+        """
+        stats = {"pages_processed": 0, "pages_new": 0, "pages_updated": 0, "pages_unchanged": 0}
+
+        for ref in page_refs:
+            if not ref:
+                continue
+            stats["pages_processed"] += 1
+            try:
+                result = self.ingest_page(ref)
+            except Exception as exc:
+                log.error("ingest_pages: failed to ingest %s: %s", ref, exc)
+                # Re-raise so the caller (_run_ingest) records a failure entry
+                # and parks the session at INGEST — never silently advance.
+                raise
+            if result.get("status") == "new":
+                stats["pages_new"] += 1
+            elif result.get("status") == "updated":
+                stats["pages_updated"] += 1
+            else:
+                stats["pages_unchanged"] += 1
+
+        log.info(
+            "ingest_pages: refs=%d new=%d updated=%d unchanged=%d",
+            len(page_refs), stats["pages_new"], stats["pages_updated"],
+            stats["pages_unchanged"],
+        )
+        return stats
+
     def ingest_page(self, page_id: str, _raw: dict | None = None) -> dict:
         """Ingest a single Confluence page.
 
