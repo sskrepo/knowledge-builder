@@ -1,0 +1,98 @@
+persona: kbf_ops
+display_name: KBF Operations
+schema_version: 1
+status: draft
+primary_axis: operations
+functional_areas:
+- skill_authoring
+- skill_review
+- skill_promotion
+- bug_triage
+- eval_monitoring
+knowledge_bases:
+- name: session_data
+  kind: adb
+  extraction_schema: framework/parsers/schemas/kbf_ops/session_data/v1.json
+  sources:
+  - kind: adb
+    table: KB_SHIM.KBF_SESSIONS
+  retrieval_tools:
+  - query_skill_session
+  kb_card:
+    summary: authorSkill session state — synth_id, persona, intent, conversation
+      history, state progression, and final status for every authoring session.
+    use_when: Question is about a specific authoring session (synth_id), what was
+      produced, how the conversation went, or whether a session completed.
+    input_shape: synth_id (required); optional persona or status filter.
+    output_shape: Structured session record with conversation_history and state log.
+  provides_fields:
+  - synth_id
+  - persona
+  - skill_names
+  - intent_description
+  - conversation_history
+  - state_progression
+  - status
+
+- name: skill_artifacts
+  kind: adb
+  extraction_schema: framework/parsers/schemas/kbf_ops/skill_artifacts/v1.json
+  sources:
+  - kind: adb
+    table: KB_SHIM.KBF_SKILL_ARTIFACTS
+  retrieval_tools:
+  - query_skill_artifacts
+  kb_card:
+    summary: Committed skill artifacts — workflow YAML, persona builder delta, eval
+      gold sets, and extraction schema for each authored skill.
+    use_when: Question is about what artifacts were produced for a skill, whether
+      a skill was promoted, or what the workflow YAML contains.
+    input_shape: persona + skill_name; optional artifact_type filter.
+    output_shape: Artifact text keyed by artifact_type.
+  provides_fields:
+  - workflow_yaml
+  - persona_builder_delta
+  - eval_extraction
+  - eval_workflow
+  - extraction_schema
+
+- name: bug_reports
+  kind: adb
+  extraction_schema: framework/parsers/schemas/kbf_ops/bug_reports/v1.json
+  sources:
+  - kind: adb
+    table: KB_SHIM.KBF_BUG_REPORTS
+  retrieval_tools:
+  - query_bug_reports
+  kb_card:
+    summary: User-filed bug reports against KBF tools — queue_id, tool, description,
+      triggering input, status, and filing timestamp.
+    use_when: Question is about open bugs, recurring failures, or bug triage.
+    input_shape: Optional tool or status filter; defaults to open bugs.
+    output_shape: Bug report list ordered by filing timestamp descending.
+  provides_fields:
+  - queue_id
+  - tool
+  - description
+  - triggering_input
+  - status
+  - filed_at
+
+metadata_defaults:
+  persona_visibility:
+  - kbf_ops
+  owner: kbf_ops
+  classification: internal
+
+eval:
+  gold_set: eval/gold_sets/kbf_ops.jsonl
+  exit_criteria:
+    recall_at_5: 0.9
+    faithfulness: 0.90
+    p95_latency_ms: 500
+    max_tokens_per_query: 3000
+
+ingestion:
+  schedule: on_write
+  max_concurrent_workers: 2
+  cost_alarm_tokens_per_day: 500000
