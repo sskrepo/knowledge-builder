@@ -262,11 +262,10 @@ def cmd_migrate(args):
     try:
         if run_all or schema == "kb_incidents":
             from ..stores.incident_vector_store import IncidentVectorStore
-            from ..core.llm import LLMClient
 
             print("  Running kb_incidents migration …")
-            llm = LLMClient()   # stub — LLM not needed for DDL
-            store = IncidentVectorStore(adb_pool=pool, llm=llm)
+            # llm=None: migration only runs DDL — no embedding calls, no OCI GenAI init
+            store = IncidentVectorStore(adb_pool=pool, llm=None)
             store.migrate()
             print("  ✓ kb_incidents: OK")
 

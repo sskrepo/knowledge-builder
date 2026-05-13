@@ -39,13 +39,13 @@ class IncidentVectorStore(BaseStore):
     def __init__(
         self,
         adb_pool,
-        llm: LLMClient,
+        llm: LLMClient | None = None,
         chunker: Chunker | None = None,
         jira_base_url: str = "",
         confluence_base_url: str = "",
     ):
         self.pool = adb_pool
-        self.llm = llm
+        self.llm = llm  # None valid for migration-only; embed/search will raise if None
         self.chunker = chunker or Chunker(target_tokens=512, overlap_tokens=64)
         self.jira_base_url = jira_base_url.rstrip("/")
         self.confluence_base_url = confluence_base_url.rstrip("/")

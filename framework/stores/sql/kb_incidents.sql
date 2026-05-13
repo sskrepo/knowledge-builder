@@ -90,10 +90,13 @@ CREATE TABLE chunks (
 CREATE INDEX ix_chunks_content_ord     ON chunks (content_id, ord);
 
 -- HNSW index for fast ANN search using cosine distance.
--- The 23ai vector index supports HNSW with configurable M and ef_construction.
+-- Disk-resident (no ORGANIZATION INMEMORY) — creates instantly even on ADB.
+-- INMEMORY NEIGHBOR GRAPH would give faster queries but requires ADB to provision
+-- an in-memory pool at creation time (~20-60 s even on empty table). Add that
+-- clause only in production after the table has real data and the in-memory pool
+-- is confirmed available.
 CREATE VECTOR INDEX ix_chunks_embedding_hnsw
   ON chunks (embedding)
-  ORGANIZATION INMEMORY NEIGHBOR GRAPH
   DISTANCE COSINE
   WITH TARGET ACCURACY 95
   PARAMETERS (TYPE HNSW, NEIGHBORS 32, EFCONSTRUCTION 200);
