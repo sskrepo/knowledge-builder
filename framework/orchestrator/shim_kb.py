@@ -20,9 +20,16 @@ class ShimKb:
 
     def load(self) -> None:
         cards: list[dict] = []
-        for path in sorted(self.dir.glob("*.yaml")):
-            if path.name.startswith("_"):
-                continue
+
+        # First pass: load all full persona builder YAMLs (*.yaml).
+        # Build a persona → visibility mapping so *.yaml.new_kb entries can
+        # inherit the owning persona's ACL defaults.
+        persona_visibility_defaults: dict[str, list[str]] = {}
+        full_yaml_paths = sorted(
+            p for p in self.dir.glob("*.yaml") if not p.name.startswith("_")
+        )
+
+        for path in full_yaml_paths:
             try:
                 with open(path) as f:
                     cfg = yaml.safe_load(f) or {}
@@ -30,20 +37,66 @@ class ShimKb:
                 log.warning("failed to load %s: %s", path, e)
                 continue
             persona = cfg.get("persona")
-            visibility = (cfg.get("metadata_defaults") or {}).get("persona_visibility") or [persona]
+            if not persona:
+                continue
+            visibility = (
+                (cfg.get("metadata_defaults") or {}).get("persona_visibility")
+                or [persona]
+            )
+            persona_visibility_defaults[persona] = visibility
             for kb in cfg.get("knowledge_bases", []):
                 card = dict(kb.get("kb_card") or {})
                 card.update({
                     "name": kb["name"],
-                    "persona": persona,                       # AUTHORING owner
+                    "persona": persona,
                     "kind": kb["kind"],
                     "retrieval_tools": kb.get("retrieval_tools", []),
                     "provides_fields": kb.get("provides_fields", []),
-                    "persona_visibility": visibility,         # READ scope
+                    "persona_visibility": visibility,
                 })
                 cards.append(card)
+
+        # Second pass: *.yaml.new_kb files — raw KB entry dicts written by
+        # COMMIT before they are merged into the full persona builder at PROMOTE
+        # time.  These represent authored-but-not-yet-promoted KBs.  Include them
+        # so that persona skill LLMs can select them during Tier 2 retrieval.
+        # Without this, a newly promoted skill's KB is invisible to all retrievers
+        # and every query returns the generic weekly-ops fixture.
+        for path in sorted(self.dir.glob("*.yaml.new_kb")):
+            if path.name.startswith("_"):
+                continue
+            try:
+                with open(path) as f:
+                    kb_entry = yaml.safe_load(f) or {}
+            except Exception as e:
+                log.warning("failed to load %s: %s", path, e)
+                continue
+            # Infer persona from filename: "tpm.yaml.new_kb" → "tpm"
+            persona = path.name.split(".")[0]
+            visibility = persona_visibility_defaults.get(persona) or [persona]
+            kb_name = kb_entry.get("name")
+            if not kb_name:
+                continue
+            card = dict(kb_entry.get("kb_card") or {})
+            card.update({
+                "name": kb_name,
+                "persona": persona,
+                "kind": kb_entry.get("kind", "vector"),
+                "retrieval_tools": kb_entry.get("retrieval_tools", ["vector_search"]),
+                "provides_fields": kb_entry.get("provides_fields", []),
+                "persona_visibility": visibility,
+            })
+            cards.append(card)
+            log.debug("shim_kb: loaded new_kb entry %s.%s from %s", persona, kb_name, path.name)
+
         self._cards = cards
-        log.info("shim_kb loaded %d cards from %s", len(cards), self.dir)
+        log.info(
+            "shim_kb loaded %d cards from %s (%d full builders, %d new_kb entries)",
+            len(cards),
+            self.dir,
+            len(full_yaml_paths),
+            sum(1 for p in self.dir.glob("*.yaml.new_kb") if not p.name.startswith("_")),
+        )
 
     def all_cards(self) -> list[dict]:
         return list(self._cards)
