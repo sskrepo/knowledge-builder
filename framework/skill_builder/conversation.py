@@ -1102,7 +1102,30 @@ class SkillBuilderConversation:
         return self._handle_commit()
 
     def _handle_commit(self) -> ConversationTurn:
-        committed_paths = self._write_artifacts()
+        # ADB write must succeed before we advance to COMMITTED state. If the
+        # skill_store raises (e.g. pool unavailable, schema mismatch, network),
+        # we stay at PREVIEW so the user can fix and retry — never advance on a
+        # filesystem-only "commit" because downstream states (VALIDATE/INGEST/
+        # PROMOTE) all assume the row is durable in ADB.
+        try:
+            committed_paths = self._write_artifacts()
+        except Exception as exc:
+            log.error(
+                "_handle_commit: write_artifacts failed — staying at PREVIEW. "
+                "synth_id=%s persona=%s skill=%s err=%s",
+                self._data.synth_id, self._data.persona, self._data.skill_name, exc,
+            )
+            return ConversationTurn(
+                state="PREVIEW",
+                message=(
+                    f"❌ Commit failed — skill was NOT saved to the durable store.\n\n"
+                    f"  {type(exc).__name__}: {exc}\n\n"
+                    f"Filesystem files may or may not have been written; ADB rejected the write.\n"
+                    f"Fix the underlying issue (ADB connectivity, schema, etc.) and retry."
+                ),
+                options=["retry commit", "stop here"],
+            )
+
         self._data.committed_paths = committed_paths
         self._state = "COMMITTED"
         return ConversationTurn(
@@ -1786,11 +1809,16 @@ class SkillBuilderConversation:
 
         # Build a {artifact_type: text} mapping alongside the {rel_path: content} map
         # so we can pass clean artifact_type keys to skill_store.write_artifacts().
+        # Must match framework/deploy/skill_store/_base.py ARTIFACT_TYPES and the
+        # KBF_SKILL_ARTIFACTS check constraint added in migration 006. Forgetting
+        # one here means it gets silently dropped from typed_artifacts and never
+        # reaches ADB (see BUG: extraction_schema regression).
         _KNOWN_ARTIFACT_TYPES = {
             "workflow_skill",
             "persona_builder_delta",
             "eval_extraction",
             "eval_workflow",
+            "extraction_schema",
         }
 
         # Map rel_path → (artifact_type, text) for every synthesized artifact
@@ -1830,27 +1858,28 @@ class SkillBuilderConversation:
             log.info("wrote %s", full)
             committed.append(rel_path)
 
-        # Write to skill_store if available (ADB-backed in production)
+        # Write to skill_store (ADB-backed in production). HARD-FAIL if this
+        # write does not succeed: previously a try/except turned ADB failures
+        # into log.warning, leaving the session reporting "Committed N" while
+        # ADB had nothing. That made "committed" silently mean "filesystem only,
+        # not durable" — exactly the bug that lost session synth-tpm-6523a9c4's
+        # work. If ADB is the source of truth, the session must fail here so
+        # the user can fix the underlying issue and retry, instead of advancing
+        # to VALIDATE/INGEST/PROMOTE on a phantom commit.
         if self._skill_store is not None and typed_artifacts:
-            try:
-                self._skill_store.write_artifacts(
-                    synth_id=self._data.synth_id,
-                    persona=self._data.persona,
-                    skill_name=self._data.skill_name,
-                    artifacts=typed_artifacts,
-                )
-                log.info(
-                    "skill_store.write_artifacts: synth_id=%s persona=%s skill=%s types=%s",
-                    self._data.synth_id,
-                    self._data.persona,
-                    self._data.skill_name,
-                    sorted(typed_artifacts.keys()),
-                )
-            except Exception as exc:
-                log.warning(
-                    "skill_store.write_artifacts failed (filesystem write still succeeded): %s",
-                    exc,
-                )
+            self._skill_store.write_artifacts(
+                synth_id=self._data.synth_id,
+                persona=self._data.persona,
+                skill_name=self._data.skill_name,
+                artifacts=typed_artifacts,
+            )
+            log.info(
+                "skill_store.write_artifacts: synth_id=%s persona=%s skill=%s types=%s",
+                self._data.synth_id,
+                self._data.persona,
+                self._data.skill_name,
+                sorted(typed_artifacts.keys()),
+            )
 
         return committed
 

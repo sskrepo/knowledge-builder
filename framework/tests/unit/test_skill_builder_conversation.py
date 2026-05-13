@@ -139,22 +139,30 @@ class TestWriteArtifactsWithSkillStore:
         artifacts = mock_store.write_artifacts.call_args.kwargs.get("artifacts") or \
                     mock_store.write_artifacts.call_args.args[3]
 
-        valid_types = {"workflow_skill", "persona_builder_delta", "eval_extraction", "eval_workflow"}
+        # Must match framework/deploy/skill_store/_base.py ARTIFACT_TYPES.
+        valid_types = {
+            "workflow_skill",
+            "persona_builder_delta",
+            "eval_extraction",
+            "eval_workflow",
+            "extraction_schema",
+        }
         for t in artifacts:
             assert t in valid_types, f"Unexpected artifact_type: {t}"
 
-    def test_filesystem_written_even_when_skill_store_raises(self, tmp_path):
+    def test_write_artifacts_raises_when_skill_store_raises(self, tmp_path):
+        """Hard-fail contract: if ADB write fails after retries, _write_artifacts
+        must re-raise so the caller can keep the session in PREVIEW state.
+        Reporting "committed" while ADB has nothing was the silent-data-loss
+        bug behind the synth-tpm-6523a9c4 incident.
+        """
         mock_store = MagicMock()
         mock_store.write_artifacts.side_effect = RuntimeError("ADB down")
         conv = _make_conversation(tmp_path, skill_store=mock_store)
 
         with patch("framework.skill_builder.conversation.REPO_ROOT", tmp_path):
-            committed = conv._write_artifacts()
-
-        # Filesystem write must still succeed
-        assert len(committed) == 4
-        wf_path = tmp_path / "framework" / "workflow_skills" / "tpm" / "weekly_report.yaml"
-        assert wf_path.exists()
+            with pytest.raises(RuntimeError, match="ADB down"):
+                conv._write_artifacts()
 
     def test_filesystem_also_written_with_skill_store(self, tmp_path):
         """skill_store write is additive — filesystem write still happens."""

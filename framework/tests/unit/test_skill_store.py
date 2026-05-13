@@ -272,6 +272,54 @@ class TestAdbSkillStoreWriteArtifacts:
         with pytest.raises(ValueError, match="Unknown artifact_type"):
             store.write_artifacts("s", "tpm", "skill", {"bad_type": "content"})
 
+    def test_retries_transient_failure_then_succeeds(self, monkeypatch):
+        """Transient ADB errors (network blip, deadlock) should be retried.
+
+        Prevents silent data loss like the synth-tpm-6523a9c4 incident: the
+        session reported "Committed" but ADB had no row because a single
+        transient pool error was previously swallowed.
+        """
+        # Avoid the 0.5/2.0/5.0s real sleeps in the retry loop.
+        monkeypatch.setattr("time.sleep", lambda _s: None)
+
+        mock_pool, mock_conn, mock_cur = _make_mock_pool()
+        # First two attempts raise; third succeeds.
+        attempts = {"n": 0}
+
+        def execute_side_effect(*args, **kwargs):
+            attempts["n"] += 1
+            if attempts["n"] <= 2:
+                raise RuntimeError("transient ADB error")
+            return None
+
+        mock_cur.execute.side_effect = execute_side_effect
+
+        store = AdbSkillStore(pool=mock_pool)
+        # Should NOT raise — third attempt succeeds.
+        store.write_artifacts(
+            synth_id="s", persona="tpm", skill_name="skill",
+            artifacts={"workflow_skill": "c"},
+        )
+        assert attempts["n"] == 3, "expected exactly 3 attempts (2 fail + 1 success)"
+
+    def test_raises_after_exhausting_retries(self, monkeypatch):
+        """When all 3 attempts fail, write_artifacts must re-raise — caller
+        (skill_builder.conversation) needs the exception to keep the session
+        at PREVIEW and refuse to advance to COMMITTED. Reporting success when
+        ADB has nothing is the bug behind synth-tpm-6523a9c4.
+        """
+        monkeypatch.setattr("time.sleep", lambda _s: None)
+
+        mock_pool, mock_conn, mock_cur = _make_mock_pool()
+        mock_cur.execute.side_effect = RuntimeError("ADB permanently down")
+
+        store = AdbSkillStore(pool=mock_pool)
+        with pytest.raises(RuntimeError, match="ADB permanently down"):
+            store.write_artifacts(
+                synth_id="s", persona="tpm", skill_name="skill",
+                artifacts={"workflow_skill": "c"},
+            )
+
 
 class TestAdbSkillStoreRead:
     def test_read_returns_content_from_row(self):
