@@ -728,6 +728,35 @@ class TestAdvanceToReviewSchemaWithLlmSpecs:
         assert "⚠️" not in turn.message
         assert "ℹ️" not in turn.message
 
+    # -- BUG-938f0 regression guards -----------------------------------------
+
+    def test_no_delta_note_when_no_artifact_uploaded(self):
+        """Manual field-list entry (no artifact) must never show the 'added after artifact
+        analysis' warning — BUG-938f0 regression guard."""
+        conv = self._make_conv(
+            fields=["week_id", "rag_status", "blockers"],
+            llm_specs={},
+        )
+        conv._data.artifact_path = ""  # no artifact uploaded
+        turn = conv._advance_to_review_schema()
+        assert "added after the artifact analysis" not in turn.message
+        assert "identified in the artifact were removed" not in turn.message
+
+    def test_delta_note_shown_when_artifact_uploaded_and_fields_added(self):
+        """When a real artifact was uploaded and the user added extra fields,
+        the delta note SHOULD fire — regression guard for the inverse case."""
+        llm_specs = {
+            "title": {"type": "string", "description": "Title"},
+            "rag_status": {"type": "string", "description": "RAG"},
+        }
+        conv = self._make_conv(
+            fields=["title", "rag_status", "blockers"],  # "blockers" added after
+            llm_specs=llm_specs,
+        )
+        conv._data.artifact_path = "/tmp/ref.pptx"  # artifact WAS uploaded
+        turn = conv._advance_to_review_schema()
+        assert "added after the artifact analysis" in turn.message
+
     def test_no_llm_specs_falls_back_to_heuristic(self):
         """When llm_suggested_specs is empty, heuristic is used for all fields."""
         conv = self._make_conv(
@@ -971,3 +1000,58 @@ class TestSlugify:
         slug = _slugify(intent)
         import re as _re
         assert _re.fullmatch(r"[a-z0-9_]+", slug), f"invalid chars in slug: {slug!r}"
+
+
+# ---------------------------------------------------------------------------
+# BUG-58f6f — "rename skill to X" must be intercepted by respond() at any
+# pre-COMMIT state, not forwarded to the state's handler as a field list
+# ---------------------------------------------------------------------------
+
+
+class TestRenameSkillCommand:
+    """Regression guards for BUG-58f6f: rename-skill command interception."""
+
+    def _make_conv(self, state: str, **kwargs) -> SkillBuilderConversation:
+        """Build a minimal SkillBuilderConversation in the given state."""
+        conv = SkillBuilderConversation(persona="tpm")
+        conv._data.persona = "tpm"
+        conv._data.skill_name = kwargs.get("skill_name", "old_name")
+        conv._state = state
+        for k, v in kwargs.items():
+            if k != "skill_name":
+                setattr(conv._data, k, v)
+        return conv
+
+    def test_rename_skill_at_analyze_artifact_renames_not_field_list(self):
+        """'rename skill to X' at ANALYZE_ARTIFACT must rename the skill, not parse it
+        as a field — BUG-58f6f regression guard."""
+        conv = self._make_conv(
+            "ANALYZE_ARTIFACT",
+            skill_name="generate_a_very_long_auto_generated_skill_name",
+        )
+        turn = conv.respond("rename skill to weekly_exec_review")
+        assert conv._data.skill_name == "weekly_exec_review"
+        assert "renamed" in turn.message.lower()
+        assert turn.state == "ANALYZE_ARTIFACT"  # state must not advance
+
+    def test_rename_skill_at_review_fields_works(self):
+        """rename skill to X must work at REVIEW_FIELDS too."""
+        conv = self._make_conv(
+            "REVIEW_FIELDS",
+            skill_name="old_name",
+            fields=["week_id", "rag_status"],
+        )
+        turn = conv.respond("rename skill to short_name")
+        assert conv._data.skill_name == "short_name"
+        assert turn.state == "REVIEW_FIELDS"
+
+    def test_rename_skill_not_intercepted_after_commit(self):
+        """rename skill to X after COMMITTED must NOT rename — state is past pre-commit."""
+        conv = self._make_conv(
+            "VALIDATE",
+            skill_name="original",
+            committed_paths=["framework/workflow_skills/tpm/original.yaml"],
+        )
+        # At VALIDATE, 'rename skill to X' is not a valid command; skill_name unchanged
+        conv.respond("rename skill to something_else")
+        assert conv._data.skill_name == "original"

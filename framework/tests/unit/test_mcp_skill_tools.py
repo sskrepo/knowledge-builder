@@ -415,6 +415,41 @@ class TestDeleteSkillPersonaBuilderCleanup:
 
 
 # ---------------------------------------------------------------------------
+# deleteSkill — filesystem cleanup tests (BUG-queue-4fd5e)
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteSkillFilesystemCleanup:
+    """deleteSkill must remove on-disk artifacts so skill counts don't go stale
+    after deletion — BUG-queue-4fd5e regression guard."""
+
+    def _admin_consumer(self):
+        return _consumer(scopes=["read", "write", "admin"])
+
+    def test_delete_succeeds_even_when_fs_files_absent(self):
+        """deleteSkill must not crash when on-disk files don't exist (already clean).
+
+        This guards against the regression where the handler raised FileNotFoundError
+        if the workflow YAML or eval files had already been removed from disk.
+        """
+        store = MagicMock()
+        store.delete.return_value = ["workflow_skill"]
+        store.delete_persona_builder_kb.return_value = False
+        app = _app(store)
+        app.state.shim_kb = None
+        registry = build_external_tool_registry(app)
+        handler = registry["deleteSkill"]
+        with _patched_delete_pw("pw"):
+            result = _run(handler(
+                persona="tpm", skillName="nonexistent_on_disk",
+                confirmationPassword="pw", _consumer=self._admin_consumer(),
+            ))
+        assert result.get("isError") is not True
+        assert result["status"] == "deleted"
+        store.delete.assert_called_once_with("tpm", "nonexistent_on_disk")
+
+
+# ---------------------------------------------------------------------------
 # Helpers for deleteSkill tests
 # ---------------------------------------------------------------------------
 
