@@ -208,6 +208,37 @@ class ContextBuilder:
 
         elapsed_ms = int((time.time() - t0) * 1000)
 
+        # If synthesis was blocked by an upstream content-policy filter, the
+        # synthesizer returns a no-answer dict with _content_filtered=True and a
+        # KBF-generated _request_id.  Surface these as a clean tier_4 no_answer —
+        # no OCI endpoint, SDK version, or opc-request-id must appear in the result.
+        if isinstance(answer, dict) and answer.get("_content_filtered"):
+            request_id = answer.get("_request_id", "KBF-UNKNOWN")
+            clean_answer = {
+                "Answer": (
+                    f"The query could not be processed. Request ID: {request_id}"
+                ),
+            }
+            return {
+                "answer": clean_answer,
+                "schema": schema.name,
+                "tier": 4,
+                "intent": {
+                    "persona": classification.persona,
+                    "personas": classification.personas,
+                    "confidence": 0.0,
+                    "workflow_skill": None,
+                    "reasoning": "content_filtered",
+                },
+                "passages": [],
+                "citations": [],
+                "used_kbs": [],
+                "used_tools": [],
+                "cost": packet.cost,
+                "latency_ms": elapsed_ms,
+                "request_id": request_id,
+            }
+
         # Apply max_results cap before serialising passages.
         visible_passages = packet.passages[:max_results]
 

@@ -14,6 +14,7 @@ Coverage:
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import json
@@ -833,3 +834,66 @@ class TestManualFieldEntryLlmCall:
 
         llm.chat.assert_called_once()
         assert result["my_field"] == "Description from LLM without mapping."
+
+
+# ---------------------------------------------------------------------------
+# _slugify — OPS-CD461C27: cap raised 50→64, no mid-word truncation
+# ---------------------------------------------------------------------------
+
+
+from framework.skill_builder.conversation import _slugify  # noqa: E402
+
+
+class TestSlugify:
+    def test_long_intent_slug_within_64_chars(self):
+        """The canonical OPS-CD461C27 case: long intent must not exceed 64 chars."""
+        intent = "review all open bugs on the kb framework and produce a consolidated report"
+        slug = _slugify(intent)
+        assert len(slug) <= 64, f"slug too long: {slug!r} ({len(slug)} chars)"
+
+    def test_long_intent_slug_does_not_end_with_underscore(self):
+        intent = "review all open bugs on the kb framework and produce a consolidated report"
+        slug = _slugify(intent)
+        assert not slug.endswith("_"), f"slug ends with underscore: {slug!r}"
+
+    def test_long_intent_slug_not_truncated_mid_word(self):
+        """Slug must be cut at a word boundary (underscore), not mid-word.
+
+        The 50-char cap produced 'review_all_open_bugs_on_the_kb_framework_and_produ'
+        — truncating 'produce' mid-word.  With the 64-char cap and back-off logic
+        the result must be a complete-word slug.
+        """
+        intent = "review all open bugs on the kb framework and produce a consolidated report"
+        slug = _slugify(intent)
+        # Reconstruct what the raw 64-char truncation would look like without back-off
+        raw_64 = re.sub(r"[^a-z0-9_]+", "_", intent.lower())
+        raw_64 = re.sub(r"_+", "_", raw_64).strip("_")
+        raw_truncated = raw_64[:64]
+        # If raw truncation ends mid-word (no trailing underscore), our slug should differ
+        if not raw_truncated.endswith("_") and "_" in raw_truncated:
+            # Back-off applied: slug must end at a word boundary
+            assert not slug.endswith(raw_truncated.split("_")[-1]) or slug == raw_truncated, (
+                f"slug appears to end mid-word: {slug!r}"
+            )
+
+    def test_short_intent_unchanged(self):
+        """Slugs under 64 chars must not be modified."""
+        slug = _slugify("weekly exec review")
+        assert slug == "weekly_exec_review"
+
+    def test_exactly_64_chars_not_truncated(self):
+        """A slug that fits exactly in 64 chars must be returned as-is."""
+        # Construct a text whose slug is exactly 64 chars
+        text = "a" * 64
+        slug = _slugify(text)
+        assert len(slug) == 64
+
+    def test_empty_input_returns_unnamed_skill(self):
+        assert _slugify("") == "unnamed_skill"
+        assert _slugify("   ") == "unnamed_skill"
+
+    def test_slug_contains_only_valid_chars(self):
+        intent = "review all open bugs on the kb framework and produce a consolidated report"
+        slug = _slugify(intent)
+        import re as _re
+        assert _re.fullmatch(r"[a-z0-9_]+", slug), f"invalid chars in slug: {slug!r}"

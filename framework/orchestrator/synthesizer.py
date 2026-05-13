@@ -5,11 +5,24 @@ Per ADR-007 amend 2 (structured synthesis output).
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass, field
 
 from ..core.llm import LLMClient
 
 log = logging.getLogger(__name__)
+
+
+def _is_content_filter_error(exc: BaseException) -> bool:
+    """Return True when *exc* originates from an upstream content-policy rejection.
+
+    Matches OCI GenAI 400 "Inappropriate content detected!!!" and any HTTP-400
+    from an inference provider whose message contains "Inappropriate content".
+    """
+    msg = str(exc)
+    return "Inappropriate content" in msg or (
+        "400" in msg and "content" in msg.lower()
+    )
 
 
 @dataclass
@@ -88,13 +101,28 @@ Rules:
 """
         user = f"Query: {query}\n\nPassages:\n{passages_block}\n\nProduce the structured answer now."
 
-        response = self.llm.chat(
-            model=self.model,
-            messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": user}],
-            temperature=0.0,
-            max_tokens=(budget.max_tokens_out if budget else 1500),
-        )
+        try:
+            response = self.llm.chat(
+                model=self.model,
+                messages=[{"role": "system", "content": system},
+                          {"role": "user", "content": user}],
+                temperature=0.0,
+                max_tokens=(budget.max_tokens_out if budget else 1500),
+            )
+        except Exception as exc:
+            if _is_content_filter_error(exc):
+                request_id = f"KBF-{uuid.uuid4().hex[:12].upper()}"
+                log.warning(
+                    "synthesizer: content-filter rejection from inference provider "
+                    "(requestId=%s): %s",
+                    request_id, exc,
+                )
+                # Return a clean tier_4 no_answer — no provider details exposed.
+                no_answer = {s.name: "(no relevant context found)" for s in schema.sections}
+                no_answer["_content_filtered"] = True
+                no_answer["_request_id"] = request_id
+                return no_answer
+            raise
         return self._parse_sections(response["text"], schema)
 
     def _parse_sections(self, text: str, schema: SynthesisSchema) -> dict:

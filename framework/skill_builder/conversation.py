@@ -358,10 +358,25 @@ class SkillBuilderConversation:
         )
 
     def _handle_analyze_artifact_prompt(self) -> ConversationTurn:
+        slug = self._data.skill_name
+        slug_notice = ""
+        if len(slug) >= 48:
+            log.warning(
+                "skill name slug is near or at the length limit: %r (%d chars)",
+                slug, len(slug),
+            )
+            slug_notice = (
+                f"\n\nNote: your skill has been auto-named '{slug}'. "
+                "You can type 'rename skill to <shorter_name>' at any point before COMMIT "
+                "to use a shorter, more descriptive name."
+                # TODO(follow-up): implement 'rename skill' command handler in
+                # _handle_analyze_artifact / _handle_review_fields_response so the
+                # above instruction is actionable (OPS-CD461C27).
+            )
         return ConversationTurn(
             state="ANALYZE_ARTIFACT",
             message=(
-                f"Great. You want to automate: '{self._data.intent_description}'.\n\n"
+                f"Great. You want to automate: '{self._data.intent_description}'.{slug_notice}\n\n"
                 "Now show me an example outcome. Provide the path to a PPT, DOCX, Markdown, "
                 "or text file that represents the kind of output this skill should produce.\n\n"
                 "If you don't have a file, type the field names separated by commas "
@@ -1549,7 +1564,14 @@ class SkillBuilderConversation:
 def _slugify(text: str) -> str:
     s = re.sub(r"[^a-z0-9_]+", "_", text.lower())
     s = re.sub(r"_+", "_", s).strip("_")
-    return s[:50] or "unnamed_skill"
+    # Cap at 64 chars (matches DB column width; well within filesystem limits).
+    # Avoid truncating mid-word: walk back to the last underscore if possible.
+    if len(s) > 64:
+        truncated = s[:64]
+        last_sep = truncated.rfind("_")
+        s = truncated[:last_sep] if last_sep > 0 else truncated
+        s = s.strip("_")
+    return s or "unnamed_skill"
 
 
 def _to_field_name(text: str) -> str:

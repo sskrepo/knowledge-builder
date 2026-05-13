@@ -154,14 +154,25 @@ def _build_ask_response(result: dict, consumer) -> dict:
         "latency_ms": result.get("latency_ms", 0),
     }
 
-    # Tier 4: attach skill suggestion
+    # Tier 4: attach skill suggestion and/or requestId (content-filter path)
     if tier == 4:
-        response["skill_suggestion"] = result.get("skill_suggestion", {
-            "message": (
-                "No grounded answer found. "
-                "Consider authoring a skill for this query type."
-            ),
-            "suggested_persona": intent.get("persona", ""),
-        })
+        # Content-filter path: surface clean requestId, suppress skill suggestion
+        if result.get("request_id"):
+            response["request_id"] = result["request_id"]
+            response["skill_suggestion"] = {
+                "message": (
+                    f"The query could not be processed. "
+                    f"Request ID: {result['request_id']}"
+                ),
+                "suggested_persona": intent.get("persona", ""),
+            }
+        else:
+            response["skill_suggestion"] = result.get("skill_suggestion", {
+                "message": (
+                    "No grounded answer found. "
+                    "Consider authoring a skill for this query type."
+                ),
+                "suggested_persona": intent.get("persona", ""),
+            })
 
     return response
