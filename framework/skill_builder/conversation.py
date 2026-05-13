@@ -479,6 +479,8 @@ class SkillBuilderConversation:
             fields, mapping = self._parse_fields_from_input(user_input)
             self._data.fields = fields
             self._data.slide_mapping = mapping
+            # LLM analysis even for manual field lists — uses field names + intent as context
+            self._data.llm_suggested_specs = self._llm_analyze_artifact(fields, mapping)
             source = "your field list"
 
         self._state = "REVIEW_FIELDS"

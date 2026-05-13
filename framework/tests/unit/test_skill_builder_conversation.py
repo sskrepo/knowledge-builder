@@ -740,3 +740,96 @@ class TestLlmSuggestedSpecsPersistence:
         }
         conv = SkillBuilderConversation.from_dict(d)
         assert conv._data.llm_suggested_specs == {}
+
+
+# ---------------------------------------------------------------------------
+# Manual field-entry path — LLM call coverage
+# ---------------------------------------------------------------------------
+
+class TestManualFieldEntryLlmCall:
+    """Regression tests: LLM must be called even when user types field names manually.
+
+    Root cause of synth-tpm-51f37a45: the else-branch in _handle_analyze_artifact
+    (no artifact file provided) never called _llm_analyze_artifact(), leaving
+    llm_suggested_specs={} and all fields as heuristic placeholders at REVIEW_SCHEMA.
+    """
+
+    def _make_mock_llm(self, response_json: dict) -> MagicMock:
+        llm = MagicMock()
+        llm.chat.return_value = {"text": json.dumps(response_json), "tokens_in": 10, "tokens_out": 50}
+        return llm
+
+    def test_manual_field_list_populates_llm_suggested_specs(self):
+        """Typing field names (no file path) must still call _llm_analyze_artifact."""
+        llm_response = {
+            "week_id": {"type": "string", "description": "ISO week identifier, e.g. 2026-W20."},
+            "project_name": {"type": "string", "description": "Full project name as it appears in Jira."},
+            "overall_rag": {"type": "string", "description": "Overall RAG status (Red/Amber/Green)."},
+        }
+        llm = self._make_mock_llm(llm_response)
+        conv = SkillBuilderConversation(persona="tpm", llm=llm)
+        conv._state = "ANALYZE_ARTIFACT"
+        conv._data.intent_description = "Weekly exec review PPT"
+
+        # Simulate user typing comma-separated field names (no file path)
+        conv._handle_analyze_artifact("week_id, project_name, overall_rag")
+
+        # LLM must have been called
+        llm.chat.assert_called_once()
+        # Specs must be populated
+        assert "week_id" in conv._data.llm_suggested_specs
+        assert conv._data.llm_suggested_specs["week_id"]["description"] == \
+            "ISO week identifier, e.g. 2026-W20."
+
+    def test_manual_field_list_review_schema_uses_llm_descriptions_not_heuristic(self):
+        """End-to-end: manual fields → REVIEW_SCHEMA descriptions come from LLM."""
+        llm_response = {
+            "schedule_health": {
+                "type": "string",
+                "description": "RAG status for schedule with 1-2 sentence justification.",
+            },
+            "exec_asks": {
+                "type": "array",
+                "description": "List of specific asks or decisions needed from leadership.",
+            },
+        }
+        llm = self._make_mock_llm(llm_response)
+        conv = SkillBuilderConversation(persona="tpm", llm=llm)
+        conv._state = "ANALYZE_ARTIFACT"
+        conv._data.intent_description = "Weekly exec review PPT"
+
+        conv._handle_analyze_artifact("schedule_health, exec_asks")
+        # Advance through REVIEW_FIELDS to REVIEW_SCHEMA
+        turn = conv._advance_to_review_schema()
+
+        assert turn.state == "REVIEW_SCHEMA"
+        assert "RAG status for schedule" in \
+            conv._data.field_specs["schedule_health"]["description"]
+        assert conv._data.field_specs["exec_asks"]["type"] == "array"
+        # No heuristic placeholder text
+        assert "refine description" not in \
+            conv._data.field_specs["schedule_health"]["description"]
+
+    def test_synthesize_field_descriptions_calls_llm_without_mapping(self):
+        """synthesize_field_descriptions must call LLM even when mapping=None."""
+        from framework.skill_builder.synthesize_schema import synthesize_field_descriptions
+
+        llm = MagicMock()
+        llm.chat.return_value = {
+            "text": json.dumps({
+                "my_field": "Description from LLM without mapping."
+            }),
+            "tokens_in": 5,
+            "tokens_out": 20,
+        }
+
+        result = synthesize_field_descriptions(
+            fields=["my_field"],
+            mapping=None,          # ← the previously broken case
+            intent="test intent",
+            persona="tpm",
+            llm=llm,
+        )
+
+        llm.chat.assert_called_once()
+        assert result["my_field"] == "Description from LLM without mapping."

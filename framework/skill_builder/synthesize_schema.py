@@ -42,17 +42,19 @@ def synthesize_field_descriptions(
 ) -> dict[str, str]:
     """Return a {field_name: description} dict for use in field_specs.
 
-    When llm is provided and mapping has body_text / raw_title context:
+    When llm is provided:
       - Calls the LLM once with all fields to synthesize extraction instructions.
+        Uses raw_title / body_text from mapping when available; falls back to
+        field name only when mapping is None (e.g. manual field-list entry).
       - Falls back to heuristic per field on LLM failure.
 
     When llm is None (stub mode):
       - Uses raw_title / raw_heading from mapping as a hint if available.
       - Otherwise falls back to _infer_field_spec heuristic.
     """
-    if llm is not None and mapping:
+    if llm is not None:
         try:
-            return _llm_synthesize_descriptions(fields, mapping, intent, persona, llm)
+            return _llm_synthesize_descriptions(fields, mapping or {}, intent, persona, llm)
         except Exception as exc:
             log.warning("synthesize_field_descriptions: LLM call failed (%s) — using heuristic", exc)
 
