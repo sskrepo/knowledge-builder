@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/tpm/generate_a_weekly_exec_review_pptx_for_the_26ai_project_from/v1.json",
+  "title": "tpm \u2014 generate_a_weekly_exec_review_pptx_for_the_26ai_project_from \u2014 v1",
+  "description": "Synthesized by skill_builder for persona=tpm, kb=generate_a_weekly_exec_review_pptx_for_the_26ai_project_from. Refine before promoting.",
+  "type": "object",
+  "required": [
+    "project_name",
+    "overall_rag",
+    "executive_summary",
+    "key_accomplishments",
+    "upcoming_milestones",
+    "schedule_health",
+    "scope_health",
+    "resource_health",
+    "top_risks",
+    "metrics_snapshot",
+    "workstream_status"
+  ],
+  "properties": {
+    "project_name": {
+      "type": "string",
+      "description": "Extract the project/program name as written in the header/title area (e.g., \"26ai\"). Output only the name, without extra qualifiers unless they are part of the official title.",
+      "maxLength": 500
+    },
+    "overall_rag": {
+      "type": "string",
+      "enum": [
+        "red",
+        "amber",
+        "green"
+      ],
+      "description": "Extract the overall status as a single value: \"Green\", \"Amber\", or \"Red\" (or the exact equivalent used). If the artifact uses an icon/color only, map it to the corresponding word."
+    },
+    "executive_summary": {
+      "type": "string",
+      "description": "Extract the executive summary narrative intended for leadership; keep it dense but readable as 2\u20135 sentences or a compact paragraph. Preserve key facts (what changed this week, why it matters, and the headline risks/asks) without adding interpretation.",
+      "maxLength": 1000
+    },
+    "key_accomplishments": {
+      "type": "array",
+      "description": "Extract the list of completed highlights for the week as short bullet strings (each starting with an action verb where possible). Include measurable outcomes, shipped items, decisions, or closed risks; omit plans and future work.",
+      "maxLength": 500
+    },
+    "upcoming_milestones": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Extract the next milestones as bullet strings including milestone name and target date (or week) when available. If a milestone is slipping, include the updated date and note the slip succinctly."
+    },
+    "schedule_health": {
+      "type": "string",
+      "description": "Extract the schedule RAG (\"Green\"/\"Amber\"/\"Red\") and a 1\u20132 sentence justification referencing specific milestone dates, slips, or critical path issues. If only narrative is present, infer the RAG only when explicitly stated; otherwise return the narrative without inventing a color.",
+      "maxLength": 500
+    },
+    "scope_health": {
+      "type": "string",
+      "description": "Extract the scope RAG (\"Green\"/\"Amber\"/\"Red\") and a 1\u20132 sentence justification citing scope changes, churn, additions/removals, or definition gaps. Keep it factual and tied to named deliverables or requirements.",
+      "maxLength": 500
+    },
+    "resource_health": {
+      "type": "string",
+      "description": "Extract the resourcing RAG (\"Green\"/\"Amber\"/\"Red\") and a 1\u20132 sentence justification citing staffing levels, key role gaps, attrition, or bandwidth constraints. Include any quantified shortfall (e.g., \"-2 FTE\") if present.",
+      "maxLength": 500
+    },
+    "top_risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Extract the top risks as bullet strings; each entry should include the risk statement and, if present, impact/likelihood and mitigation/owner. Keep each risk to one compact line; do not merge distinct risks."
+    },
+    "metrics_snapshot": {
+      "type": "array",
+      "description": "Extract the metrics snapshot as a list of \"Metric: value (trend/target)\" strings, preserving units and time window (e.g., WoW, QoQ). Include only metrics actually shown; do not compute derived values.",
+      "maxLength": 2000
+    },
+    "workstream_status": {
+      "type": "array",
+      "description": "Extract per-workstream status lines as bullet strings in the format \"Workstream \u2014 RAG \u2014 1 short sentence update\" (include owner if present). Keep each workstream separate and preserve the stated RAG and key callouts.",
+      "maxLength": 2000
+    }
+  },
+  "additionalProperties": false
+}
