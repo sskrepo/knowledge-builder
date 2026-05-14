@@ -3809,11 +3809,19 @@ Rules:
             )
             artifacts[f"eval/gold_sets/{persona}-{skill_name}-extraction.jsonl"] = gold_entries
 
+        # Carry the DESIGN_SKILL's chosen rendering layout (e.g.
+        # 'weekly_exec_review_v1') through to the workflow YAML so the
+        # PptxRenderer dispatches to the correct layout-aware builder at
+        # query time. Without this the renderer falls back to the generic
+        # "title + content per slide" layout and produces a 20+ slide deck
+        # instead of the designed single-slide format.
+        ws_design = (self._data.design or {}).get("workflow_shape", {}) or {}
         intent = {
             "task_description": self._data.intent_description,
             "sources": self._data.sources,
             "trigger": self._data.trigger,
             "output_format": self._data.output_format,
+            "layout": ws_design.get("layout"),
             "reuse": self._data.reuse_result,
         }
         wf_struct = synthesize_workflow_skill(

@@ -48,7 +48,7 @@ def synthesize_workflow_skill(
         "requires_extractions": _build_requires_extractions(
             requires_extractions, fields, persona, skill_name, intent
         ),
-        "synthesis": _build_synthesis(skill_name, output_format, fields, template_path),
+        "synthesis": _build_synthesis(skill_name, output_format, fields, template_path, intent.get("layout")),
         "delivery": delivery,
         "eval": {
             "gold_set": f"eval/gold_sets/{persona}-{skill_name}-workflow.jsonl",
@@ -162,6 +162,7 @@ def _build_synthesis(
     output_format: str,
     fields: list[str],
     template_path: str | None,
+    layout: str | None = None,
 ) -> dict:
     template = template_path or f"synthesis/templates/{skill_name}.{output_format}"
     slide_mapping_path = f"synthesis/mappings/{skill_name}.yaml"
@@ -171,6 +172,12 @@ def _build_synthesis(
         "template": template,
         "slide_mapping": slide_mapping_path,
     }
+
+    # Layout (e.g. 'weekly_exec_review_v1') tells the renderer to dispatch
+    # to a layout-aware builder instead of the generic title+content per
+    # slide fallback. Set by DESIGN_SKILL based on the user's intent.
+    if layout:
+        synthesis["layout"] = layout
 
     if fields:
         synthesis["field_mapping"] = {
