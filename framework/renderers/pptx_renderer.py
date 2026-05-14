@@ -141,38 +141,46 @@ class PptxRenderer(BaseRenderer):
         # ------------------------------------------------------------------
         # Left column: 2-row table
         # ------------------------------------------------------------------
-        # Extract fields from either data["extracted"] or data["sections"]
-        def _get(key: str, *section_aliases: str) -> str:
-            extracted = data.get("extracted", {})
-            sections = data.get("sections", {})
-            val = extracted.get(key) or sections.get(key.replace("_", " ").title())
-            if val is not None:
-                return _format_value(val)
-            for alias in section_aliases:
-                v = sections.get(alias)
-                if v is not None:
-                    return _format_value(v)
-            return ""
+        # Extract fields from either data["extracted"] or data["sections"].
+        # _get and _get_list accept multiple keys/aliases so the layout works
+        # with both the ADR-026 canonical schema field names AND the
+        # natural-source names that ADR-027 DESIGN_SKILL tends to choose
+        # (e.g. 'milestones' instead of 'key_milestones', 'in_scope' instead
+        # of 'scope'). The first non-empty value wins.
+        def _resolve_keys(keys: tuple[str, ...]) -> object:
+            extracted = data.get("extracted", {}) or {}
+            sections = data.get("sections", {}) or {}
+            for k in keys:
+                v = extracted.get(k)
+                if v not in (None, "", []):
+                    return v
+                v2 = sections.get(k.replace("_", " ").title())
+                if v2 not in (None, "", []):
+                    return v2
+            return None
 
-        def _get_list(key: str, *section_aliases: str) -> list[str]:
-            extracted = data.get("extracted", {})
-            sections = data.get("sections", {})
-            val = extracted.get(key) or sections.get(key.replace("_", " ").title())
-            if val is not None:
-                return _to_bullets(val)
-            for alias in section_aliases:
-                v = sections.get(alias)
-                if v is not None:
-                    return _to_bullets(v)
-            return []
+        def _get(*keys: str) -> str:
+            v = _resolve_keys(keys)
+            return _format_value(v) if v is not None else ""
 
-        scope_text = _get("scope", "Scope")
-        assumptions = _get_list("assumptions", "Assumptions")
-        status_bullets = _get_list("status_bullets", "Status Bullets")
-        next_steps = _get_list("next_steps", "Next Steps")
-        key_milestones = _get_list("key_milestones", "Key Milestones")
-        orm_status = _get("orm_status", "Orm Status")
-        risks = _get_list("risks_mitigations", "Risks Mitigations")
+        def _get_list(*keys: str) -> list[str]:
+            v = _resolve_keys(keys)
+            return _to_bullets(v) if v is not None else []
+
+        # Scope: prefer explicit scope; otherwise compose from in_scope +
+        # out_of_scope (the way the source page often expresses it).
+        scope_text = _get("scope", "in_scope", "business_outcome")
+        out_of_scope = _get("out_of_scope")
+        if scope_text and out_of_scope:
+            scope_text = f"In scope: {scope_text}. Out of scope: {out_of_scope}."
+        assumptions     = _get_list("assumptions")
+        status_bullets  = _get_list("status_bullets", "weekly_status_update",
+                                    "current_status", "current_phase", "overall_status")
+        next_steps      = _get_list("next_steps", "completed_last_week", "next_week_plan")
+        key_milestones  = _get_list("key_milestones", "milestones", "top_milestones")
+        orm_status      = _get("orm_status", "orm")
+        risks           = _get_list("risks_mitigations", "risks", "top_risks",
+                                    "top_issues_blockers", "blockers")
 
         # Left column dimensions
         lc_left = Inches(0.25)
