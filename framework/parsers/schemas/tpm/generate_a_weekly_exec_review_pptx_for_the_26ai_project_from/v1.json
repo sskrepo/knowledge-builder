@@ -20,7 +20,7 @@
   "properties": {
     "project_name": {
       "type": "string",
-      "description": "Extract the project/program name as written in the header/title area (e.g., \"26ai\"). Output only the name, without extra qualifiers unless they are part of the official title.",
+      "description": "Extract the project/program name as written in the header/title area (e.g., '26ai'). Return only the name, without extra qualifiers unless they are part of the official title.",
       "maxLength": 500
     },
     "overall_rag": {
@@ -30,16 +30,16 @@
         "amber",
         "green"
       ],
-      "description": "Extract the overall status as a single value: \"Green\", \"Amber\", or \"Red\" (or the exact equivalent used). If the artifact uses an icon/color only, map it to the corresponding word."
+      "description": "Extract the overall status as a single value: 'Green', 'Amber', or 'Red' (or the exact equivalent used on the page). If a symbol/color is used, map it to the corresponding word."
     },
     "executive_summary": {
       "type": "string",
-      "description": "Extract the executive summary narrative intended for leadership; keep it dense but readable as 2\u20135 sentences or a compact paragraph. Preserve key facts (what changed this week, why it matters, and the headline risks/asks) without adding interpretation.",
+      "description": "Extract the executive summary narrative intended for leadership; condense to 2\u20134 sentences capturing what changed this week, why it matters, and the headline risks/asks. Keep it exec-readable and avoid bullets unless the source is already bullet-form.",
       "maxLength": 1000
     },
     "key_accomplishments": {
       "type": "array",
-      "description": "Extract the list of completed highlights for the week as short bullet strings (each starting with an action verb where possible). Include measurable outcomes, shipped items, decisions, or closed risks; omit plans and future work.",
+      "description": "Extract the key accomplishments completed this week as a list of concise bullets (each item 6\u201320 words). Include measurable outcomes, shipped items, decisions, or closed actions; omit plans and future work.",
       "maxLength": 500
     },
     "upcoming_milestones": {
@@ -47,21 +47,21 @@
       "items": {
         "type": "string"
       },
-      "description": "Extract the next milestones as bullet strings including milestone name and target date (or week) when available. If a milestone is slipping, include the updated date and note the slip succinctly."
+      "description": "Extract upcoming milestones as a list; each item should include milestone name plus target date (or date range) if present. Preserve stated dates and note if a milestone is at risk using the source wording."
     },
     "schedule_health": {
       "type": "string",
-      "description": "Extract the schedule RAG (\"Green\"/\"Amber\"/\"Red\") and a 1\u20132 sentence justification referencing specific milestone dates, slips, or critical path issues. If only narrative is present, infer the RAG only when explicitly stated; otherwise return the narrative without inventing a color.",
+      "description": "Extract schedule health as 'Green', 'Amber', or 'Red' plus a brief justification (1\u20132 sentences) citing specific milestone dates, slips, or critical path issues mentioned. Do not invent dates; only use what is stated.",
       "maxLength": 500
     },
     "scope_health": {
       "type": "string",
-      "description": "Extract the scope RAG (\"Green\"/\"Amber\"/\"Red\") and a 1\u20132 sentence justification citing scope changes, churn, additions/removals, or definition gaps. Keep it factual and tied to named deliverables or requirements.",
+      "description": "Extract scope health as 'Green', 'Amber', or 'Red' plus a 1\u20132 sentence rationale referencing scope changes, additions/removals, or requirements churn. If scope is stable, explicitly state that per the source.",
       "maxLength": 500
     },
     "resource_health": {
       "type": "string",
-      "description": "Extract the resourcing RAG (\"Green\"/\"Amber\"/\"Red\") and a 1\u20132 sentence justification citing staffing levels, key role gaps, attrition, or bandwidth constraints. Include any quantified shortfall (e.g., \"-2 FTE\") if present.",
+      "description": "Extract resource/people health as 'Green', 'Amber', or 'Red' plus a 1\u20132 sentence rationale referencing staffing gaps, hiring, attrition, bandwidth constraints, or key role coverage. Keep it factual and tied to the source.",
       "maxLength": 500
     },
     "top_risks": {
@@ -69,16 +69,16 @@
       "items": {
         "type": "string"
       },
-      "description": "Extract the top risks as bullet strings; each entry should include the risk statement and, if present, impact/likelihood and mitigation/owner. Keep each risk to one compact line; do not merge distinct risks."
+      "description": "Extract the top risks as a list; each item should include the risk statement and, if present, impact/likelihood and mitigation/owner. Keep each item to one compact bullet; preserve any RAG or priority labels."
     },
     "metrics_snapshot": {
       "type": "array",
-      "description": "Extract the metrics snapshot as a list of \"Metric: value (trend/target)\" strings, preserving units and time window (e.g., WoW, QoQ). Include only metrics actually shown; do not compute derived values.",
+      "description": "Extract the metrics snapshot as a list of key metrics with values and deltas where available (e.g., 'Burn-down: 42\u219238', 'SLA: 99.2% (+0.3)'). Preserve units, time windows, and any targets; do not calculate missing deltas.",
       "maxLength": 2000
     },
     "workstream_status": {
       "type": "array",
-      "description": "Extract per-workstream status lines as bullet strings in the format \"Workstream \u2014 RAG \u2014 1 short sentence update\" (include owner if present). Keep each workstream separate and preserve the stated RAG and key callouts.",
+      "description": "Extract workstream-by-workstream status as a list; each item should include workstream name, RAG, and a short status note (1 clause) highlighting progress or issues. Preserve the workstream labels and ordering from the source.",
       "maxLength": 2000
     }
   },

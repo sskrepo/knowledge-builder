@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/tpm/weekly_exec_review_26ai/v1.json",
+  "title": "tpm \u2014 weekly_exec_review_26ai \u2014 v1",
+  "description": "Synthesized by skill_builder for persona=tpm, kb=weekly_exec_review_26ai. Refine before promoting.",
+  "type": "object",
+  "required": [
+    "report_date",
+    "project_name",
+    "jira_id",
+    "overall_rag",
+    "executive_summary",
+    "scope",
+    "assumptions",
+    "status_bullets",
+    "next_steps",
+    "key_milestones",
+    "risks_mitigations",
+    "orm_status"
+  ],
+  "properties": {
+    "report_date": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Extract the report date as displayed on the slide/page (prefer an explicit date like \"2026-05-06\" or \"May 6, 2026\"). Keep the same date format found in the source; do not convert unless the source already provides ISO."
+    },
+    "project_name": {
+      "type": "string",
+      "description": "Extract the project/program name exactly as written (e.g., \"26ai\" or the full formal name if provided). Do not append team names or extra qualifiers unless they are part of the title.",
+      "maxLength": 500
+    },
+    "jira_id": {
+      "type": "string",
+      "description": "Extract the primary tracking identifier(s) referenced for the project (e.g., a Jira epic/key like \"ABC-123\" or a single canonical link label). If multiple IDs are listed, return them as a single comma-separated string in the order shown.",
+      "maxLength": 64
+    },
+    "overall_rag": {
+      "type": "string",
+      "enum": [
+        "red",
+        "amber",
+        "green"
+      ],
+      "description": "Extract the overall status as a single RAG value: \"Green\", \"Amber\", or \"Red\" (or the exact equivalent shown, e.g., \"On Track\"). If a combined label is used (e.g., \"Amber (Schedule)\"), return the full label verbatim."
+    },
+    "executive_summary": {
+      "type": "string",
+      "description": "Extract the 1\u20133 sentence executive summary intended for leadership, focusing on what changed this week, current overall state, and the most important impact. Keep it concise and avoid duplicating detailed bullets from other sections.",
+      "maxLength": 1000
+    },
+    "scope": {
+      "type": "string",
+      "description": "Extract the project scope statement, combining 'In Scope' and 'Out of Scope' items. Format as: 'In scope: <...>. Out of scope: <...>.' If only one is present, include that. Keep concise; prefer the exact wording from the source.",
+      "maxLength": 500
+    },
+    "assumptions": {
+      "type": "array",
+      "description": "Extract each explicit assumption as a separate bullet item (short sentence/phrase). Only include assumptions that are clearly labeled or stated as assumptions; do not convert risks into assumptions.",
+      "maxLength": 500
+    },
+    "status_bullets": {
+      "type": "array",
+      "description": "Extract the key weekly status updates as individual bullets (typically 3\u20138), prioritizing concrete progress, decisions, and notable changes. Keep each bullet action-oriented and include dates/metrics/owners only if explicitly present.",
+      "maxLength": 500
+    },
+    "next_steps": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Extract the upcoming actions/next steps as separate bullets, ideally phrased as verb-led tasks. Include due dates and owners only when explicitly stated in the source."
+    },
+    "key_milestones": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Extract milestone entries as separate items, each including the milestone name and its target/actual date if provided (e.g., \"Exa Infra plan baseline \u2014 2026-05-20\"). Preserve any status qualifiers like \"Done\", \"At risk\", or \"Slipped\" if shown."
+    },
+    "risks_mitigations": {
+      "type": "array",
+      "description": "Extract each risk with its mitigation as a single item (e.g., \"Risk: <...>; Mitigation: <...>\"). Include severity/RAG/owner/date only if explicitly present; do not invent mitigations.",
+      "maxLength": 500
+    },
+    "orm_status": {
+      "type": "string",
+      "description": "Extract the ORM/CSSAP status. Look in the WBS for any row with area 'ORM/CSSAP' or tasks like 'File ORM' or 'File CSSAP'. Summarise the status of those tasks (e.g., 'ORM/CSSAP phase planned; File ORM (4.1) and File CSSAP (4.2) not started; dependent on Dev Design Review approval (2.3)'). If an explicit ORM ID or link is present, include it verbatim. Return empty string only if no ORM/CSSAP information is found anywhere in the source.",
+      "maxLength": 300
+    }
+  },
+  "additionalProperties": false
+}
