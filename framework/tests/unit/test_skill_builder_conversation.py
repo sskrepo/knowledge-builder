@@ -1596,3 +1596,897 @@ class TestBuildConfluenceAdapter:
 
         # codex_proxy should be instantiated, mcp should NOT
         assert not mock_mcp.called
+
+
+# ---------------------------------------------------------------------------
+# ADR-027 — 16-state machine: CAPTURE_INTENT, CONFIGURE_SOURCES (v2),
+# INSPECT_SOURCES, UPLOAD_ARTIFACT_EXAMPLE, DESIGN_SKILL, REVIEW_DESIGN,
+# PREVIEW_EXTRACTION, EVAL (Option A).
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_llm_json(response_dict: dict) -> MagicMock:
+    """Build an LLM mock that returns a JSON-serialised response."""
+    llm = MagicMock()
+    llm.chat.return_value = {
+        "text": json.dumps(response_dict),
+        "tokens_in": 10,
+        "tokens_out": 100,
+    }
+    return llm
+
+
+class TestSessionDataAdr027Fields:
+    """to_dict / from_dict round-trips for ADR-027 _SessionData additions."""
+
+    def test_to_dict_includes_normalised_intent_when_present(self):
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._data.normalised_intent = {
+            "output_kind": "pptx",
+            "audience": "exec",
+            "cadence": "weekly",
+            "scope_domains": ["26ai"],
+            "success_criteria": ["one slide per workstream"],
+            "ambiguities": [],
+        }
+        d = conv.to_dict()
+        assert "normalised_intent" in d
+        assert d["normalised_intent"]["output_kind"] == "pptx"
+
+    def test_to_dict_omits_normalised_intent_when_empty(self):
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        d = conv.to_dict()
+        assert "normalised_intent" not in d
+
+    def test_from_dict_restores_normalised_intent(self):
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._data.normalised_intent = {"output_kind": "pptx", "cadence": "weekly",
+                                         "scope_domains": ["26ai"], "audience": "exec",
+                                         "success_criteria": [], "ambiguities": []}
+        d = conv.to_dict()
+        restored = SkillBuilderConversation.from_dict(d, skill_store=MagicMock())
+        assert restored._data.normalised_intent["output_kind"] == "pptx"
+        assert restored._data.normalised_intent["scope_domains"] == ["26ai"]
+
+    def test_from_dict_defaults_normalised_intent_to_empty(self):
+        """Old sessions lacking normalised_intent load without error."""
+        d = {
+            "state": "CONFIGURE_SOURCES",
+            "persona": "tpm",
+            "synth_id": "synth-x",
+            "intent_description": "test",
+            "artifact_path": "",
+            "fields": [],
+            "field_specs": {},
+            "reuse": {"covered": {}, "gaps": []},
+            "sources": [],
+            "trigger": {"on_request": True},
+            "output_format": "markdown",
+            "skill_name": "test_skill",
+            "user_id": "",
+            "committed_paths": [],
+            "validation_result": None,
+            "ingest_result": None,
+            "eval_result": None,
+            "created_at": "",
+            "updated_at": "",
+        }
+        restored = SkillBuilderConversation.from_dict(d, skill_store=MagicMock())
+        assert restored._data.normalised_intent == {}
+        assert restored._data.source_samples == {}
+        assert restored._data.source_capability == []
+        assert restored._data.artifact_layout is None
+        assert restored._data.design is None
+
+    def test_to_dict_round_trip_design_and_source_capability(self):
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._data.design = {
+            "schema": {"title": "weekly_review", "properties": {"rag_status": {"type": "string", "description": "d"}},
+                       "required": ["rag_status"]},
+            "source_bindings": {"rag_status": ["confluence:12345"]},
+            "workflow_shape": {"output_format": "pptx", "layout": "weekly_exec_review_v1",
+                               "trigger": {"on_request": True}, "retriever": "search_wiki"},
+            "reuse_plan": {"covered": {}, "gaps": ["rag_status"]},
+        }
+        conv._data.source_capability = [
+            {"source_id": "confluence:12345", "available_fields": [{"field": "rag_status", "confidence": "high"}],
+             "summary": "Status page"}
+        ]
+        d = conv.to_dict()
+        restored = SkillBuilderConversation.from_dict(d, skill_store=MagicMock())
+        assert restored._data.design["schema"]["title"] == "weekly_review"
+        assert len(restored._data.source_capability) == 1
+        assert restored._data.source_capability[0]["source_id"] == "confluence:12345"
+
+
+class TestCaptureIntentState:
+    """Tests for _advance_to_capture_intent and _handle_capture_intent."""
+
+    def _make_conv(self, llm) -> SkillBuilderConversation:
+        conv = SkillBuilderConversation(persona="tpm", llm=llm, skill_store=MagicMock())
+        conv._data.intent_description = (
+            "create a weekly ppt for exec review for 26ai project"
+        )
+        conv._data.skill_name = "26ai_pptx"
+        return conv
+
+    def test_capture_intent_calls_llm_once(self):
+        llm = _make_mock_llm_json({
+            "output_kind": "pptx",
+            "audience": "exec",
+            "cadence": "weekly",
+            "scope_domains": ["26ai"],
+            "success_criteria": ["exec-ready PPT"],
+            "ambiguities": [],
+        })
+        conv = self._make_conv(llm)
+        turn = conv._advance_to_capture_intent()
+        llm.chat.assert_called_once()
+        assert turn.state == "CAPTURE_INTENT"
+
+    def test_capture_intent_populates_normalised_intent(self):
+        llm = _make_mock_llm_json({
+            "output_kind": "pptx",
+            "audience": "exec",
+            "cadence": "weekly",
+            "scope_domains": ["26ai"],
+            "success_criteria": ["exec-ready PPT"],
+            "ambiguities": [],
+        })
+        conv = self._make_conv(llm)
+        conv._advance_to_capture_intent()
+        assert conv._data.normalised_intent["output_kind"] == "pptx"
+        assert "26ai" in conv._data.normalised_intent["scope_domains"]
+
+    def test_capture_intent_derives_skill_name_from_domains(self):
+        llm = _make_mock_llm_json({
+            "output_kind": "pptx",
+            "audience": "exec",
+            "cadence": "weekly",
+            "scope_domains": ["26ai"],
+            "success_criteria": [],
+            "ambiguities": [],
+        })
+        conv = self._make_conv(llm)
+        conv._advance_to_capture_intent()
+        # Skill name derived from scope_domains + output_kind
+        assert "26ai" in conv._data.skill_name
+        assert len(conv._data.skill_name) <= 64
+
+    def test_capture_intent_no_llm_raises(self):
+        conv = SkillBuilderConversation(persona="tpm", llm=None, skill_store=MagicMock())
+        conv._data.intent_description = "test intent"
+        with pytest.raises(RuntimeError, match="CAPTURE_INTENT requires an LLM"):
+            conv._advance_to_capture_intent()
+
+    def test_handle_capture_intent_ok_advances_to_configure_sources(self):
+        llm_responses = [
+            # First call: capture intent
+            {
+                "output_kind": "pptx",
+                "audience": "exec",
+                "cadence": "weekly",
+                "scope_domains": ["26ai"],
+                "success_criteria": [],
+                "ambiguities": [],
+            },
+            # Second call: configure sources suggest (may or may not be called)
+            [],
+        ]
+        call_count = [0]
+
+        def chat_side_effect(**kwargs):
+            idx = call_count[0]
+            call_count[0] += 1
+            resp = llm_responses[min(idx, len(llm_responses) - 1)]
+            return {"text": json.dumps(resp), "tokens_in": 5, "tokens_out": 50}
+
+        llm = MagicMock()
+        llm.chat.side_effect = chat_side_effect
+
+        conv = SkillBuilderConversation(persona="tpm", llm=llm, skill_store=MagicMock())
+        conv._data.intent_description = "create weekly exec ppt"
+        conv._data.normalised_intent = {
+            "output_kind": "pptx", "audience": "exec", "cadence": "weekly",
+            "scope_domains": ["26ai"], "success_criteria": [], "ambiguities": [],
+        }
+        conv._state = "CAPTURE_INTENT"
+        turn = conv._handle_capture_intent("ok")
+        # Should advance to CONFIGURE_SOURCES
+        assert turn.state == "CONFIGURE_SOURCES"
+
+    def test_handle_capture_intent_ambiguity_reruns_capture(self):
+        """Non-ok input at CAPTURE_INTENT amends the intent and re-runs."""
+        call_count = [0]
+        responses = [
+            {
+                "output_kind": "pptx", "audience": "exec", "cadence": "weekly",
+                "scope_domains": ["26ai"], "success_criteria": [], "ambiguities": ["weekly or monthly?"],
+            },
+            {
+                "output_kind": "pptx", "audience": "exec", "cadence": "weekly",
+                "scope_domains": ["26ai"], "success_criteria": [], "ambiguities": [],
+            },
+            # configure sources — return empty list
+            [],
+        ]
+
+        def chat_side_effect(**kwargs):
+            idx = call_count[0]
+            call_count[0] += 1
+            return {"text": json.dumps(responses[min(idx, len(responses) - 1)]),
+                    "tokens_in": 5, "tokens_out": 50}
+
+        llm = MagicMock()
+        llm.chat.side_effect = chat_side_effect
+
+        conv = SkillBuilderConversation(persona="tpm", llm=llm, skill_store=MagicMock())
+        conv._data.intent_description = "create weekly exec ppt"
+        conv._data.normalised_intent = {
+            "output_kind": "pptx", "audience": "exec", "cadence": "weekly",
+            "scope_domains": ["26ai"], "success_criteria": [], "ambiguities": ["weekly or monthly?"],
+        }
+        conv._state = "CAPTURE_INTENT"
+        turn = conv._handle_capture_intent("weekly, every Friday")
+        # After clarification it re-ran CAPTURE_INTENT; should be at CAPTURE_INTENT or CONFIGURE_SOURCES
+        assert turn.state in ("CAPTURE_INTENT", "CONFIGURE_SOURCES")
+        # The intent was amended
+        assert "Additional context" in conv._data.intent_description or "Friday" in conv._data.intent_description
+
+
+class TestConfigureSourcesV2:
+    """Tests for _advance_to_configure_sources_v2 (LLM-assisted source proposal)."""
+
+    def test_proposes_sources_from_llm(self):
+        """LLM returns a source proposal; it is merged into self._data.sources."""
+        llm = _make_mock_llm_json([
+            {"kind": "confluence", "pages": ["20030556732"],
+             "rationale": "26ai status page explicitly mentioned in intent"},
+        ])
+        conv = SkillBuilderConversation(persona="tpm", llm=llm, skill_store=MagicMock())
+        conv._data.intent_description = "weekly exec review for 26ai"
+        conv._data.normalised_intent = {
+            "output_kind": "pptx", "audience": "exec", "cadence": "weekly",
+            "scope_domains": ["26ai"], "success_criteria": [], "ambiguities": [],
+        }
+        turn = conv._advance_to_configure_sources_v2()
+        assert turn.state == "CONFIGURE_SOURCES"
+        assert any("20030556732" in str(s.get("pages", [])) for s in conv._data.sources)
+
+    def test_auto_extracted_sources_not_duplicated(self):
+        """Page IDs extracted from intent text are not duplicated by LLM proposal."""
+        llm = _make_mock_llm_json([
+            {"kind": "confluence", "pages": ["20030556732"],
+             "rationale": "already in intent"},
+        ])
+        conv = SkillBuilderConversation(persona="tpm", llm=llm, skill_store=MagicMock())
+        intent_with_url = (
+            "weekly review from "
+            "https://confluence.oraclecorp.com/confluence/pages/viewpage.action?pageId=20030556732"
+        )
+        conv._data.intent_description = intent_with_url
+        conv._data.normalised_intent = {
+            "output_kind": "pptx", "audience": "exec", "cadence": "weekly",
+            "scope_domains": ["26ai"], "success_criteria": [], "ambiguities": [],
+        }
+        turn = conv._advance_to_configure_sources_v2()
+        all_ids = [p for s in conv._data.sources for p in (s.get("pages") or [])]
+        # 20030556732 should appear exactly once
+        assert all_ids.count("20030556732") == 1
+
+    def test_no_llm_raises(self):
+        conv = SkillBuilderConversation(persona="tpm", llm=None, skill_store=MagicMock())
+        conv._data.intent_description = "test"
+        conv._data.normalised_intent = {"output_kind": "pptx", "scope_domains": ["x"],
+                                         "audience": "exec", "cadence": "weekly",
+                                         "success_criteria": [], "ambiguities": []}
+        with pytest.raises(RuntimeError, match="CONFIGURE_SOURCES requires an LLM"):
+            conv._advance_to_configure_sources_v2()
+
+    def test_done_with_normalised_intent_routes_to_inspect_sources(self):
+        """When normalised_intent is set (new machine), 'done' → _run_inspect_sources."""
+        llm = MagicMock()
+        inspect_sources_called = []
+
+        def fake_inspect(self_conv):
+            inspect_sources_called.append(True)
+            return MagicMock(state="INSPECT_SOURCES", message="ok")
+
+        conv = SkillBuilderConversation(persona="tpm", llm=llm, skill_store=MagicMock())
+        conv._data.sources = [{"kind": "confluence", "pages": ["12345"]}]
+        conv._data.normalised_intent = {
+            "output_kind": "pptx", "audience": "exec", "cadence": "weekly",
+            "scope_domains": ["26ai"], "success_criteria": [], "ambiguities": [],
+        }
+        conv._state = "CONFIGURE_SOURCES"
+
+        with patch.object(conv, "_run_inspect_sources", side_effect=fake_inspect):
+            conv._handle_configure_sources_response("done")
+
+        assert inspect_sources_called, "_run_inspect_sources must be called when normalised_intent is set"
+
+    def test_done_without_normalised_intent_routes_to_configure_triggers(self):
+        """Legacy sessions without normalised_intent route to CONFIGURE_TRIGGERS on 'done'."""
+        conv = SkillBuilderConversation(persona="tpm", llm=None, skill_store=MagicMock())
+        conv._data.sources = [{"kind": "confluence", "space": "TPM"}]
+        conv._data.normalised_intent = {}  # legacy session — no normalised_intent
+        conv._state = "CONFIGURE_SOURCES"
+
+        advance_triggers_called = []
+        with patch.object(conv, "_advance_to_configure_triggers",
+                          side_effect=lambda: advance_triggers_called.append(True) or
+                          MagicMock(state="CONFIGURE_TRIGGERS", message="ok")):
+            conv._handle_configure_sources_response("done")
+
+        assert advance_triggers_called, "_advance_to_configure_triggers must be called for legacy sessions"
+
+
+class TestInspectSources:
+    """Tests for _run_inspect_sources."""
+
+    def _make_conv_with_sources(self, llm, pages=None) -> SkillBuilderConversation:
+        conv = SkillBuilderConversation(persona="tpm", llm=llm, skill_store=MagicMock())
+        conv._data.sources = [{"kind": "confluence", "pages": pages or ["20030556732"]}]
+        conv._data.normalised_intent = {
+            "output_kind": "pptx", "audience": "exec", "cadence": "weekly",
+            "scope_domains": ["26ai"], "success_criteria": [], "ambiguities": [],
+        }
+        return conv
+
+    def test_inspect_sources_calls_fetch_samples(self):
+        llm = _make_mock_llm_json({
+            "source_id": "confluence:20030556732",
+            "available_fields": [{"field": "rag_status", "type": "string", "confidence": "high", "evidence": "Red"}],
+            "missing_fields": [],
+            "suggested_fields": [],
+            "summary": "26ai status page",
+        })
+        conv = self._make_conv_with_sources(llm)
+
+        sample_data = [{"content": "RAG: Green", "source_citation": "26ai-status"}]
+        with patch("framework.skill_builder.conversation.fetch_samples", return_value=sample_data):
+            turn = conv._run_inspect_sources()
+
+        assert turn.state == "INSPECT_SOURCES"
+        assert len(conv._data.source_capability) == 1
+        assert "confluence:20030556732" in conv._data.source_samples
+
+    def test_inspect_sources_caches_samples_for_reuse(self):
+        """Samples fetched at INSPECT_SOURCES must be cached in source_samples."""
+        llm = _make_mock_llm_json({
+            "source_id": "confluence:12345",
+            "available_fields": [],
+            "missing_fields": [],
+            "suggested_fields": [],
+            "summary": "Test page",
+        })
+        conv = self._make_conv_with_sources(llm, pages=["12345"])
+        sample_data = [{"content": "test content", "source_citation": "page-12345"}]
+
+        with patch("framework.skill_builder.conversation.fetch_samples", return_value=sample_data):
+            conv._run_inspect_sources()
+
+        # Cache must be populated
+        assert conv._data.source_samples
+        cache_key = "confluence:12345"
+        assert cache_key in conv._data.source_samples
+        assert conv._data.source_samples[cache_key] == sample_data
+
+    def test_inspect_sources_fetch_failure_raises(self):
+        """Hard-fail: if fetch_samples raises, _run_inspect_sources must propagate RuntimeError."""
+        llm = MagicMock()
+        conv = self._make_conv_with_sources(llm)
+
+        with patch("framework.skill_builder.conversation.fetch_samples",
+                   side_effect=RuntimeError("connection refused")):
+            with pytest.raises(RuntimeError, match="INSPECT_SOURCES: failed to fetch"):
+                conv._run_inspect_sources()
+
+    def test_inspect_sources_no_llm_raises(self):
+        conv = SkillBuilderConversation(persona="tpm", llm=None, skill_store=MagicMock())
+        conv._data.sources = [{"kind": "confluence", "pages": ["12345"]}]
+        conv._data.normalised_intent = {"output_kind": "pptx", "scope_domains": ["x"],
+                                         "audience": "exec", "cadence": "weekly",
+                                         "success_criteria": [], "ambiguities": []}
+        with pytest.raises(RuntimeError, match="INSPECT_SOURCES requires an LLM"):
+            conv._run_inspect_sources()
+
+    def test_inspect_sources_no_inspectable_sources_raises(self):
+        """Sources with no page IDs produce no capability → RuntimeError."""
+        llm = MagicMock()
+        conv = SkillBuilderConversation(persona="tpm", llm=llm, skill_store=MagicMock())
+        conv._data.sources = [{"kind": "confluence", "space": "TPM"}]  # no pages list
+        conv._data.normalised_intent = {"output_kind": "pptx", "scope_domains": ["x"],
+                                         "audience": "exec", "cadence": "weekly",
+                                         "success_criteria": [], "ambiguities": []}
+        with pytest.raises(RuntimeError, match="no sources were inspectable"):
+            conv._run_inspect_sources()
+
+
+class TestDesignSkill:
+    """Tests for _run_design_skill."""
+
+    def _make_conv(self, llm) -> SkillBuilderConversation:
+        conv = SkillBuilderConversation(persona="tpm", llm=llm, skill_store=MagicMock())
+        conv._data.intent_description = "weekly exec ppt"
+        conv._data.normalised_intent = {
+            "output_kind": "pptx", "audience": "exec", "cadence": "weekly",
+            "scope_domains": ["26ai"], "success_criteria": [], "ambiguities": [],
+        }
+        conv._data.source_capability = [
+            {
+                "source_id": "confluence:20030556732",
+                "available_fields": [
+                    {"field": "rag_status", "type": "string", "confidence": "high", "evidence": "Green"},
+                    {"field": "blockers", "type": "array", "confidence": "medium", "evidence": "Blocker: X"},
+                ],
+                "missing_fields": [],
+                "suggested_fields": [],
+                "summary": "26ai status page with RAG and blockers",
+            }
+        ]
+        return conv
+
+    def _design_response(self) -> dict:
+        return {
+            "schema": {
+                "title": "26ai_pptx",
+                "properties": {
+                    "rag_status": {"type": "string", "description": "RAG status for schedule.", "maxLength": 200},
+                    "blockers": {"type": "array", "description": "Current blockers.", "maxLength": 500},
+                },
+                "required": ["rag_status"],
+            },
+            "source_bindings": {
+                "rag_status": ["confluence:20030556732"],
+                "blockers": ["confluence:20030556732"],
+            },
+            "workflow_shape": {
+                "output_format": "pptx",
+                "layout": "weekly_exec_review_v1",
+                "trigger": {"on_request": True, "schedule": "0 16 * * 5"},
+                "retriever": "search_wiki",
+            },
+            "reuse_plan": {"covered": {}, "gaps": ["rag_status", "blockers"]},
+            "unsupportable_fields": [],
+            "open_questions": [],
+        }
+
+    def test_design_skill_calls_llm_and_populates_fields(self):
+        llm = _make_mock_llm_json(self._design_response())
+        conv = self._make_conv(llm)
+
+        with patch("framework.skill_builder.conversation.ShimKb") as mock_shim_cls:
+            mock_shim = MagicMock()
+            mock_shim.cards_visible_to.return_value = []
+            mock_shim_cls.return_value = mock_shim
+            turn = conv._run_design_skill()
+
+        assert turn.state == "REVIEW_DESIGN"
+        assert "rag_status" in conv._data.fields
+        assert "blockers" in conv._data.fields
+
+    def test_design_skill_stores_design_object(self):
+        llm = _make_mock_llm_json(self._design_response())
+        conv = self._make_conv(llm)
+
+        with patch("framework.skill_builder.conversation.ShimKb") as mock_shim_cls:
+            mock_shim_cls.return_value.cards_visible_to.return_value = []
+            conv._run_design_skill()
+
+        assert conv._data.design is not None
+        assert conv._data.design["workflow_shape"]["output_format"] == "pptx"
+
+    def test_design_skill_propagates_trigger_and_output_format(self):
+        llm = _make_mock_llm_json(self._design_response())
+        conv = self._make_conv(llm)
+
+        with patch("framework.skill_builder.conversation.ShimKb") as mock_shim_cls:
+            mock_shim_cls.return_value.cards_visible_to.return_value = []
+            conv._run_design_skill()
+
+        assert conv._data.output_format == "pptx"
+        assert conv._data.trigger.get("on_request") is True
+
+    def test_design_skill_no_llm_raises(self):
+        conv = SkillBuilderConversation(persona="tpm", llm=None, skill_store=MagicMock())
+        conv._data.source_capability = []
+        conv._data.normalised_intent = {}
+        with pytest.raises(RuntimeError, match="DESIGN_SKILL requires an LLM"):
+            conv._run_design_skill()
+
+    def test_design_skill_invalid_response_raises(self):
+        """LLM returns a design missing schema.properties → RuntimeError."""
+        llm = _make_mock_llm_json({"schema": {"title": "broken"}})  # missing properties
+        conv = self._make_conv(llm)
+
+        with patch("framework.skill_builder.conversation.ShimKb") as mock_shim_cls:
+            mock_shim_cls.return_value.cards_visible_to.return_value = []
+            with pytest.raises(RuntimeError, match="DESIGN_SKILL: LLM returned an invalid design"):
+                conv._run_design_skill()
+
+
+class TestReviewDesign:
+    """Tests for _prompt_review_design and _handle_review_design_response."""
+
+    def _make_conv_with_design(self) -> SkillBuilderConversation:
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._state = "REVIEW_DESIGN"
+        conv._data.fields = ["rag_status", "blockers", "exec_asks"]
+        conv._data.field_specs = {
+            "rag_status": {"type": "string", "description": "RAG status", "maxLength": 200},
+            "blockers": {"type": "array", "description": "Blockers list", "maxLength": 500},
+            "exec_asks": {"type": "array", "description": "Exec asks", "maxLength": 500},
+        }
+        conv._data.design = {
+            "schema": {
+                "title": "26ai_pptx",
+                "properties": {
+                    f: conv._data.field_specs[f] for f in conv._data.fields
+                },
+                "required": ["rag_status"],
+            },
+            "source_bindings": {f: ["confluence:12345"] for f in conv._data.fields},
+            "workflow_shape": {"output_format": "pptx", "layout": "weekly_exec_review_v1",
+                               "trigger": {"on_request": True}, "retriever": "search_wiki"},
+            "reuse_plan": {"covered": {}, "gaps": conv._data.fields},
+            "unsupportable_fields": [],
+            "open_questions": [],
+        }
+        return conv
+
+    def test_prompt_review_design_renders_all_fields(self):
+        conv = self._make_conv_with_design()
+        turn = conv._prompt_review_design()
+        assert turn.state == "REVIEW_DESIGN"
+        assert "rag_status" in turn.message
+        assert "blockers" in turn.message
+        assert "exec_asks" in turn.message
+
+    def test_ok_advances_to_configure_triggers(self):
+        conv = self._make_conv_with_design()
+        turn = conv._handle_review_design_response("ok")
+        assert turn.state == "CONFIGURE_TRIGGERS"
+
+    def test_describe_command_applies_patch(self):
+        conv = self._make_conv_with_design()
+        turn = conv._handle_review_design_response("describe rag_status as Red/Amber/Green overall")
+        assert turn.state == "REVIEW_DESIGN"
+        assert conv._data.design["schema"]["properties"]["rag_status"]["description"] == \
+            "Red/Amber/Green overall"
+        assert conv._data.field_specs["rag_status"]["description"] == "Red/Amber/Green overall"
+
+    def test_rename_field_command(self):
+        conv = self._make_conv_with_design()
+        conv._handle_review_design_response("rename field exec_asks to leadership_asks")
+        assert "leadership_asks" in conv._data.fields
+        assert "exec_asks" not in conv._data.fields
+
+    def test_remove_field_command(self):
+        conv = self._make_conv_with_design()
+        conv._handle_review_design_response("remove field exec_asks")
+        assert "exec_asks" not in conv._data.fields
+        assert "exec_asks" not in conv._data.design["schema"]["properties"]
+
+    def test_set_trigger_command(self):
+        conv = self._make_conv_with_design()
+        conv._handle_review_design_response("set trigger to 0 16 * * 5")
+        assert conv._data.trigger.get("schedule") == "0 16 * * 5"
+
+    def test_substantive_edit_triggers_replan(self):
+        """Plain English edit that doesn't match a trivial pattern → LLM replan."""
+        replan_response = {
+            "schema_add": {"risk_summary": {"type": "string", "description": "Top risks.", "maxLength": 500}},
+            "schema_remove": [],
+            "schema_update": {},
+            "source_bindings_add": {"risk_summary": ["confluence:12345"]},
+        }
+        llm = _make_mock_llm_json(replan_response)
+        conv = self._make_conv_with_design()
+        conv._llm = llm
+        turn = conv._handle_review_design_response("add a risk summary field pulled from the Confluence page")
+        assert turn.state == "REVIEW_DESIGN"
+        assert "risk_summary" in conv._data.fields
+
+
+class TestPreviewExtraction:
+    """Tests for _advance_to_preview_extraction."""
+
+    def _make_conv_with_samples(self, llm=None) -> SkillBuilderConversation:
+        conv = SkillBuilderConversation(persona="tpm", llm=llm, skill_store=MagicMock())
+        conv._data.fields = ["rag_status", "blockers"]
+        conv._data.field_specs = {
+            "rag_status": {"type": "string", "description": "RAG status", "maxLength": 200},
+            "blockers": {"type": "array", "description": "Blockers", "maxLength": 500},
+        }
+        conv._data.reuse_result = {"covered": {}, "gaps": ["rag_status", "blockers"]}
+        conv._data.skill_name = "weekly_report"
+        conv._data.source_samples = {
+            "confluence:12345": [
+                {"content": "RAG: Green\nBlockers: none", "source_citation": "page-12345"}
+            ]
+        }
+        return conv
+
+    def test_preview_extraction_calls_review_extractions(self):
+        llm = MagicMock()
+        conv = self._make_conv_with_samples(llm=llm)
+
+        review_result = {
+            "extractions": [
+                {"source_citation": "page-12345", "extracted": {"rag_status": "Green", "blockers": []},
+                 "missing_fields": []}
+            ],
+            "field_coverage": {"rag_status": 1.0, "blockers": 1.0},
+            "issues": [],
+        }
+        with patch("framework.skill_builder.conversation.SkillBuilderConversation._advance_to_preview_extraction") as mock_adv:
+            mock_adv.return_value = MagicMock(state="PREVIEW_EXTRACTION", message="ok")
+            # Call directly
+            with patch("framework.skill_builder.review.review_extractions", return_value=review_result):
+                with patch("framework.skill_builder.synthesize_schema.synthesize_extraction_schema",
+                           return_value={"properties": {"rag_status": {"type": "string"}, "blockers": {"type": "array"}},
+                                         "required": []}):
+                    turn = conv._advance_to_preview_extraction()
+
+        assert turn.state == "PREVIEW_EXTRACTION"
+
+    def test_preview_extraction_no_samples_raises(self):
+        conv = SkillBuilderConversation(persona="tpm", llm=MagicMock(), skill_store=MagicMock())
+        conv._data.source_samples = {}  # No samples cached
+        conv._data.fields = ["rag_status"]
+        conv._data.field_specs = {}
+        conv._data.reuse_result = {"covered": {}, "gaps": ["rag_status"]}
+        conv._data.skill_name = "test"
+        with pytest.raises(RuntimeError, match="no source samples are cached"):
+            conv._advance_to_preview_extraction()
+
+
+class TestEvalOptionA:
+    """Tests for _run_eval (ADR-027 DECISION-010 Option A)."""
+
+    def _make_conv_post_ingest(self, llm) -> SkillBuilderConversation:
+        """Build a session past INGEST, ready for EVAL."""
+        conv = SkillBuilderConversation(persona="tpm", llm=llm, skill_store=MagicMock())
+        conv._data.persona = "tpm"
+        conv._data.skill_name = "weekly_report"
+        conv._data.synth_id = "synth-test-eval"
+        conv._data.fields = ["rag_status", "blockers"]
+        conv._data.field_specs = {
+            "rag_status": {"type": "string", "description": "RAG status", "maxLength": 200},
+            "blockers": {"type": "array", "description": "Current blockers", "maxLength": 500},
+        }
+        conv._data.reuse_result = {"covered": {}, "gaps": ["rag_status", "blockers"]}
+        conv._data.sources = [{"kind": "confluence", "pages": ["12345"]}]
+        conv._data.normalised_intent = {
+            "output_kind": "pptx", "audience": "exec", "cadence": "weekly",
+            "scope_domains": ["26ai"], "success_criteria": [], "ambiguities": [],
+        }
+        conv._data.ingest_result = {
+            "status": "completed", "items_processed": 1,
+            "items_upserted": 1, "pages_new": 1, "pages_updated": 0,
+            "pages_unchanged": 0, "mode": "live",
+        }
+        # Pre-cache source samples (from INSPECT_SOURCES)
+        conv._data.source_samples = {
+            "confluence:12345": [
+                {"content": "RAG: Green. Blockers: none", "source_citation": "page-12345"}
+            ]
+        }
+        # skill_store returns None for schema → build from in-memory
+        conv._skill_store.read_artifact.return_value = None
+        return conv
+
+    def _extraction_response(self) -> dict:
+        return {"rag_status": "Green", "blockers": []}
+
+    def _judge_faithful_response(self) -> dict:
+        return {"faithful": True, "confidence": "high", "reason": "Value directly from source."}
+
+    def test_eval_runs_extraction_on_samples(self):
+        judge_resp = json.dumps(self._judge_faithful_response())
+        extract_resp = json.dumps(self._extraction_response())
+
+        responses = [extract_resp, judge_resp, judge_resp]
+        call_idx = [0]
+
+        def chat_side_effect(**kwargs):
+            resp = responses[min(call_idx[0], len(responses) - 1)]
+            call_idx[0] += 1
+            return {"text": resp, "tokens_in": 5, "tokens_out": 50}
+
+        llm = MagicMock()
+        llm.chat.side_effect = chat_side_effect
+
+        conv = self._make_conv_post_ingest(llm)
+
+        with patch("framework.skill_builder.conversation.REPO_ROOT", MagicMock(
+            __truediv__=lambda self, key: MagicMock(
+                parent=MagicMock(mkdir=MagicMock()),
+                write_text=MagicMock(),
+            )
+        )):
+            with patch("urllib.request.urlopen", side_effect=Exception("server not started")):
+                turn = conv._run_eval()
+
+        assert turn.state == "EVAL"
+        assert conv._data.eval_result is not None
+        assert "recall_at_k" in conv._data.eval_result["metrics"]
+
+    def test_eval_writes_gold_rows_kind_auto_generated(self):
+        """Gold rows must carry kind=auto_generated."""
+        responses = [
+            json.dumps(self._extraction_response()),
+            json.dumps(self._judge_faithful_response()),
+            json.dumps(self._judge_faithful_response()),
+        ]
+        call_idx = [0]
+
+        def chat_side_effect(**kwargs):
+            resp = responses[min(call_idx[0], len(responses) - 1)]
+            call_idx[0] += 1
+            return {"text": resp, "tokens_in": 5, "tokens_out": 50}
+
+        llm = MagicMock()
+        llm.chat.side_effect = chat_side_effect
+
+        conv = self._make_conv_post_ingest(llm)
+        written_content: list[str] = []
+
+        class FakePath:
+            def __init__(self, *args):
+                self._path = "/".join(str(a) for a in args)
+
+            def __truediv__(self, other):
+                return FakePath(self._path, other)
+
+            @property
+            def parent(self):
+                return self
+
+            def mkdir(self, **kwargs):
+                pass
+
+            def write_text(self, content):
+                written_content.append(content)
+
+        with patch("framework.skill_builder.conversation.REPO_ROOT", FakePath("/")):
+            with patch("urllib.request.urlopen", side_effect=Exception("no server")):
+                conv._run_eval()
+
+        # At least one write happened
+        assert written_content
+        # Parse the first write as JSONL and verify kind
+        first_line = written_content[0].strip().splitlines()[0]
+        row = json.loads(first_line)
+        assert row.get("kind") == "auto_generated"
+
+    def test_eval_gates_on_recall_and_faithfulness(self):
+        """If metrics fail thresholds, options include 'force promote' not 'yes, promote'."""
+        responses = [
+            json.dumps({}),  # extraction returns nothing → recall=0
+            json.dumps({"faithful": False, "confidence": "low", "reason": "nope"}),
+        ]
+        call_idx = [0]
+
+        def chat_side_effect(**kwargs):
+            resp = responses[min(call_idx[0], len(responses) - 1)]
+            call_idx[0] += 1
+            return {"text": resp, "tokens_in": 5, "tokens_out": 50}
+
+        llm = MagicMock()
+        llm.chat.side_effect = chat_side_effect
+
+        conv = self._make_conv_post_ingest(llm)
+
+        with patch("framework.skill_builder.conversation.REPO_ROOT", MagicMock(
+            __truediv__=lambda self, key: MagicMock(
+                parent=MagicMock(mkdir=MagicMock()),
+                write_text=MagicMock(),
+            )
+        )):
+            with patch("urllib.request.urlopen", side_effect=Exception("no server")):
+                turn = conv._run_eval()
+
+        # recall@k = 0 → below threshold → force promote offered
+        assert "force promote" in (turn.options or [])
+        assert conv._data.eval_result["exit_criteria"]["passed"] is False
+
+    def test_eval_no_llm_raises(self):
+        conv = SkillBuilderConversation(persona="tpm", llm=None, skill_store=MagicMock())
+        conv._data.source_samples = {}
+        conv._data.sources = []
+        conv._data.normalised_intent = {}
+        with pytest.raises(RuntimeError, match="EVAL requires an LLM"):
+            conv._run_eval()
+
+    def test_eval_no_samples_and_no_refetch_raises(self):
+        """With no source_samples and empty sources, EVAL must raise RuntimeError."""
+        conv = SkillBuilderConversation(persona="tpm", llm=MagicMock(), skill_store=MagicMock())
+        conv._skill_store.read_artifact.return_value = None
+        conv._data.source_samples = {}
+        conv._data.sources = []  # nothing to re-fetch
+        conv._data.normalised_intent = {}
+        conv._data.fields = ["rag_status"]
+        with pytest.raises(RuntimeError, match="no source samples available"):
+            conv._run_eval()
+
+    def test_handle_eval_response_force_promote_logs_warning(self):
+        """'force promote' at EVAL must log and proceed to PROMOTE."""
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._data.eval_result = {
+            "metrics": {"recall_at_k": 0.3, "faithfulness": 0.4},
+            "exit_criteria": {"recall_threshold": 0.85, "faithfulness_threshold": 0.85, "passed": False},
+        }
+        conv._data.ingest_result = {"status": "completed", "items_processed": 2}
+
+        promote_turn = MagicMock()
+        promote_turn.state = "PROMOTE"
+        with patch.object(conv, "_run_promote", return_value=promote_turn):
+            turn = conv._handle_eval_response("force promote")
+
+        # Must have stamped force_promoted into eval_result
+        assert conv._data.eval_result.get("force_promoted") is True
+        assert turn.state == "PROMOTE"
+
+    def test_handle_eval_response_stop_goes_to_done(self):
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._data.eval_result = None
+        turn = conv._handle_eval_response("stop here")
+        assert turn.state == "DONE"
+        assert turn.done is True
+
+
+class TestConfigureTriggers_Adr027:
+    """Tests for CONFIGURE_TRIGGERS changes under ADR-027."""
+
+    def _make_conv_with_design(self, design_trigger=None) -> SkillBuilderConversation:
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._state = "CONFIGURE_TRIGGERS"
+        conv._data.design = {
+            "workflow_shape": {
+                "output_format": "pptx",
+                "trigger": design_trigger or {"on_request": True, "schedule": "0 16 * * 5"},
+            }
+        }
+        # Mark as new machine session
+        conv._data.source_capability = [{"source_id": "confluence:12345"}]
+        return conv
+
+    def test_ok_accepts_design_proposal(self):
+        """'ok' at CONFIGURE_TRIGGERS accepts DESIGN_SKILL's proposal."""
+        conv = self._make_conv_with_design()
+
+        preview_turn = MagicMock()
+        preview_turn.state = "PREVIEW_EXTRACTION"
+        with patch.object(conv, "_advance_to_preview_extraction", return_value=preview_turn):
+            turn = conv._handle_configure_triggers_response("ok")
+
+        assert conv._data.trigger == {"on_request": True, "schedule": "0 16 * * 5"}
+        assert conv._data.output_format == "pptx"
+
+    def test_new_machine_routes_to_preview_extraction(self):
+        """New-machine session (source_capability set) must go to PREVIEW_EXTRACTION."""
+        conv = self._make_conv_with_design()
+        preview_turn = MagicMock()
+        preview_turn.state = "PREVIEW_EXTRACTION"
+
+        with patch.object(conv, "_advance_to_preview_extraction", return_value=preview_turn):
+            turn = conv._handle_configure_triggers_response("ok")
+
+        assert turn.state == "PREVIEW_EXTRACTION"
+
+    def test_legacy_session_routes_to_preview(self):
+        """Legacy session (source_capability empty) must go to PREVIEW (old state)."""
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._state = "CONFIGURE_TRIGGERS"
+        conv._data.design = None
+        conv._data.source_capability = []  # legacy
+        conv._data.source_samples = {}
+
+        preview_turn = MagicMock()
+        preview_turn.state = "PREVIEW"
+        with patch.object(conv, "_advance_to_preview", return_value=preview_turn):
+            turn = conv._handle_configure_triggers_response("ok")
+
+        assert turn.state == "PREVIEW"

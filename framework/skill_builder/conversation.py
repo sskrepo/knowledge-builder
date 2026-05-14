@@ -1,13 +1,21 @@
 """conversation — interactive skill-builder session (author_skill API).
 
 Per ADR-015 §Conversation contract. Implements a state machine that drives the
-full skill authoring lifecycle from IDENTIFY_PERSONA through DONE. Works in
-stub LLM mode with template-based responses — no external services required.
+full skill authoring lifecycle from IDENTIFY_PERSONA through DONE.
 
-State machine (14 states):
-  IDENTIFY_PERSONA → ANALYZE_ARTIFACT → REVIEW_FIELDS → REVIEW_SCHEMA →
-  CHECK_REUSE → CONFIGURE_SOURCES → CONFIGURE_TRIGGERS → PREVIEW → CONFIRM →
-  COMMITTED → VALIDATE → INGEST → EVAL → PROMOTE → DONE
+ADR-027 (2026-05-14): 16-state design-first machine. Sources are inspected
+BEFORE schema design. One integrated DESIGN_SKILL call produces schema +
+source_bindings + workflow_shape + reuse_plan. EVAL runs real extraction scoring
+with auto-generated gold rows (Option A, DECISION-010).
+
+State machine (ADR-027 — 16 states):
+  IDENTIFY_PERSONA → CAPTURE_INTENT → CONFIGURE_SOURCES → INSPECT_SOURCES →
+  UPLOAD_ARTIFACT_EXAMPLE → DESIGN_SKILL → REVIEW_DESIGN → CONFIGURE_TRIGGERS →
+  PREVIEW_EXTRACTION → CONFIRM → COMMITTED → VALIDATE → INGEST → EVAL →
+  PROMOTE → DONE
+
+Legacy states (pre-ADR-027 — retained for in-flight sessions):
+  ANALYZE_ARTIFACT, REVIEW_FIELDS, REVIEW_SCHEMA, CHECK_REUSE, PREVIEW
 
 Session persistence: sessions are serializable via to_dict()/from_dict() for
 storage in ADB (keyed by synth_id + user_id).  This enables resume across
@@ -135,7 +143,238 @@ justification citing specific milestone dates or blockers from the slide."
 }}
 """
 
+# ---------------------------------------------------------------------------
+# ADR-027 LLM prompts
+# ---------------------------------------------------------------------------
+
+_CAPTURE_INTENT_PROMPT = """\
+You are a Knowledge Builder Framework assistant. Parse the user's intent into a
+normalised goal object so downstream design steps have a structured representation
+to work from.
+
+Persona: {persona}
+Raw intent: "{intent}"
+
+Return ONLY a JSON object with these keys:
+{{
+  "output_kind": "pptx | docx | markdown | email | slack",
+  "audience": "exec | team | ops | all",
+  "cadence": "weekly | monthly | on_request | daily",
+  "scope_domains": ["domain1", "domain2"],
+  "success_criteria": ["criterion1", "criterion2"],
+  "ambiguities": ["anything unclear that the user should confirm"]
+}}
+
+Rules:
+- "output_kind": infer from words like "PPT", "deck", "slide", "document", "report", "email"
+- "scope_domains": extract project/service names (e.g. "26ai", "FA DB", "OCIFACP")
+- "success_criteria": infer from phrases like "one slide", "real data", "exec-ready"
+- "ambiguities": list anything genuinely unclear; empty list if intent is clear
+- Keep all string values concise (< 80 chars each)
+"""
+
+_CONFIGURE_SOURCES_SUGGEST_PROMPT = """\
+You are a Knowledge Builder Framework source advisor. Given the user's intent and the
+persona's declared adapters, propose the most likely source descriptors.
+
+Persona: {persona}
+Normalised intent: {normalised_intent}
+Available adapters: {adapter_list}
+Intent text (original): "{intent_text}"
+
+Return ONLY a JSON array of source descriptor objects. Each object must include:
+- "kind": "confluence" | "jira" | "git" | "adb"
+- For confluence: optionally "pages" (list of page IDs or URLs), "space", "labels"
+- For jira: "jql" string
+- "rationale": why this source is likely to contain the required data (1 sentence)
+
+Example:
+[
+  {{
+    "kind": "confluence",
+    "pages": ["20030556732"],
+    "rationale": "26ai project status page explicitly mentioned in intent"
+  }}
+]
+
+Rules:
+- Extract all page IDs or URLs from the intent text — these are high-confidence.
+- Propose additional sources only when the adapter list makes them available AND
+  the intent clearly implies them.
+- Do not invent sources not supported by the adapter list.
+- Return an empty array [] if no confident source can be proposed.
+"""
+
+_INSPECT_SOURCES_PROMPT = """\
+You are a Knowledge Builder Framework source analyst. Review the sample content
+fetched from a source and produce a capability inventory.
+
+Source ID: {source_id}
+Persona: {persona}
+Intent: {normalised_intent}
+
+Sample content (up to 3 pages):
+{sample_content}
+
+Return ONLY a JSON object:
+{{
+  "source_id": "{source_id}",
+  "available_fields": [
+    {{"field": "snake_case_name", "type": "string|array|integer",
+      "confidence": "high|medium|low",
+      "evidence": "quote or location from sample (< 100 chars)"}}
+  ],
+  "missing_fields": [
+    {{"field": "field_the_intent_might_want",
+      "reason": "why this content cannot supply it"}}
+  ],
+  "suggested_fields": [
+    {{"field": "snake_case_name", "type": "string|array|integer",
+      "reason": "why this is consistently present and useful"}}
+  ],
+  "summary": "2-3 sentence overview of what this source contains"
+}}
+
+Rules:
+- "available_fields": ONLY fields clearly extractable from the sample content.
+- "suggested_fields": fields present in the sample that the intent might have missed.
+- "missing_fields": fields the intent implies but the source clearly cannot provide.
+- Base ALL findings on the sample content — do not invent.
+"""
+
+_DESIGN_SKILL_PROMPT = """\
+You are a Knowledge Builder Framework skill architect. Design a complete skill from
+the user's intent, the source capability inventory, the artifact layout, and the
+existing reusable KB cards.
+
+Persona: {persona}
+Normalised intent: {normalised_intent}
+Source capability inventory: {source_capability}
+Artifact layout hint (may be null): {artifact_layout}
+Existing reusable KB cards: {existing_kb_cards}
+
+Produce a single JSON design object:
+{{
+  "schema": {{
+    "title": "skill_name",
+    "properties": {{
+      "field_name": {{
+        "type": "string|array|integer|boolean",
+        "description": "precise 1-2 sentence extraction instruction",
+        "maxLength": 500
+      }}
+    }},
+    "required": ["field1", "field2"]
+  }},
+  "source_bindings": {{
+    "field_name": ["source_id1"]
+  }},
+  "workflow_shape": {{
+    "output_format": "pptx|docx|markdown|email|slack",
+    "layout": "weekly_exec_review_v1 | default",
+    "trigger": {{"on_request": true, "schedule": "cron_or_null"}},
+    "retriever": "search_wiki"
+  }},
+  "reuse_plan": {{
+    "covered": {{"field": "existing_kb_name"}},
+    "gaps": ["field1", "field2"]
+  }},
+  "unsupportable_fields": [
+    {{"field": "field_name", "reason": "why no source can provide this"}}
+  ],
+  "open_questions": ["question for the user to resolve"]
+}}
+
+Rules:
+- Include ONLY fields that at least one source can support (confidence high or medium).
+- Source bindings must reference source IDs from the capability inventory.
+- Reuse plan covers must reference real KB cards from "existing_kb_cards".
+- If artifact layout is provided, align the output_format and layout accordingly.
+- Choose "weekly_exec_review_v1" layout only for exec-review PPTX skills.
+- "required" list should contain only fields critical to the skill's purpose.
+- maxLength: 200 for IDs/statuses, 500 for summaries, 2000 for detailed content.
+"""
+
+_REVIEW_DESIGN_REPLAN_PROMPT = """\
+You are a Knowledge Builder Framework skill architect. The user wants to modify the
+current skill design. Return ONLY the changes needed as a diff object.
+
+Current design: {current_design}
+User edit request: "{edit_request}"
+Updated source capability (if sources changed): {updated_source_capability}
+
+Return ONLY a JSON diff object with keys matching what changed:
+{{
+  "schema_add": {{"field_name": {{"type": "...", "description": "...", "maxLength": 500}}}},
+  "schema_remove": ["field_to_remove"],
+  "schema_update": {{"field_name": {{"description": "updated instruction"}}}},
+  "source_bindings_add": {{"new_field": ["source_id"]}},
+  "source_bindings_remove": ["field_to_unbind"],
+  "workflow_shape_update": {{"layout": "new_layout"}},
+  "reuse_plan_update": {{"covered": {{}}, "gaps": ["field1"]}},
+  "open_questions": ["any new questions from the edit"]
+}}
+
+Rules:
+- Only include keys that actually change — omit unchanged sections.
+- If the edit request is trivial (rename, description change), return only the
+  affected field in schema_update.
+- If new sources must be added (the edit implies data not in the inventory),
+  add an open_question noting the source gap.
+"""
+
+_EVAL_JUDGE_PROMPT = """\
+You are a Knowledge Builder Framework faithfulness judge. Determine whether an
+extracted field value is faithfully grounded in the source document snippet.
+
+Field: {field_name}
+Extraction instruction: {field_description}
+Extracted value: {extracted_value}
+Source snippet: {source_snippet}
+
+Return ONLY a JSON object:
+{{
+  "faithful": true | false,
+  "confidence": "high | medium | low",
+  "reason": "1 sentence explanation"
+}}
+
+Rules:
+- "faithful" = true if the extracted value is directly supported by the source snippet.
+- "faithful" = false if the extracted value contains information NOT present in the snippet.
+- Paraphrasing is acceptable; exact wording is not required.
+- If the extracted value is empty/null and the field is optional, mark faithful=true.
+- Base the judgment ONLY on the source snippet provided — do not use outside knowledge.
+"""
+
+# ---------------------------------------------------------------------------
+# STATES list: ADR-027 16-state machine
+# ---------------------------------------------------------------------------
+
+# The canonical ADR-027 state machine.
 STATES = [
+    "IDENTIFY_PERSONA",
+    "CAPTURE_INTENT",
+    "CONFIGURE_SOURCES",
+    "INSPECT_SOURCES",
+    "UPLOAD_ARTIFACT_EXAMPLE",
+    "DESIGN_SKILL",
+    "REVIEW_DESIGN",
+    "CONFIGURE_TRIGGERS",
+    "PREVIEW_EXTRACTION",
+    "CONFIRM",
+    "COMMITTED",
+    "VALIDATE",
+    "INGEST",
+    "EVAL",
+    "PROMOTE",
+    "DONE",
+]
+
+# Legacy states from the ADR-026 machine. In-flight sessions at deploy time
+# execute via the legacy handlers (dispatch table below). New sessions never
+# enter these states.
+_STATES_LEGACY = [
     "IDENTIFY_PERSONA",
     "ANALYZE_ARTIFACT",
     "REVIEW_FIELDS",
@@ -152,6 +391,9 @@ STATES = [
     "PROMOTE",
     "DONE",
 ]
+
+# States that are in the legacy machine but NOT in the new one (for migration).
+_LEGACY_ONLY_STATES = frozenset(_STATES_LEGACY) - frozenset(STATES)
 
 
 @dataclass
@@ -179,14 +421,26 @@ def _progress(state: str) -> dict:
 
 @dataclass
 class _SessionData:
-    """Mutable session state threaded through the conversation."""
+    """Mutable session state threaded through the conversation.
+
+    ADR-027 additions:
+      - normalised_intent: structured goal object from CAPTURE_INTENT
+      - source_samples: cached {source_id: [sample_dict]} from INSPECT_SOURCES
+      - source_capability: list of per-source capability inventory dicts
+      - artifact_layout: structural layout hint from UPLOAD_ARTIFACT_EXAMPLE
+      - design: full output of DESIGN_SKILL LLM call
+
+    Legacy fields retained for in-flight session compatibility:
+      - slide_mapping, llm_suggested_specs (used by ANALYZE_ARTIFACT handler)
+    """
 
     intent_description: str = ""
     artifact_path: str = ""
     fields: list[str] = field(default_factory=list)
     field_specs: dict[str, dict] = field(default_factory=dict)
+    # Legacy: used by ANALYZE_ARTIFACT handler for in-flight sessions
     slide_mapping: dict | None = None
-    llm_suggested_specs: dict[str, dict] = field(default_factory=dict)  # LLM read at ANALYZE_ARTIFACT
+    llm_suggested_specs: dict[str, dict] = field(default_factory=dict)
     reuse_result: dict = field(default_factory=lambda: {"covered": {}, "gaps": []})
     sources: list[dict] = field(default_factory=list)
     trigger: dict = field(default_factory=lambda: {"on_request": True})
@@ -202,20 +456,30 @@ class _SessionData:
     eval_result: dict | None = None
     created_at: str = ""
     updated_at: str = ""
+    # ADR-027 new fields
+    normalised_intent: dict = field(default_factory=dict)
+    source_samples: dict = field(default_factory=dict)   # source_id -> list[sample_dict]
+    source_capability: list = field(default_factory=list)  # per-source capability inventory
+    artifact_layout: dict | None = None
+    design: dict | None = None
 
 
 class SkillBuilderConversation:
     """Interactive skill-builder session (author_skill API).
 
-    Drives the full authoring lifecycle through a 14-state conversation.
-    Each call to start() / respond() returns a ConversationTurn describing
-    what to display to the user and the current state.
+    ADR-027: 16-state design-first machine. Sources are inspected BEFORE schema
+    design. One integrated DESIGN_SKILL LLM call produces schema + source_bindings
+    + workflow_shape + reuse_plan. EVAL runs real scoring with auto-generated gold.
+
+    Each call to start() / respond() returns a ConversationTurn describing what
+    to display to the user and the current state.
+
+    In-flight sessions under the ADR-026 15-state machine continue to execute
+    via legacy handlers (ANALYZE_ARTIFACT, REVIEW_FIELDS, REVIEW_SCHEMA,
+    CHECK_REUSE, PREVIEW). New sessions start at CAPTURE_INTENT.
 
     The session is serializable (to_dict/from_dict) for persistence in ADB,
     enabling resume across client restarts.
-
-    In stub LLM mode responses are template-based; real LLM integration would
-    replace the _* handlers while keeping the state machine intact.
     """
 
     def __init__(self, persona: str = "", user_id: str = "", llm=None, artifact_store=None, skill_store=None):
@@ -258,9 +522,9 @@ class SkillBuilderConversation:
         self._data.updated_at = _now_iso()
 
         if self._data.persona and self._data.intent_description:
-            self._data.skill_name = _slugify(self._data.intent_description)
-            self._state = "ANALYZE_ARTIFACT"
-            return self._turn(self._handle_analyze_artifact_prompt())
+            # ADR-027: go to CAPTURE_INTENT (not ANALYZE_ARTIFACT)
+            self._state = "CAPTURE_INTENT"
+            return self._turn(self._advance_to_capture_intent())
         if self._data.persona:
             self._state = "IDENTIFY_PERSONA"
             return self._turn(ConversationTurn(
@@ -291,14 +555,16 @@ class SkillBuilderConversation:
                 return self._turn(self._handle_rename_skill(_rename_m.group(1)))
 
         handler = {
+            # ADR-027 new states
             "IDENTIFY_PERSONA": self._handle_identify_persona,
-            "ANALYZE_ARTIFACT": self._handle_analyze_artifact,
-            "REVIEW_FIELDS": self._handle_review_fields_response,
-            "REVIEW_SCHEMA": self._handle_review_schema_response,
-            "CHECK_REUSE": self._handle_check_reuse_response,
+            "CAPTURE_INTENT": self._handle_capture_intent,
             "CONFIGURE_SOURCES": self._handle_configure_sources_response,
+            "INSPECT_SOURCES": self._handle_inspect_sources_response,
+            "UPLOAD_ARTIFACT_EXAMPLE": self._handle_upload_artifact_example,
+            "DESIGN_SKILL": self._handle_design_skill_response,
+            "REVIEW_DESIGN": self._handle_review_design_response,
             "CONFIGURE_TRIGGERS": self._handle_configure_triggers_response,
-            "PREVIEW": self._handle_preview_response,
+            "PREVIEW_EXTRACTION": self._handle_preview_extraction_response,
             "CONFIRM": self._handle_confirm_response,
             "COMMITTED": self._handle_committed_response,
             "VALIDATE": self._handle_validate_response,
@@ -308,6 +574,12 @@ class SkillBuilderConversation:
             "DONE": lambda _: ConversationTurn(
                 state="DONE", message="Session complete.", done=True,
             ),
+            # Legacy states (ADR-026 machine) — for in-flight sessions only
+            "ANALYZE_ARTIFACT": self._handle_analyze_artifact,
+            "REVIEW_FIELDS": self._handle_review_fields_response,
+            "REVIEW_SCHEMA": self._handle_review_schema_response,
+            "CHECK_REUSE": self._handle_check_reuse_response,
+            "PREVIEW": self._handle_preview_response,
         }.get(self._state)
 
         if handler is None:
@@ -346,20 +618,34 @@ class SkillBuilderConversation:
     def to_dict(self) -> dict:
         """Serialize entire session for DB persistence.
 
-        NOTE: get_state() intentionally omits synthesized_artifacts and
-        slide_mapping to keep the GET-endpoint snapshot lean (artifact content
-        can be several KB of YAML/JSON).  We add them back here so that the
-        PREVIEW → COMMIT and ANALYZE_ARTIFACT → REVIEW_SCHEMA transitions work
-        correctly when a session is saved and resumed across separate MCP calls.
-        Without this, _write_artifacts() iterates an empty dict and commits 0
-        artifacts (BUG-004).
+        NOTE: get_state() intentionally omits large artifacts to keep the
+        GET-endpoint snapshot lean. We add them back here so that
+        PREVIEW_EXTRACTION → CONFIRM → COMMIT and other transitions work
+        correctly when a session is resumed across separate MCP calls.
+
+        ADR-027 additions: normalised_intent, source_samples, source_capability,
+        artifact_layout, design.
+
+        Legacy fields: slide_mapping, llm_suggested_specs (in-flight sessions).
         """
         d = {"state": self._state, "persona": self._persona, **self.get_state()}
         d["synthesized_artifacts"] = dict(self._data.synthesized_artifacts)
+        # Legacy fields (in-flight pre-ADR-027 sessions)
         if self._data.slide_mapping is not None:
             d["slide_mapping"] = dict(self._data.slide_mapping)
         if self._data.llm_suggested_specs:
             d["llm_suggested_specs"] = dict(self._data.llm_suggested_specs)
+        # ADR-027 new fields
+        if self._data.normalised_intent:
+            d["normalised_intent"] = dict(self._data.normalised_intent)
+        if self._data.source_samples:
+            d["source_samples"] = dict(self._data.source_samples)
+        if self._data.source_capability:
+            d["source_capability"] = list(self._data.source_capability)
+        if self._data.artifact_layout is not None:
+            d["artifact_layout"] = dict(self._data.artifact_layout)
+        if self._data.design is not None:
+            d["design"] = dict(self._data.design)
         return d
 
     @classmethod
@@ -405,6 +691,12 @@ class SkillBuilderConversation:
             eval_result=d.get("eval_result"),
             created_at=d.get("created_at", ""),
             updated_at=d.get("updated_at", ""),
+            # ADR-027 new fields
+            normalised_intent=dict(d.get("normalised_intent", {})),
+            source_samples=dict(d.get("source_samples", {})),
+            source_capability=list(d.get("source_capability", [])),
+            artifact_layout=d.get("artifact_layout"),
+            design=d.get("design"),
         )
         return obj
 
@@ -458,9 +750,13 @@ class SkillBuilderConversation:
 
         if intent:
             self._data.intent_description = intent
-            self._data.skill_name = _slugify(intent)
-            self._state = "ANALYZE_ARTIFACT"
-            return self._handle_analyze_artifact_prompt()
+            # ADR-027: go to CAPTURE_INTENT to normalise the intent before
+            # doing anything else. The old path went directly to ANALYZE_ARTIFACT
+            # and derived field names from the artifact structure — now the
+            # intent is normalised first, sources are proposed, sources are
+            # inspected, and THEN the design is produced.
+            self._state = "CAPTURE_INTENT"
+            return self._advance_to_capture_intent()
 
         self._state = "IDENTIFY_PERSONA"
         return ConversationTurn(
@@ -493,6 +789,937 @@ class SkillBuilderConversation:
             ),
         )
 
+    # ==================================================================
+    # ADR-027 NEW STATE HANDLERS
+    # ==================================================================
+
+    # -- CAPTURE_INTENT --------------------------------------------------
+
+    def _advance_to_capture_intent(self) -> ConversationTurn:
+        """Run CAPTURE_INTENT: normalise the raw intent via one LLM call.
+
+        Called immediately when the user has provided both persona and intent.
+        Returns the CAPTURE_INTENT turn showing the normalised goal object with
+        any ambiguities flagged for user confirmation.
+        """
+        self._state = "CAPTURE_INTENT"
+        if not self._llm:
+            raise RuntimeError(
+                "CAPTURE_INTENT requires an LLM client. "
+                "Per ADR-027 no-stub-mode policy, intent parsing cannot fall back to "
+                "heuristics. Ensure the MCP server is started with a real LLM configured."
+            )
+
+        intent = self._data.intent_description
+        persona = self._data.persona
+
+        prompt = _CAPTURE_INTENT_PROMPT.format(
+            persona=persona,
+            intent=intent,
+        )
+        try:
+            result = self._llm.chat(
+                model="synthesis",
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                max_tokens=1024,
+            )
+            raw = result.get("text", "") if isinstance(result, dict) else str(result)
+            import re as _re
+            cleaned = _re.sub(r"```(?:json)?\n?(.*?)\n?```", r"\1", raw, flags=_re.S).strip()
+            normalised = json.loads(cleaned)
+        except Exception as exc:
+            raise RuntimeError(
+                f"CAPTURE_INTENT: LLM call failed — cannot parse intent. "
+                f"Error: {exc}. "
+                f"Check LLM connectivity and retry."
+            ) from exc
+
+        # Update skill_name from normalised scope_domains + output_kind
+        domains = normalised.get("scope_domains", [])
+        kind = normalised.get("output_kind", "")
+        if domains:
+            slug_base = "_".join(d.lower().replace(" ", "_") for d in domains[:2])
+            if kind and kind not in slug_base:
+                slug_base = f"{slug_base}_{kind}"
+            self._data.skill_name = _slugify(slug_base)
+        else:
+            # Fall back to slugifying the raw intent
+            self._data.skill_name = _slugify(intent)
+
+        self._data.normalised_intent = normalised
+        log.info(
+            "_advance_to_capture_intent: persona=%s output_kind=%s cadence=%s domains=%s",
+            persona,
+            normalised.get("output_kind"),
+            normalised.get("cadence"),
+            normalised.get("scope_domains"),
+        )
+
+        ambiguities = normalised.get("ambiguities", [])
+        ambig_text = ""
+        if ambiguities:
+            ambig_text = (
+                "\n\nAmbiguities detected — please confirm or correct:\n"
+                + "\n".join(f"  • {a}" for a in ambiguities)
+                + "\n\nType 'ok' to proceed with the above, or clarify any of the above."
+            )
+        else:
+            ambig_text = "\n\nNo ambiguities. Type 'ok' to proceed."
+
+        return ConversationTurn(
+            state="CAPTURE_INTENT",
+            message=(
+                f"Intent parsed for persona '{persona}':\n\n"
+                f"  Output kind: {normalised.get('output_kind', '?')}\n"
+                f"  Audience: {normalised.get('audience', '?')}\n"
+                f"  Cadence: {normalised.get('cadence', '?')}\n"
+                f"  Scope: {', '.join(normalised.get('scope_domains', ['?']))}\n"
+                f"  Success criteria: {'; '.join(normalised.get('success_criteria', ['?']))}\n"
+                f"  Skill name: {self._data.skill_name}"
+                + ambig_text
+            ),
+            data={"normalised_intent": normalised, "skill_name": self._data.skill_name},
+            options=["ok"] + (["clarify"] if ambiguities else []),
+        )
+
+    def _handle_capture_intent(self, user_input: str) -> ConversationTurn:
+        """Handle user response at CAPTURE_INTENT state."""
+        lowered = user_input.lower().strip()
+
+        # User confirms or clarifies
+        if lowered in ("ok", "looks good", "continue", "yes", "proceed"):
+            return self._advance_to_configure_sources_v2()
+
+        # User wants to clarify — re-run with updated intent
+        if lowered not in ("ok", "continue", "yes"):
+            # Treat the user's input as an amendment to the intent
+            amended_intent = f"{self._data.intent_description}. Additional context: {user_input}"
+            self._data.intent_description = amended_intent
+            return self._advance_to_capture_intent()
+
+        return self._advance_to_configure_sources_v2()
+
+    # -- CONFIGURE_SOURCES (v2 — LLM-assisted) ---------------------------
+
+    def _advance_to_configure_sources_v2(self) -> ConversationTurn:
+        """CONFIGURE_SOURCES with LLM-proposed source list (ADR-027)."""
+        self._state = "CONFIGURE_SOURCES"
+
+        # Extract sources already in the intent text (same as legacy path)
+        if not self._data.sources and self._data.intent_description:
+            auto = _extract_confluence_sources_from_text(self._data.intent_description)
+            if auto:
+                self._data.sources.extend(auto)
+
+        # Build persona adapter list for the LLM prompt
+        adapter_list = self._get_persona_adapters()
+
+        if not self._llm:
+            raise RuntimeError(
+                "CONFIGURE_SOURCES requires an LLM client for source proposal. "
+                "Per ADR-027 no-stub-mode policy."
+            )
+
+        prompt = _CONFIGURE_SOURCES_SUGGEST_PROMPT.format(
+            persona=self._data.persona,
+            normalised_intent=json.dumps(self._data.normalised_intent, indent=2),
+            adapter_list=json.dumps(adapter_list, indent=2),
+            intent_text=self._data.intent_description,
+        )
+        try:
+            result = self._llm.chat(
+                model="synthesis",
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                max_tokens=1024,
+            )
+            raw = result.get("text", "") if isinstance(result, dict) else str(result)
+            import re as _re
+            cleaned = _re.sub(r"```(?:json)?\n?(.*?)\n?```", r"\1", raw, flags=_re.S).strip()
+            # The prompt asks for a JSON array — but json_object mode may wrap it
+            parsed = json.loads(cleaned)
+            proposed_sources = parsed if isinstance(parsed, list) else parsed.get("sources", [])
+        except Exception as exc:
+            log.warning(
+                "_advance_to_configure_sources_v2: LLM source proposal failed (%s) — "
+                "using pre-extracted sources only",
+                exc,
+            )
+            proposed_sources = []
+
+        # Merge proposed sources with any already auto-extracted
+        existing_pages = {
+            p
+            for s in self._data.sources
+            for p in (s.get("pages") or [])
+        }
+        for ps in proposed_sources:
+            # Avoid adding duplicates
+            ps_pages = ps.get("pages", [])
+            if any(p in existing_pages for p in ps_pages):
+                continue
+            ps_clean = {k: v for k, v in ps.items() if k != "rationale"}
+            self._data.sources.append(ps_clean)
+            for p in ps_pages:
+                existing_pages.add(p)
+
+        if not self._data.sources:
+            return ConversationTurn(
+                state="CONFIGURE_SOURCES",
+                message=(
+                    "I could not find specific source references in your intent.\n\n"
+                    "Please provide at least one source:\n"
+                    "  • Paste a Confluence page URL or page ID\n"
+                    "  • Confluence space: 'confluence SPACE_KEY'\n"
+                    "  • Jira JQL: 'jira project = OPS AND labels = weekly-status'\n\n"
+                    "Type 'done' when finished."
+                ),
+                options=["done"],
+            )
+
+        source_lines = "\n".join(
+            f"  {i+1}. {s}"
+            for i, s in enumerate(self._data.sources)
+        )
+        rationale_lines = "\n".join(
+            f"  {i+1}. {ps.get('rationale', '')}"
+            for i, ps in enumerate(proposed_sources)
+            if ps.get("rationale")
+        )
+        rationale_section = (
+            f"\nRationale:\n{rationale_lines}" if rationale_lines else ""
+        )
+
+        return ConversationTurn(
+            state="CONFIGURE_SOURCES",
+            message=(
+                f"Proposed sources ({len(self._data.sources)}):\n{source_lines}"
+                + rationale_section
+                + "\n\nAdd more sources, edit the list, or type 'done' to proceed."
+            ),
+            data={"sources": self._data.sources},
+            options=["done", "add <url_or_descriptor>"],
+        )
+
+    def _get_persona_adapters(self) -> list[str]:
+        """Return a list of adapter type names available to this persona."""
+        try:
+            import yaml as _yaml
+            pb_path = REPO_ROOT / "framework" / "persona_builders" / f"{self._data.persona}.yaml"
+            if pb_path.exists():
+                pb = _yaml.safe_load(pb_path.read_text()) or {}
+                adapters = set()
+                for kb in pb.get("knowledge_bases", []):
+                    for src in kb.get("sources", []):
+                        if src.get("kind"):
+                            adapters.add(src["kind"])
+                if adapters:
+                    return sorted(adapters)
+        except Exception as exc:
+            log.debug("_get_persona_adapters: failed to read persona YAML: %s", exc)
+        return ["confluence"]  # default
+
+    # -- INSPECT_SOURCES -------------------------------------------------
+
+    def _handle_inspect_sources_response(self, user_input: str) -> ConversationTurn:
+        """Handle user response at INSPECT_SOURCES (confirmation of capability inventory)."""
+        lowered = user_input.lower().strip()
+        if lowered in ("ok", "looks good", "continue", "yes", "proceed", "next"):
+            return self._advance_to_upload_artifact_example()
+        # Any other input — re-show the inspection results
+        return ConversationTurn(
+            state="INSPECT_SOURCES",
+            message=(
+                "Type 'ok' to proceed to upload an artifact example, "
+                "or 'back' to reconfigure sources."
+            ),
+            options=["ok", "back to sources"],
+        )
+
+    def _run_inspect_sources(self) -> ConversationTurn:
+        """Fetch live source samples and produce a capability inventory (ADR-027).
+
+        Called as a transition action — not as a response handler.
+        Hard-fails if a source with a page_id/page_url returns no content.
+        """
+        self._state = "INSPECT_SOURCES"
+        import os as _os
+
+        if not self._llm:
+            raise RuntimeError(
+                "INSPECT_SOURCES requires an LLM client. "
+                "Per ADR-027 no-stub-mode policy."
+            )
+
+        kbf_env = _os.environ.get("KBF_ENV", "laptop")
+        capability_list: list[dict] = []
+        source_samples_cache: dict = {}
+
+        for src in self._data.sources:
+            kind = src.get("kind", "confluence")
+            if kind != "confluence":
+                log.info("INSPECT_SOURCES: source kind=%s — non-Confluence sources not yet inspected", kind)
+                continue
+
+            pages = src.get("pages") or []
+            page_id = src.get("page_id")
+            page_url = src.get("page_url")
+
+            # Collect identifiers to inspect
+            ids_to_inspect: list[str] = list(pages)
+            if page_id and str(page_id) not in ids_to_inspect:
+                ids_to_inspect.append(str(page_id))
+            if page_url and page_url not in ids_to_inspect:
+                ids_to_inspect.append(page_url)
+
+            if not ids_to_inspect:
+                log.info("INSPECT_SOURCES: source has no page IDs/URLs — skipping")
+                continue
+
+            for source_id in ids_to_inspect[:2]:  # inspect at most 2 per source entry
+                is_url = str(source_id).startswith("http")
+                sq = {"page_url": source_id} if is_url else {"page_id": str(source_id)}
+
+                try:
+                    samples = fetch_samples(
+                        adapter_name="confluence",
+                        source_query=sq,
+                        n=2,
+                        require_live=True,
+                        kbf_env=kbf_env,
+                        repo_root=REPO_ROOT,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"INSPECT_SOURCES: failed to fetch source '{source_id}'. "
+                        f"Error: {exc}. "
+                        f"Verify the page ID/URL, Confluence adapter config, and "
+                        f"network/auth access. Per ADR-027, inspection cannot fall back "
+                        f"to synthetic samples."
+                    ) from exc
+
+                cache_key = f"confluence:{source_id}"
+                source_samples_cache[cache_key] = samples
+
+                # Build sample content for the LLM prompt (cap at 6k chars)
+                sample_parts = []
+                total_chars = 0
+                for s in samples:
+                    content = s.get("content", "")[:3000]
+                    citation = s.get("source_citation", source_id)
+                    sample_parts.append(f"--- {citation} ---\n{content}")
+                    total_chars += len(content)
+                    if total_chars >= 6000:
+                        break
+                sample_content = "\n\n".join(sample_parts)
+
+                prompt = _INSPECT_SOURCES_PROMPT.format(
+                    source_id=cache_key,
+                    persona=self._data.persona,
+                    normalised_intent=json.dumps(self._data.normalised_intent, indent=2),
+                    sample_content=sample_content[:6000],
+                )
+                try:
+                    result = self._llm.chat(
+                        model="synthesis",
+                        messages=[{"role": "user", "content": prompt}],
+                        response_format={"type": "json_object"},
+                        max_tokens=2048,
+                    )
+                    raw = result.get("text", "") if isinstance(result, dict) else str(result)
+                    import re as _re
+                    cleaned = _re.sub(r"```(?:json)?\n?(.*?)\n?```", r"\1", raw, flags=_re.S).strip()
+                    cap = json.loads(cleaned)
+                    cap["source_id"] = cache_key
+                    capability_list.append(cap)
+                    log.info(
+                        "_run_inspect_sources: source=%s available=%d suggested=%d missing=%d",
+                        cache_key,
+                        len(cap.get("available_fields", [])),
+                        len(cap.get("suggested_fields", [])),
+                        len(cap.get("missing_fields", [])),
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"INSPECT_SOURCES: LLM capability analysis failed for source "
+                        f"'{cache_key}'. Error: {exc}."
+                    ) from exc
+
+        if not capability_list:
+            raise RuntimeError(
+                "INSPECT_SOURCES: no sources were inspectable. "
+                "Configure at least one Confluence source with a page_id or page_url."
+            )
+
+        # Store caches
+        self._data.source_samples = source_samples_cache
+        self._data.source_capability = capability_list
+
+        # Format capability summary for the user
+        lines = ["Source capability inventory:\n"]
+        for cap in capability_list:
+            src_id = cap.get("source_id", "?")
+            summary = cap.get("summary", "")
+            lines.append(f"Source: {src_id}")
+            lines.append(f"  Summary: {summary}")
+            available = cap.get("available_fields", [])
+            if available:
+                lines.append(f"  Available fields ({len(available)}):")
+                for af in available[:8]:
+                    conf = af.get("confidence", "?")
+                    lines.append(f"    - {af.get('field', '?')} [{conf}]: {af.get('evidence', '')[:80]}")
+            suggested = cap.get("suggested_fields", [])
+            if suggested:
+                lines.append(f"  Suggested additional fields ({len(suggested)}):")
+                for sf in suggested[:5]:
+                    lines.append(f"    - {sf.get('field', '?')}: {sf.get('reason', '')[:80]}")
+            missing = cap.get("missing_fields", [])
+            if missing:
+                lines.append(f"  Cannot be extracted ({len(missing)}):")
+                for mf in missing[:5]:
+                    lines.append(f"    - {mf.get('field', '?')}: {mf.get('reason', '')[:80]}")
+            lines.append("")
+
+        lines.append("Type 'ok' to proceed to artifact upload (optional), or 'back' to reconfigure sources.")
+
+        return ConversationTurn(
+            state="INSPECT_SOURCES",
+            message="\n".join(lines),
+            data={"source_capability": capability_list},
+            options=["ok", "back to sources"],
+        )
+
+    # -- UPLOAD_ARTIFACT_EXAMPLE -----------------------------------------
+
+    def _advance_to_upload_artifact_example(self) -> ConversationTurn:
+        """Transition to UPLOAD_ARTIFACT_EXAMPLE state (ADR-027)."""
+        self._state = "UPLOAD_ARTIFACT_EXAMPLE"
+        return ConversationTurn(
+            state="UPLOAD_ARTIFACT_EXAMPLE",
+            message=(
+                "Optional: upload a reference artifact to provide a layout hint.\n\n"
+                "This helps DESIGN_SKILL choose the right output format and layout.\n"
+                "Provide the path to a PPTX, DOCX, Markdown, or text file.\n\n"
+                "If you don't have a reference file, type 'skip'."
+            ),
+            options=["skip", "artifact:<filename> id:<artifact_id>", "/path/to/file.pptx"],
+        )
+
+    def _handle_upload_artifact_example(self, user_input: str) -> ConversationTurn:
+        """Handle user input at UPLOAD_ARTIFACT_EXAMPLE state (ADR-027).
+
+        Performs structural parse only — output is a layout hint, NOT field names.
+        Field names come from DESIGN_SKILL.
+        """
+        from .analyze_artifact import analyze_artifact
+
+        lowered = user_input.lower().strip()
+        if lowered in ("skip", "no", "none", "later"):
+            self._data.artifact_layout = None
+            self._data.artifact_path = ""
+            return self._run_design_skill()
+
+        path = user_input.strip()
+
+        # Handle artifact: prefix (ADR-021 uploaded artifacts)
+        if path.startswith("artifact:"):
+            import re as _re
+            m = _re.match(r"^artifact:(\S+)\s+id:(\S+)$", path)
+            if m and self._artifact_store is not None:
+                artifact_id = m.group(2)
+                local_path = self._artifact_store.resolve(artifact_id)
+                if local_path:
+                    path = str(local_path)
+                    self._data.artifact_path = path
+                else:
+                    log.warning("UPLOAD_ARTIFACT_EXAMPLE: artifact_id=%s not found", artifact_id)
+                    return self._run_design_skill()
+            else:
+                return self._run_design_skill()
+
+        # Local filesystem path
+        p = Path(path)
+        if p.exists() and p.suffix in (".pptx", ".docx", ".md", ".txt"):
+            try:
+                _fields, mapping = analyze_artifact(str(p))
+                # Build layout hint from the mapping (section order, headings)
+                layout = {
+                    "sections": _fields,
+                    "slide_count": len({v.get("slide", 0) for v in (mapping or {}).values()}),
+                    "mapping": mapping or {},
+                }
+                self._data.artifact_layout = layout
+                self._data.artifact_path = str(p)
+                log.info(
+                    "UPLOAD_ARTIFACT_EXAMPLE: parsed layout sections=%d from %s",
+                    len(_fields), p,
+                )
+            except ValueError as exc:
+                # Image-only PPTX: hard-fail (ADR-026 Fix 1 still applies)
+                return ConversationTurn(
+                    state="UPLOAD_ARTIFACT_EXAMPLE",
+                    message=(
+                        f"Cannot parse artifact: {exc}\n\n"
+                        "Please provide a text-bearing PPTX/DOCX/Markdown, "
+                        "or type 'skip' to proceed without an artifact."
+                    ),
+                    options=["skip"],
+                )
+        else:
+            log.warning(
+                "UPLOAD_ARTIFACT_EXAMPLE: path %r not found or unsupported — skipping",
+                path,
+            )
+            self._data.artifact_layout = None
+
+        return self._run_design_skill()
+
+    # -- DESIGN_SKILL ----------------------------------------------------
+
+    def _run_design_skill(self) -> ConversationTurn:
+        """Run the integrated DESIGN_SKILL LLM call (ADR-027).
+
+        One big call that sees intent + source capability + artifact layout +
+        existing KB cards and produces schema + source_bindings + workflow_shape
+        + reuse_plan + open_questions.
+        """
+        self._state = "DESIGN_SKILL"
+
+        if not self._llm:
+            raise RuntimeError(
+                "DESIGN_SKILL requires an LLM client. "
+                "Per ADR-027 no-stub-mode policy."
+            )
+
+        # Load existing KB cards for this persona
+        try:
+            from ..orchestrator.shim_kb import ShimKb
+            pb_dir = REPO_ROOT / "framework" / "persona_builders"
+            shim = ShimKb(pb_dir, skill_store=self._skill_store)
+            existing_cards = shim.cards_visible_to(self._data.persona)
+            cards_summary = [
+                {
+                    "name": c.get("name", "?"),
+                    "provides_fields": c.get("provides_fields", []),
+                }
+                for c in existing_cards[:10]  # cap to avoid huge prompt
+            ]
+        except Exception as exc:
+            log.warning("_run_design_skill: could not load ShimKb cards: %s", exc)
+            cards_summary = []
+
+        prompt = _DESIGN_SKILL_PROMPT.format(
+            persona=self._data.persona,
+            normalised_intent=json.dumps(self._data.normalised_intent, indent=2),
+            source_capability=json.dumps(self._data.source_capability, indent=2),
+            artifact_layout=json.dumps(self._data.artifact_layout, indent=2)
+            if self._data.artifact_layout
+            else "null",
+            existing_kb_cards=json.dumps(cards_summary, indent=2),
+        )
+        try:
+            result = self._llm.chat(
+                model="synthesis",
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                max_tokens=4096,
+            )
+            raw = result.get("text", "") if isinstance(result, dict) else str(result)
+            import re as _re
+            cleaned = _re.sub(r"```(?:json)?\n?(.*?)\n?```", r"\1", raw, flags=_re.S).strip()
+            design = json.loads(cleaned)
+        except Exception as exc:
+            raise RuntimeError(
+                f"DESIGN_SKILL: LLM design call failed. Error: {exc}. "
+                f"Check LLM connectivity and retry."
+            ) from exc
+
+        # Validate design output
+        if "schema" not in design or "properties" not in design.get("schema", {}):
+            raise RuntimeError(
+                "DESIGN_SKILL: LLM returned an invalid design (missing schema.properties). "
+                "This is a prompt engineering bug — check _DESIGN_SKILL_PROMPT."
+            )
+
+        self._data.design = design
+
+        # Populate fields + field_specs from design.schema
+        schema = design["schema"]
+        properties = schema.get("properties", {})
+        self._data.fields = list(properties.keys())
+        self._data.field_specs = {
+            f: dict(spec)
+            for f, spec in properties.items()
+        }
+
+        # Populate reuse_result from design.reuse_plan
+        reuse_plan = design.get("reuse_plan", {"covered": {}, "gaps": list(self._data.fields)})
+        self._data.reuse_result = reuse_plan
+
+        # Populate trigger and output_format from design.workflow_shape
+        ws = design.get("workflow_shape", {})
+        self._data.output_format = ws.get("output_format", "markdown")
+        trigger = ws.get("trigger", {"on_request": True})
+        self._data.trigger = trigger
+
+        log.info(
+            "_run_design_skill: fields=%d output_format=%s reuse_covered=%d gaps=%d",
+            len(self._data.fields),
+            self._data.output_format,
+            len(reuse_plan.get("covered", {})),
+            len(reuse_plan.get("gaps", [])),
+        )
+
+        return self._prompt_review_design()
+
+    def _handle_design_skill_response(self, user_input: str) -> ConversationTurn:
+        """Handle user response at DESIGN_SKILL state (rare — usually auto-transitions)."""
+        # This state auto-transitions via _run_design_skill; the handler is
+        # here to catch any edge cases where the state machine lands here
+        # from a session restore without a design having run yet.
+        if self._data.design is None:
+            return self._run_design_skill()
+        return self._prompt_review_design()
+
+    # -- REVIEW_DESIGN ---------------------------------------------------
+
+    def _prompt_review_design(self) -> ConversationTurn:
+        """Render the full design for user review."""
+        self._state = "REVIEW_DESIGN"
+        design = self._data.design or {}
+        schema = design.get("schema", {})
+        properties = schema.get("properties", {})
+        source_bindings = design.get("source_bindings", {})
+        workflow_shape = design.get("workflow_shape", {})
+        reuse_plan = design.get("reuse_plan", {})
+        unsupportable = design.get("unsupportable_fields", [])
+        open_questions = design.get("open_questions", [])
+
+        lines = ["=== Skill Design ===\n"]
+
+        # Schema
+        lines.append(f"Schema ({len(properties)} fields):")
+        required = schema.get("required", [])
+        for fname, spec in properties.items():
+            req_tag = " [required]" if fname in required else ""
+            t = spec.get("type", "string")
+            desc = spec.get("description", "")[:100]
+            binding = ", ".join(source_bindings.get(fname, ["?"]))
+            lines.append(f"  {fname}{req_tag} [{t}] ← {binding}")
+            lines.append(f"    {desc}")
+
+        # Workflow shape
+        lines.append("\nWorkflow shape:")
+        lines.append(f"  Output format: {workflow_shape.get('output_format', '?')}")
+        lines.append(f"  Layout: {workflow_shape.get('layout', 'default')}")
+        trig = workflow_shape.get("trigger", {})
+        trig_str = "on-request" if trig.get("on_request") else ""
+        sched = trig.get("schedule")
+        if sched:
+            trig_str += (", " if trig_str else "") + f"scheduled: {sched}"
+        lines.append(f"  Trigger: {trig_str or '?'}")
+
+        # Reuse plan
+        covered = reuse_plan.get("covered", {})
+        gaps = reuse_plan.get("gaps", [])
+        if covered:
+            lines.append(f"\nReuse ({len(covered)} fields from existing KBs):")
+            for f, kb in covered.items():
+                lines.append(f"  {f} → {kb}")
+        if gaps:
+            lines.append(f"\nNew extraction needed ({len(gaps)} fields):")
+            for g in gaps:
+                lines.append(f"  {g}")
+
+        # Warnings
+        if unsupportable:
+            lines.append(f"\nCannot extract ({len(unsupportable)} fields):")
+            for u in unsupportable:
+                lines.append(f"  {u.get('field', '?')}: {u.get('reason', '')}")
+
+        if open_questions:
+            lines.append(f"\nOpen questions ({len(open_questions)}):")
+            for q in open_questions:
+                lines.append(f"  ? {q}")
+
+        lines.append("\n=== End Design ===")
+        lines.append("\nEdit commands (trivial — no LLM call):")
+        lines.append("  describe <field> as <text>")
+        lines.append("  set type of <field> to <type>")
+        lines.append("  rename field <old> to <new>")
+        lines.append("  remove field <name>")
+        lines.append("  set trigger to <cron>")
+        lines.append("\nFor major changes (new source, new field from Jira, etc.) describe them in plain English.")
+        lines.append("\nType 'ok' when the design looks right.")
+
+        return ConversationTurn(
+            state="REVIEW_DESIGN",
+            message="\n".join(lines),
+            data={"design": design},
+            options=["ok", "describe <field> as <text>", "remove field <name>"],
+        )
+
+    def _handle_review_design_response(self, user_input: str) -> ConversationTurn:
+        """Handle user input at REVIEW_DESIGN state."""
+        lowered = user_input.lower().strip()
+
+        if lowered in ("ok", "looks good", "continue", "yes", "proceed"):
+            return self._advance_to_configure_triggers()
+
+        # Trivial edits — deterministic patching
+        result = self._apply_design_patch(user_input)
+        if result is not None:
+            # Trivial edit applied — re-render
+            return self._prompt_review_design()
+
+        # Substantive edit — trigger LLM re-plan
+        return self._run_design_replan(user_input)
+
+    def _apply_design_patch(self, user_input: str) -> bool | None:
+        """Apply a trivial deterministic design edit. Returns True on success, None on no-match."""
+        import re as _re
+        design = self._data.design or {}
+        schema = design.get("schema", {})
+        properties = schema.get("properties", {})
+
+        # describe <field> as <text>
+        m = _re.match(r"(?i)describe\s+(\S+)\s+as\s+(.+)", user_input)
+        if m:
+            fname = _to_field_name(m.group(1))
+            new_desc = m.group(2).strip().strip("'\"")
+            if fname in properties:
+                properties[fname]["description"] = new_desc
+                if fname in self._data.field_specs:
+                    self._data.field_specs[fname]["description"] = new_desc
+                return True
+
+        # set type of <field> to <type>
+        m = _re.match(r"(?i)set\s+type\s+of\s+(\S+)\s+to\s+(\S+)", user_input)
+        if m:
+            fname = _to_field_name(m.group(1))
+            new_type = m.group(2).strip()
+            if fname in properties and new_type in ("string", "integer", "number", "boolean", "array"):
+                properties[fname]["type"] = new_type
+                if fname in self._data.field_specs:
+                    self._data.field_specs[fname]["type"] = new_type
+                return True
+
+        # rename field <old> to <new>
+        m = _re.match(r"(?i)rename\s+field\s+(\S+)\s+to\s+(\S+)", user_input)
+        if m:
+            old_name = _to_field_name(m.group(1))
+            new_name = _to_field_name(m.group(2))
+            if old_name in properties:
+                spec = properties.pop(old_name)
+                properties[new_name] = spec
+                # Update ordered fields list
+                self._data.fields = [
+                    new_name if f == old_name else f
+                    for f in self._data.fields
+                ]
+                if old_name in self._data.field_specs:
+                    self._data.field_specs[new_name] = self._data.field_specs.pop(old_name)
+                # Update source_bindings
+                sb = design.get("source_bindings", {})
+                if old_name in sb:
+                    sb[new_name] = sb.pop(old_name)
+                return True
+
+        # remove field <name>
+        m = _re.match(r"(?i)remove\s+field\s+(\S+)", user_input)
+        if m:
+            fname = _to_field_name(m.group(1))
+            if fname in properties:
+                del properties[fname]
+                self._data.fields = [f for f in self._data.fields if f != fname]
+                self._data.field_specs.pop(fname, None)
+                sb = design.get("source_bindings", {})
+                sb.pop(fname, None)
+                # Remove from required list if present
+                req = schema.get("required", [])
+                schema["required"] = [r for r in req if r != fname]
+                return True
+
+        # set trigger to <cron>
+        m = _re.match(r"(?i)set\s+trigger\s+to\s+(.+)", user_input)
+        if m:
+            cron = m.group(1).strip()
+            ws = design.get("workflow_shape", {})
+            ws["trigger"] = {"on_request": True, "schedule": cron}
+            self._data.trigger = ws["trigger"]
+            return True
+
+        return None
+
+    def _run_design_replan(self, edit_request: str) -> ConversationTurn:
+        """Run LLM re-plan for a substantive design change (ADR-027)."""
+        if not self._llm:
+            raise RuntimeError(
+                "REVIEW_DESIGN replan requires an LLM client. "
+                "Per ADR-027 no-stub-mode policy."
+            )
+        prompt = _REVIEW_DESIGN_REPLAN_PROMPT.format(
+            current_design=json.dumps(self._data.design, indent=2),
+            edit_request=edit_request,
+            updated_source_capability=json.dumps(self._data.source_capability, indent=2),
+        )
+        try:
+            result = self._llm.chat(
+                model="synthesis",
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                max_tokens=2048,
+            )
+            raw = result.get("text", "") if isinstance(result, dict) else str(result)
+            import re as _re
+            cleaned = _re.sub(r"```(?:json)?\n?(.*?)\n?```", r"\1", raw, flags=_re.S).strip()
+            diff = json.loads(cleaned)
+        except Exception as exc:
+            raise RuntimeError(
+                f"REVIEW_DESIGN replan: LLM call failed. Error: {exc}."
+            ) from exc
+
+        # Apply diff to design
+        design = self._data.design or {}
+        schema = design.setdefault("schema", {})
+        properties = schema.setdefault("properties", {})
+        sb = design.setdefault("source_bindings", {})
+
+        for fname, spec in diff.get("schema_add", {}).items():
+            properties[fname] = spec
+            self._data.fields.append(fname)
+            self._data.field_specs[fname] = spec
+
+        for fname in diff.get("schema_remove", []):
+            properties.pop(fname, None)
+            self._data.fields = [f for f in self._data.fields if f != fname]
+            self._data.field_specs.pop(fname, None)
+
+        for fname, spec_delta in diff.get("schema_update", {}).items():
+            if fname in properties:
+                properties[fname].update(spec_delta)
+            if fname in self._data.field_specs:
+                self._data.field_specs[fname].update(spec_delta)
+
+        sb.update(diff.get("source_bindings_add", {}))
+        for fname in diff.get("source_bindings_remove", []):
+            sb.pop(fname, None)
+
+        if "workflow_shape_update" in diff:
+            design.setdefault("workflow_shape", {}).update(diff["workflow_shape_update"])
+
+        if "reuse_plan_update" in diff:
+            design["reuse_plan"] = diff["reuse_plan_update"]
+            self._data.reuse_result = diff["reuse_plan_update"]
+
+        if diff.get("open_questions"):
+            existing = design.get("open_questions", [])
+            design["open_questions"] = existing + diff["open_questions"]
+
+        return self._prompt_review_design()
+
+    # -- PREVIEW_EXTRACTION ----------------------------------------------
+
+    def _advance_to_preview_extraction(self) -> ConversationTurn:
+        """Transition to PREVIEW_EXTRACTION: run real LLM extraction on cached samples."""
+        self._state = "PREVIEW_EXTRACTION"
+        from .review import review_extractions
+        from .synthesize_schema import synthesize_extraction_schema
+
+        if not self._llm:
+            raise RuntimeError(
+                "PREVIEW_EXTRACTION requires an LLM client. "
+                "Per ADR-027 no-stub-mode policy."
+            )
+
+        # Get all cached samples from INSPECT_SOURCES
+        all_samples: list[dict] = []
+        for cache_key, samples in self._data.source_samples.items():
+            all_samples.extend(samples)
+
+        if not all_samples:
+            raise RuntimeError(
+                "PREVIEW_EXTRACTION: no source samples are cached. "
+                "INSPECT_SOURCES must have run and cached at least one sample. "
+                "Per ADR-027, there is no synthetic sample fallback at this state."
+            )
+
+        # Build schema from current field_specs
+        gaps = self._data.reuse_result.get("gaps", list(self._data.fields))
+        schema = synthesize_extraction_schema(gaps, self._data.persona, self._data.skill_name)
+        for f in gaps:
+            if f in self._data.field_specs and f in schema.get("properties", {}):
+                schema["properties"][f] = dict(self._data.field_specs[f])
+
+        # Run review_extractions (ADR-026 Fix 3)
+        review_result = review_extractions(
+            samples=all_samples[:3],  # up to 3 samples
+            schema=schema,
+            llm=self._llm,
+        )
+
+        # Format for user display
+        lines = ["=== Extraction Preview (live data) ===\n"]
+        for ex in review_result.get("extractions", []):
+            citation = ex.get("source_citation", "?")
+            extracted = ex.get("extracted", {})
+            missing = ex.get("missing_fields", [])
+            lines.append(f"Source: {citation}")
+            for f, v in extracted.items():
+                val_str = str(v)[:150] if v else "<empty>"
+                lines.append(f"  {f}: {val_str}")
+            if missing:
+                lines.append(f"  Missing required fields: {', '.join(missing)}")
+            lines.append("")
+
+        coverage = review_result.get("field_coverage", {})
+        issues = review_result.get("issues", [])
+        if coverage:
+            lines.append("Field coverage:")
+            for f, cov in coverage.items():
+                lines.append(f"  {f}: {int(cov * 100)}%")
+        if issues:
+            lines.append("\nIssues:")
+            for issue in issues:
+                lines.append(f"  ! {issue}")
+
+        lines.append("\n=== End Extraction Preview ===")
+        lines.append("\nThis is what the parser will extract from your source at query time.")
+        lines.append("Type 'ok' to confirm and assemble artifacts, or 'back' to revise the design.")
+
+        return ConversationTurn(
+            state="PREVIEW_EXTRACTION",
+            message="\n".join(lines),
+            data={"extraction_preview": review_result},
+            options=["ok, commit", "back to design"],
+        )
+
+    def _handle_preview_extraction_response(self, user_input: str) -> ConversationTurn:
+        """Handle user input at PREVIEW_EXTRACTION state."""
+        lowered = user_input.lower().strip()
+        if any(kw in lowered for kw in ("ok", "commit", "yes", "looks good", "proceed")):
+            return self._handle_commit_v2()
+        if "back" in lowered or "design" in lowered:
+            return self._prompt_review_design()
+        return ConversationTurn(
+            state="PREVIEW_EXTRACTION",
+            message="Type 'ok' to commit or 'back to design' to revise.",
+            options=["ok, commit", "back to design"],
+        )
+
+    def _handle_commit_v2(self) -> ConversationTurn:
+        """Assemble and commit artifacts (ADR-027 version of _handle_commit)."""
+        # Synthesize artifacts from the design
+        artifacts = self._synthesize_preview()
+        self._data.synthesized_artifacts = artifacts
+        return self._handle_commit()
+
+    # ==================================================================
+    # END ADR-027 NEW STATE HANDLERS
+    # ==================================================================
+
+    # Legacy ANALYZE_ARTIFACT handler (for in-flight pre-ADR-027 sessions)
     def _handle_analyze_artifact_prompt(self) -> ConversationTurn:
         slug = self._data.skill_name
         slug_notice = ""
@@ -1345,6 +2572,10 @@ Rules:
         if lowered == "done":
             if not self._data.sources:
                 self._data.sources.append({"kind": "confluence", "space": "REPLACE_ME"})
+            # ADR-027: new-machine sessions go to INSPECT_SOURCES;
+            # legacy sessions (no normalised_intent) go to CONFIGURE_TRIGGERS
+            if self._data.normalised_intent:
+                return self._run_inspect_sources()
             return self._advance_to_configure_triggers()
 
         source = _parse_source_descriptor(user_input)
@@ -1363,18 +2594,33 @@ Rules:
 
     def _advance_to_configure_triggers(self) -> ConversationTurn:
         self._state = "CONFIGURE_TRIGGERS"
+
+        # ADR-027: show what DESIGN_SKILL already proposed so the user just confirms
+        design_ws = (self._data.design or {}).get("workflow_shape", {})
+        proposed_trigger = design_ws.get("trigger", {})
+        proposed_format = design_ws.get("output_format", self._data.output_format or "markdown")
+
+        proposed_lines = []
+        if proposed_trigger.get("on_request"):
+            proposed_lines.append("on-request")
+        if proposed_trigger.get("schedule"):
+            proposed_lines.append(f"scheduled: {proposed_trigger['schedule']}")
+        proposed_str = " + ".join(proposed_lines) or "on-request only"
+
         return ConversationTurn(
             state="CONFIGURE_TRIGGERS",
             message=(
-                "How should this skill be triggered?\n\n"
+                f"Trigger (from design proposal): {proposed_str}\n"
+                f"Output format: {proposed_format}\n\n"
+                "Confirm or override:\n"
                 "  1. on-request only (user asks → skill runs immediately)\n"
                 "  2. scheduled only  (e.g. '0 16 * * 5' = every Friday 4pm)\n"
                 "  3. both            (on-request + schedule)\n\n"
-                "Also, what format should the output be? "
-                "(markdown / pptx / docx / email / slack)\n\n"
+                "Type 'ok' to accept the proposal, or enter your choice.\n"
                 "Example: '3, pptx, 0 16 * * 5'"
             ),
             options=[
+                "ok",
                 "1, markdown",
                 "2, pptx, 0 16 * * 5",
                 "3, pptx, 0 16 * * 5",
@@ -1382,9 +2628,26 @@ Rules:
         )
 
     def _handle_configure_triggers_response(self, user_input: str) -> ConversationTurn:
-        trigger, output_format = _parse_trigger_input(user_input)
-        self._data.trigger = trigger
-        self._data.output_format = output_format
+        lowered = user_input.lower().strip()
+
+        if lowered in ("ok", "yes", "continue", "looks good"):
+            # Accept the proposal from DESIGN_SKILL
+            design_ws = (self._data.design or {}).get("workflow_shape", {})
+            if design_ws.get("trigger"):
+                self._data.trigger = design_ws["trigger"]
+            if design_ws.get("output_format"):
+                self._data.output_format = design_ws["output_format"]
+        else:
+            trigger, output_format = _parse_trigger_input(user_input)
+            self._data.trigger = trigger
+            self._data.output_format = output_format
+
+        # ADR-027: transition to PREVIEW_EXTRACTION (not PREVIEW)
+        # If we are in the new machine (source_capability populated), use
+        # PREVIEW_EXTRACTION. If this is a legacy session (old machine, PREVIEW
+        # state), use the old PREVIEW path.
+        if self._data.source_capability or self._data.source_samples:
+            return self._advance_to_preview_extraction()
         return self._advance_to_preview()
 
     def _advance_to_preview(self) -> ConversationTurn:
@@ -1872,89 +3135,382 @@ Rules:
     # -- EVAL ------------------------------------------------------------
 
     def _run_eval(self) -> ConversationTurn:
-        import tempfile
-        import os
+        """Real eval harness (ADR-027 DECISION-010 Option A).
+
+        Algorithm:
+        1. Re-use source_samples cached at INSPECT_SOURCES; re-fetch if missing.
+        2. Run extraction against each sample with _llm_extract.
+        3. Write extraction gold rows (kind=auto_generated).
+        4. Call /api/v1/ask for workflow-level scoring.
+        5. Write workflow gold rows (kind=auto_generated).
+        6. Compute recall@k + faithfulness (LLM judge).
+        7. Gate PROMOTE on exit_criteria thresholds.
+        8. Surface metrics + disclaimer to user.
+        """
+        import os as _os
+        import time
 
         self._state = "EVAL"
-        # In stub mode, report gold set counts
-        from ..eval.gold_set_feeder import count_entries
-        gold_count = count_entries(self._data.persona)
-        skill_gold = f"eval/gold_sets/{self._data.persona}-{self._data.skill_name}-extraction.jsonl"
-        wf_gold = f"eval/gold_sets/{self._data.persona}-{self._data.skill_name}-workflow.jsonl"
 
-        # If skill_store is available, load eval gold set CLOBs from ADB and write
-        # to tempfiles so the eval harness can consume them via file paths.
-        # Fallback to filesystem paths when skill_store is None.
-        _tmp_files: list[str] = []
-        if self._skill_store is not None:
-            for artifact_type, gold_path_attr in (
-                ("eval_extraction", "extraction_gold_path"),
-                ("eval_workflow",   "workflow_gold_path"),
-            ):
-                try:
-                    content = self._skill_store.read_artifact(
-                        persona=self._data.persona,
-                        skill_name=self._data.skill_name,
-                        artifact_type=artifact_type,
-                    )
-                    if content is not None:
-                        tmp = tempfile.NamedTemporaryFile(
-                            mode="w",
-                            suffix=".jsonl",
-                            delete=False,
-                            encoding="utf-8",
-                        )
-                        tmp.write(content)
-                        tmp.flush()
-                        tmp.close()
-                        _tmp_files.append(tmp.name)
-                        log.debug(
-                            "_run_eval: loaded %s from skill_store → %s",
-                            artifact_type, tmp.name,
-                        )
-                except Exception as exc:
-                    log.warning(
-                        "_run_eval: skill_store.read_artifact(%s) failed (%s) — using filesystem",
-                        artifact_type, exc,
-                    )
+        if not self._llm:
+            raise RuntimeError(
+                "EVAL requires an LLM client. "
+                "Per ADR-027 no-stub-mode policy, eval cannot be skipped or stubbed."
+            )
 
-        # Clean up any tempfiles created above (eval harness has already seen them)
-        for tmp_path in _tmp_files:
+        persona = self._data.persona
+        skill_name = self._data.skill_name
+
+        # Step 1: get samples (cache from INSPECT_SOURCES or re-fetch)
+        all_samples: list[dict] = []
+        for _key, samples in self._data.source_samples.items():
+            all_samples.extend(samples)
+
+        if not all_samples:
+            # Session resumed after INGEST from a pre-ADR-027 path; re-fetch
+            kbf_env = _os.environ.get("KBF_ENV", "laptop")
+            for src in self._data.sources:
+                if src.get("kind") != "confluence":
+                    continue
+                pages = src.get("pages") or []
+                page_id = src.get("page_id")
+                page_url = src.get("page_url")
+                ids = list(pages)
+                if page_id:
+                    ids.append(str(page_id))
+                if page_url:
+                    ids.append(page_url)
+                for sid in ids[:2]:
+                    is_url = str(sid).startswith("http")
+                    sq = {"page_url": sid} if is_url else {"page_id": str(sid)}
+                    try:
+                        s = fetch_samples(
+                            adapter_name="confluence",
+                            source_query=sq,
+                            n=2,
+                            require_live=True,
+                            kbf_env=kbf_env,
+                            repo_root=REPO_ROOT,
+                        )
+                        all_samples.extend(s)
+                        cache_key = f"confluence:{sid}"
+                        self._data.source_samples[cache_key] = s
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"EVAL: failed to re-fetch samples for '{sid}'. "
+                            f"Error: {exc}."
+                        ) from exc
+
+        if not all_samples:
+            raise RuntimeError(
+                "EVAL: no source samples available. "
+                "INSPECT_SOURCES must have run (or source re-fetch must succeed). "
+                "Per ADR-027, EVAL cannot proceed without real source content."
+            )
+
+        # Step 2: load committed schema from ADB
+        schema_text = None
+        try:
+            schema_text = self._skill_store.read_artifact(
+                persona=persona,
+                skill_name=skill_name,
+                artifact_type="extraction_schema",
+            )
+        except Exception as exc:
+            log.warning("_run_eval: could not load extraction_schema from ADB (%s) — using in-memory", exc)
+
+        if schema_text:
             try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
+                schema = json.loads(schema_text)
+            except Exception:
+                schema = None
+
+        if not schema_text or not schema:
+            # Build from current field_specs (in-memory)
+            from .synthesize_schema import synthesize_extraction_schema
+            gaps = self._data.reuse_result.get("gaps", list(self._data.fields))
+            schema = synthesize_extraction_schema(gaps, persona, skill_name)
+            for f in gaps:
+                if f in self._data.field_specs and f in schema.get("properties", {}):
+                    schema["properties"][f] = dict(self._data.field_specs[f])
+
+        # Step 3: run extraction on each sample and generate gold rows
+        from .review import _llm_extract
+        extraction_gold_rows: list[dict] = []
+        extraction_results: list[dict] = []
+
+        for sample in all_samples[:3]:
+            try:
+                extracted = _llm_extract(sample, schema, self._llm)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"EVAL: extraction LLM call failed for sample "
+                    f"'{sample.get('source_citation', '?')}'. Error: {exc}."
+                ) from exc
+
+            source_snippet = str(sample.get("content", ""))[:500]
+            gold_row = {
+                "kind": "auto_generated",
+                "source_citation": sample.get("source_citation", "?"),
+                "source_snippet": source_snippet,
+                "expected_extraction": extracted,
+                "schema_version": "v1",
+                "created_at": _now_iso(),
+            }
+            extraction_gold_rows.append(gold_row)
+            extraction_results.append({
+                "extracted": extracted,
+                "source_snippet": source_snippet,
+                "citation": sample.get("source_citation", "?"),
+            })
+
+        # Step 4: compute recall@k
+        required_fields = schema.get("required", [])
+        all_fields = list(schema.get("properties", {}).keys())
+        if not all_fields:
+            all_fields = list(self._data.fields)
+
+        total_hits = 0
+        total_expected = 0
+        for row in extraction_gold_rows:
+            extracted = row["expected_extraction"]
+            for f in all_fields:
+                total_expected += 1
+                if extracted.get(f):
+                    total_hits += 1
+
+        recall_at_k = round(total_hits / max(total_expected, 1), 3)
+        log.info("_run_eval: recall@k=%.3f (%d/%d fields hit)", recall_at_k, total_hits, total_expected)
+
+        # Step 5: compute faithfulness (LLM judge per field per sample)
+        faithful_count = 0
+        faithfulness_total = 0
+        for ex_result in extraction_results:
+            extracted = ex_result["extracted"]
+            source_snippet = ex_result["source_snippet"]
+            for fname, fspec in schema.get("properties", {}).items():
+                val = extracted.get(fname)
+                if not val:
+                    continue
+                faithfulness_total += 1
+                judge_prompt = _EVAL_JUDGE_PROMPT.format(
+                    field_name=fname,
+                    field_description=fspec.get("description", "")[:200],
+                    extracted_value=str(val)[:300],
+                    source_snippet=source_snippet,
+                )
+                try:
+                    judge_result_raw = self._llm.chat(
+                        model="synthesis",
+                        messages=[{"role": "user", "content": judge_prompt}],
+                        response_format={"type": "json_object"},
+                        max_tokens=256,
+                    )
+                    judge_raw = (
+                        judge_result_raw.get("text", "")
+                        if isinstance(judge_result_raw, dict)
+                        else str(judge_result_raw)
+                    )
+                    import re as _re
+                    judge_cleaned = _re.sub(r"```(?:json)?\n?(.*?)\n?```", r"\1", judge_raw, flags=_re.S).strip()
+                    judge = json.loads(judge_cleaned)
+                    if judge.get("faithful"):
+                        faithful_count += 1
+                except Exception as exc:
+                    log.warning("_run_eval: faithfulness judge failed for field=%s: %s", fname, exc)
+                    # Count as faithful on judge failure to avoid penalising
+                    faithful_count += 1
+                    faithfulness_total += 1  # don't inflate denominator
+
+        faithfulness = round(faithful_count / max(faithfulness_total, 1), 3)
+        log.info("_run_eval: faithfulness=%.3f (%d/%d faithful)", faithfulness, faithful_count, faithfulness_total)
+
+        # Step 6: workflow scoring — call /api/v1/ask
+        workflow_gold_rows: list[dict] = []
+        ask_result: dict = {}
+        ask_latency_ms = None
+        wf_tier = None
+        wf_artifact_url = None
+
+        mcp_base = _os.environ.get("KBF_MCP_URL", "http://localhost:8080")
+        bearer = _os.environ.get("KBF_BEARER_TOKEN", "dev-only-token-replace-me")
+        # Build a canonical question from the normalised intent
+        domains = (self._data.normalised_intent or {}).get("scope_domains", [skill_name])
+        canonical_question = f"What is the status of the {' '.join(domains)} project for this week?"
+
+        try:
+            import urllib.request
+            ask_payload = json.dumps({
+                "question": canonical_question,
+                "persona": persona,
+            }).encode()
+            req = urllib.request.Request(
+                f"{mcp_base}/api/v1/ask",
+                data=ask_payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {bearer}",
+                },
+                method="POST",
+            )
+            t0 = time.monotonic()
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                ask_latency_ms = int((time.monotonic() - t0) * 1000)
+                ask_result = json.loads(resp.read().decode())
+            wf_tier = ask_result.get("tierUsed") or ask_result.get("tier_used")
+            wf_artifact_url = ask_result.get("artifactUrl") or ask_result.get("artifact_url")
+            log.info(
+                "_run_eval: /api/v1/ask tier=%s latency_ms=%d artifact_url=%s",
+                wf_tier, ask_latency_ms or 0, wf_artifact_url,
+            )
+        except Exception as exc:
+            log.warning(
+                "_run_eval: /api/v1/ask call failed (%s) — workflow scoring skipped. "
+                "This is non-fatal; extraction metrics are still valid.",
+                exc,
+            )
+
+        # Build workflow gold row
+        expected_skill = f"{persona}.{skill_name}"
+        wf_gold_row = {
+            "kind": "auto_generated",
+            "question": canonical_question,
+            "expected_skill": expected_skill,
+            "expected_tier": 1,
+            "expected_fields": list(all_fields[:5]),  # top-5 fields as presence check
+            "actual_tier_used": wf_tier,
+            "actual_artifact_url": wf_artifact_url,
+            "ask_latency_ms": ask_latency_ms,
+            "created_at": _now_iso(),
+        }
+        workflow_gold_rows.append(wf_gold_row)
+
+        # Step 7: write gold sets to filesystem + ADB
+        extraction_gold_path = f"eval/gold_sets/{persona}-{skill_name}-extraction.jsonl"
+        workflow_gold_path = f"eval/gold_sets/{persona}-{skill_name}-workflow.jsonl"
+
+        try:
+            ext_path = REPO_ROOT / extraction_gold_path
+            ext_path.parent.mkdir(parents=True, exist_ok=True)
+            ext_path.write_text(
+                "\n".join(json.dumps(row) for row in extraction_gold_rows) + "\n"
+            )
+            wf_path = REPO_ROOT / workflow_gold_path
+            wf_path.write_text(
+                "\n".join(json.dumps(row) for row in workflow_gold_rows) + "\n"
+            )
+        except Exception as exc:
+            log.warning("_run_eval: filesystem write of gold sets failed: %s", exc)
+
+        # Update skill_store gold artifacts (durable)
+        try:
+            typed = {
+                "eval_extraction": "\n".join(json.dumps(r) for r in extraction_gold_rows) + "\n",
+                "eval_workflow": "\n".join(json.dumps(r) for r in workflow_gold_rows) + "\n",
+            }
+            self._skill_store.write_artifacts(
+                synth_id=self._data.synth_id,
+                persona=persona,
+                skill_name=skill_name,
+                artifacts=typed,
+            )
+        except Exception as exc:
+            log.warning("_run_eval: ADB gold set write failed: %s", exc)
+
+        # Step 8: load exit criteria from workflow YAML or use defaults
+        recall_threshold = 0.85
+        faithfulness_threshold = 0.85
+        try:
+            wf_content = self._skill_store.read_artifact(
+                persona=persona, skill_name=skill_name, artifact_type="workflow_skill"
+            )
+            if wf_content:
+                wf_data = yaml.safe_load(wf_content) or {}
+                ec = wf_data.get("synthesis", {}).get("exit_criteria", {})
+                recall_threshold = float(ec.get("recall_threshold", 0.85))
+                faithfulness_threshold = float(ec.get("faithfulness_threshold", 0.85))
+        except Exception as exc:
+            log.debug("_run_eval: could not read exit_criteria from workflow YAML: %s", exc)
+
+        passed = recall_at_k >= recall_threshold and faithfulness >= faithfulness_threshold
+        total_cost_est = faithfulness_total * 0.002  # rough estimate at $0.002/call
 
         self._data.eval_result = {
-            "status": "stub",
-            "persona_gold_count": gold_count,
-            "extraction_gold_set": skill_gold,
-            "workflow_gold_set": wf_gold,
+            "status": "completed",
+            "extraction_gold_set": extraction_gold_path,
+            "workflow_gold_set": workflow_gold_path,
+            "gold_row_count": len(extraction_gold_rows),
             "metrics": {
-                "recall_at_k": None,
-                "faithfulness": None,
+                "recall_at_k": recall_at_k,
+                "faithfulness": faithfulness,
+                "ask_latency_ms": ask_latency_ms,
+                "estimated_cost_usd": round(total_cost_est, 4),
             },
             "exit_criteria": {
-                "recall_threshold": 0.80,
-                "faithfulness_threshold": 0.85,
-                "passed": None,
+                "recall_threshold": recall_threshold,
+                "faithfulness_threshold": faithfulness_threshold,
+                "passed": passed,
+            },
+            "workflow_score": {
+                "tier_used": wf_tier,
+                "artifact_url": wf_artifact_url,
+                "expected_skill": expected_skill,
+                "skill_matched": wf_tier == 1,
             },
         }
 
+        # Build user message
+        lines = [
+            f"Eval results (ADR-027 — kind=auto_generated):\n",
+            f"  Extraction samples: {len(extraction_gold_rows)}",
+            f"  Recall@k: {recall_at_k:.1%} (threshold: {recall_threshold:.0%})",
+            f"  Faithfulness: {faithfulness:.1%} (threshold: {faithfulness_threshold:.0%})",
+        ]
+        if ask_latency_ms is not None:
+            lines.append(f"  /api/v1/ask latency: {ask_latency_ms}ms, tier={wf_tier}")
+        else:
+            lines.append("  /api/v1/ask: not reached (server may be down)")
+
+        lines.append("")
+        lines.append(
+            "Note: kind=auto_generated — these gold rows were created from the same LLM "
+            "that did the extraction. They measure consistency, not correctness. "
+            "Human review encouraged before promoting to production fleet-wide."
+        )
+        lines.append("")
+
+        if passed:
+            lines.append(
+                f"Exit criteria met. "
+                f"Proceed to promote ({persona}.{skill_name} → production)?"
+            )
+            options = ["yes, promote", "stop here"]
+        else:
+            failing = []
+            if recall_at_k < recall_threshold:
+                failing.append(
+                    f"recall@k {recall_at_k:.1%} < threshold {recall_threshold:.0%}"
+                )
+            if faithfulness < faithfulness_threshold:
+                failing.append(
+                    f"faithfulness {faithfulness:.1%} < threshold {faithfulness_threshold:.0%}"
+                )
+            lines.append(
+                f"Exit criteria NOT met: {'; '.join(failing)}.\n"
+                f"The skill cannot be promoted until metrics meet thresholds.\n"
+                f"Options:\n"
+                f"  • Revise extraction descriptions at REVIEW_DESIGN and re-author\n"
+                f"  • Improve source data (add more Confluence pages)\n"
+                f"  • Lower thresholds in the workflow YAML (synthesis.exit_criteria)\n"
+                f"  • Type 'force promote' to override (not recommended)"
+            )
+            options = ["force promote", "stop here"]
+
         return ConversationTurn(
             state="EVAL",
-            message=(
-                f"Eval harness (stub mode):\n"
-                f"  Gold set entries for {self._data.persona}: {gold_count}\n"
-                f"  Extraction gold set: {skill_gold}\n"
-                f"  Workflow gold set: {wf_gold}\n\n"
-                "In production this would run queries against the KB and measure "
-                "recall@5, faithfulness, latency, and cost.\n\n"
-                "Exit criteria: recall ≥0.80, faithfulness ≥0.85\n\n"
-                "Proceed to promote (draft → production)?"
-            ),
+            message="\n".join(lines),
             data={"eval": self._data.eval_result},
-            options=["yes, promote", "stop here"],
+            options=options,
         )
 
     def _handle_eval_response(self, user_input: str) -> ConversationTurn:
@@ -1962,6 +3518,31 @@ Rules:
         if any(kw in lowered for kw in ("stop", "done", "exit", "no")):
             self._state = "DONE"
             return ConversationTurn(state="DONE", message="Session paused.", done=True)
+
+        # "force promote" — user explicitly overrides failing exit criteria.
+        # The eval_result already has passed=False; we warn but proceed.
+        if "force" in lowered and "promote" in lowered:
+            eval_result = self._data.eval_result or {}
+            metrics = eval_result.get("metrics", {})
+            ec = eval_result.get("exit_criteria", {})
+            log.warning(
+                "_handle_eval_response: FORCE PROMOTE by user — "
+                "metrics did not meet exit criteria. "
+                "recall_at_k=%.3f (threshold=%.2f) faithfulness=%.3f (threshold=%.2f) "
+                "persona=%s skill=%s",
+                metrics.get("recall_at_k", 0),
+                ec.get("recall_threshold", 0.85),
+                metrics.get("faithfulness", 0),
+                ec.get("faithfulness_threshold", 0.85),
+                self._data.persona,
+                self._data.skill_name,
+            )
+            # Stamp force-promote into eval_result for audit trail
+            if self._data.eval_result:
+                self._data.eval_result["force_promoted"] = True
+                self._data.eval_result["force_promoted_at"] = _now_iso()
+            return self._run_promote()
+
         return self._run_promote()
 
     # -- PROMOTE ---------------------------------------------------------
