@@ -11,7 +11,7 @@ status: current
 # Current Status
 
 ## Where we are
-**Phase 1-3 + V3 deployment layer + laptop mode code complete.** 160+ Python files, ~16K LOC, 574 tests passing. All code runs against filestore + stub LLM — no external provisioning needed. PDD V3 external API surface fully implemented. Laptop mode: bastion auto-reconnect for ADB (ADR-019), Codex CLI MCP transport for Confluence/Jira (ADR-020).
+**Phase 1-3 + V3 deployment layer + laptop mode code complete. ADR-027 design-first authorSkill live.** 160+ Python files, ~18K LOC, 600+ tests passing. ADR-027 replaces the 15-state machine with a 16-state design-first flow: sources are inspected BEFORE schema design; DESIGN_SKILL produces schema + bindings + workflow shape in one integrated LLM call; EVAL runs real extraction scoring with auto-generated gold rows. Last filed: ADR-027, DECISION-010.
 
 ### What's runnable today
 ```bash
@@ -79,6 +79,8 @@ All 9 gaps from the architect's audit are resolved. Key retrieval paths that wer
 - **ADR-020** (2026-05-11, amended 2026-05-11) — Codex CLI as MCP transport for laptop mode. Original: Option B (codex_cli, direct stdio subprocess). Amendment: discovered org MCP servers are HTTPS+OAuth, added codex_proxy mode (LLM-mediated via `codex mcp-server`). E2E smoke passed.
 - **DECISION-009** (2026-05-12) — Dedicated bug DB connection: `bug_db` config section, `KBF_BUGS` Oracle user, same ADB for now. Future DB separation is config-only.
 - **ADR-024** (2026-05-12) — Bug DB connection design: `_init_bug_pool` inheritance contract, `setup-bug-user` CLI, migration-007 GRANTs, non-fatal startup policy for bug_pool, `export-bugs` CLI update.
+- **ADR-027** (2026-05-14) — Design-first authorSkill: 16-state machine, source inspection before schema design, integrated DESIGN_SKILL call, real EVAL with auto-generated gold sets.
+- **DECISION-010** (2026-05-14) — EVAL gold sets: Option A chosen — auto-generate from live samples, kind=auto_generated, gate on recall@k + faithfulness thresholds.
 - No open decisions
 
 ## Next milestones

@@ -10,8 +10,31 @@ status: current
 
 # Knowledgebase — Dashboard
 
-**Current phase:** Phase 1-3 + V3 + laptop mode — MCP wire-protocol live + ADR-021 artifact upload + OCI bucket live
-**Updated:** 2026-05-12 by backend-dev (DECISION-005 resolved — OCI kbf-uploads bucket fully wired)
+**Current phase:** Phase 1-3 + V3 + laptop mode — ADR-027 design-first authorSkill live
+**Updated:** 2026-05-14 by architect (ADR-027 + DECISION-010 implemented)
+
+## Session update — 2026-05-14 (ADR-027 design-first authorSkill + DECISION-010)
+
+**ADR-027 implementation complete and pushed to main (commits 99ecba9 + 9628a6d).**
+
+16-state design-first machine replaces the 15-state decoration-only flow:
+
+| Old (ADR-026) | New (ADR-027) |
+|---|---|
+| ANALYZE_ARTIFACT (decoration, no source fetch) | CAPTURE_INTENT → CONFIGURE_SOURCES (v2, LLM-assisted) |
+| REVIEW_FIELDS → REVIEW_SCHEMA | INSPECT_SOURCES (live samples, capability inventory) |
+| CHECK_REUSE → CONFIGURE_SOURCES | UPLOAD_ARTIFACT_EXAMPLE (layout hint only) |
+| CONFIGURE_TRIGGERS → PREVIEW | DESIGN_SKILL (single integrated LLM call, source-grounded) |
+| EVAL (stub, null metrics) | REVIEW_DESIGN → CONFIGURE_TRIGGERS → PREVIEW_EXTRACTION |
+| | EVAL (real: extraction scoring + faithfulness judge + /api/v1/ask) |
+
+**DECISION-010: Option A** — auto-generate gold rows from live samples, kind=auto_generated, gate PROMOTE on recall@k ≥ 0.85 and faithfulness ≥ 0.85. Force-promote override available with audit trail.
+
+**Tests:** 450+ new unit tests in `test_skill_builder_conversation.py` covering all new state handlers.
+
+**No open decisions.**
+
+---
 
 ## 🌅 Session update — 2026-05-12 evening (OCI kbf-uploads bucket wired + DECISION-005 resolved)
 
