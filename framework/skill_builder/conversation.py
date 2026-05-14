@@ -30,6 +30,9 @@ log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Module-level import so tests can patch 'framework.skill_builder.conversation.fetch_samples'
+from .sampler import fetch_samples  # noqa: E402
+
 
 def _build_confluence_adapter(kbf_env: str, repo_root: "Path"):
     """Build the Confluence adapter from config.
@@ -750,20 +753,26 @@ class SkillBuilderConversation:
     def _advance_to_review_schema(self) -> ConversationTurn:
         """Generate field specs (type + description) and present for review.
 
-        Two-pass approach:
+        Three-pass approach (ADR-026 Fix 4 adds pass 3):
         1. Fields covered by llm_suggested_specs (from ANALYZE_ARTIFACT LLM call):
            apply the LLM's type + description directly — these will be high quality.
         2. User-added fields NOT in llm_suggested_specs (delta fields):
            call synthesize_field_descriptions() for a targeted LLM description
            using raw_title + body_text context from the slide_mapping.
-        Falls back to heuristic when no LLM is wired up.
+        3. Source-grounded coherence review (ADR-026): fetch 2-3 live samples from
+           declared Confluence sources and ask the LLM to flag unsupportable fields
+           and suggest missing ones. Findings are surfaced in the REVIEW_SCHEMA prompt
+           so the user can refine before committing.
+        Falls back gracefully when no LLM is wired up.
         """
         from .synthesize_schema import _infer_field_spec, synthesize_field_descriptions
 
         new_fields = [f for f in self._data.fields if f not in self._data.field_specs]
         if not new_fields:
             self._state = "REVIEW_SCHEMA"
-            return self._prompt_review_schema()
+            # Still run source-grounded review even when specs already exist
+            source_review = self._source_grounded_review(self._data.field_specs)
+            return self._prompt_review_schema(source_review=source_review)
 
         # Pass 1 — LLM suggestions from ANALYZE_ARTIFACT (high-quality, no extra call)
         llm_specs = self._data.llm_suggested_specs
@@ -792,10 +801,204 @@ class SkillBuilderConversation:
                 base_spec["description"] = descriptions.get(f, base_spec["description"])
                 self._data.field_specs[f] = base_spec
 
-        self._state = "REVIEW_SCHEMA"
-        return self._prompt_review_schema(delta_fields=delta_fields if delta_fields else None)
+        # Pass 3 — source-grounded coherence review (ADR-026 Fix 4)
+        source_review = self._source_grounded_review(self._data.field_specs)
 
-    def _prompt_review_schema(self, delta_fields: list[str] | None = None) -> ConversationTurn:
+        self._state = "REVIEW_SCHEMA"
+        return self._prompt_review_schema(
+            delta_fields=delta_fields if delta_fields else None,
+            source_review=source_review,
+        )
+
+    # -- Source-grounded review (ADR-026 Fix 4) --------------------------
+
+    _SOURCE_GROUNDED_REVIEW_PROMPT = """\
+You are a Knowledge Builder Framework schema engineer performing a source-coherence check.
+
+Persona: {persona}
+Intent: "{intent}"
+
+CANDIDATE EXTRACTION SCHEMA (fields the user wants to extract):
+{schema_summary}
+
+LIVE SOURCE CONTENT (sample from the actual Confluence page(s) declared as sources):
+{sample_content}
+
+Your task — analyse the source content against the candidate schema and return a JSON object:
+{{
+  "unsupportable_fields": [
+    {{"field": "field_name", "reason": "why this field cannot be extracted from the source"}}
+  ],
+  "suggested_additions": [
+    {{"field": "snake_case_name", "type": "string|array|integer",
+      "description": "extraction instruction",
+      "reason": "what in the source suggests this field"}}
+  ],
+  "enum_corrections": [
+    {{"field": "field_name",
+      "current_enum": ["val1"],
+      "seen_in_source": ["actual_val1", "actual_val2"],
+      "recommendation": "update enum or use free-text string"}}
+  ],
+  "summary": "1-3 sentence note for the user about overall schema-source alignment"
+}}
+
+Rules:
+- Only flag a field as unsupportable if the source clearly cannot produce it.
+- Only suggest additions that are clearly and consistently present in the source.
+- If the schema is well-aligned, return empty lists and a positive summary.
+- Base ALL findings on the actual source content above — do not invent.
+"""
+
+    def _source_grounded_review(self, field_specs: dict) -> dict | None:
+        """Fetch live source samples and run a schema-coherence LLM check.
+
+        Returns a dict with keys: unsupportable_fields, suggested_additions,
+        enum_corrections, summary.  Returns None on any failure (advisory, never
+        blocking).
+
+        Per ADR-026 Fix 4: this is an advisory, one-LLM-call review that surfaces
+        findings inside REVIEW_SCHEMA without inserting a new state.
+        """
+        if self._llm is None:
+            log.info("_source_grounded_review: no LLM wired — skipping")
+            return None
+
+        # Find Confluence sources with page IDs or URLs
+        confluence_sources = [
+            s for s in (self._data.sources or [])
+            if s.get("kind") == "confluence" and (
+                s.get("page_id") or s.get("page_url")
+                or s.get("pages")
+            )
+        ]
+        if not confluence_sources:
+            log.info(
+                "_source_grounded_review: no Confluence page-id/url sources configured "
+                "(sources=%s) — skipping live fetch",
+                self._data.sources,
+            )
+            return None
+
+        try:
+            import os as _os
+
+            kbf_env = _os.environ.get("KBF_ENV", "laptop")
+
+            # Collect samples from up to 2 source entries
+            all_samples: list[dict] = []
+            for src in confluence_sources[:2]:
+                pages = src.get("pages") or []
+                if pages:
+                    for pg in pages[:2]:
+                        # page may be a URL or a page_id string
+                        is_url = str(pg).startswith("http")
+                        sq = {"page_url": pg} if is_url else {"page_id": str(pg)}
+                        try:
+                            s = fetch_samples(
+                                adapter_name="confluence",
+                                source_query=sq,
+                                n=1,
+                                kbf_env=kbf_env,
+                                repo_root=REPO_ROOT,
+                            )
+                            all_samples.extend(s)
+                        except Exception as exc:
+                            log.warning(
+                                "_source_grounded_review: fetch page %s failed: %s",
+                                pg, exc,
+                            )
+                elif src.get("page_id") or src.get("page_url"):
+                    sq = {}
+                    if src.get("page_url"):
+                        sq["page_url"] = src["page_url"]
+                    if src.get("page_id"):
+                        sq["page_id"] = str(src["page_id"])
+                    try:
+                        s = fetch_samples(
+                            adapter_name="confluence",
+                            source_query=sq,
+                            n=2,
+                            kbf_env=kbf_env,
+                            repo_root=REPO_ROOT,
+                        )
+                        all_samples.extend(s)
+                    except Exception as exc:
+                        log.warning(
+                            "_source_grounded_review: fetch failed for src=%s: %s",
+                            src, exc,
+                        )
+
+            if not all_samples:
+                log.warning(
+                    "_source_grounded_review: no live samples fetched — skipping review"
+                )
+                return None
+
+            # Build schema summary
+            schema_lines = []
+            for field, spec in field_specs.items():
+                t = spec.get("type", "string")
+                desc = spec.get("description", "")
+                enum = spec.get("enum")
+                extra = f" (enum: {enum})" if enum else ""
+                schema_lines.append(f"  - {field} [{t}{extra}]: {desc[:120]}")
+
+            # Combine sample content (cap total at 8k chars for prompt budget)
+            sample_parts = []
+            total_chars = 0
+            for s in all_samples:
+                content = s.get("content", s.get("text", ""))[:4000]
+                citation = s.get("source_citation", "?")
+                sample_parts.append(f"--- {citation} ---\n{content}")
+                total_chars += len(content)
+                if total_chars >= 8000:
+                    break
+            sample_content = "\n\n".join(sample_parts)
+
+            prompt = self._SOURCE_GROUNDED_REVIEW_PROMPT.format(
+                persona=self._data.persona or "unknown",
+                intent=self._data.intent_description or "",
+                schema_summary="\n".join(schema_lines),
+                sample_content=sample_content[:8000],
+            )
+
+            result = self._llm.chat(
+                model="synthesis",
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                max_tokens=2048,
+            )
+            raw = result.get("text", "") if isinstance(result, dict) else str(result)
+            import re as _re
+            cleaned = _re.sub(r"```(?:json)?\n?(.*?)\n?```", r"\1", raw, flags=_re.S).strip()
+            review_data = json.loads(cleaned)
+
+            # Attach citations so the user can trace findings back to the source
+            review_data["_source_citations"] = [
+                s.get("source_citation", "?") for s in all_samples
+            ]
+            log.info(
+                "_source_grounded_review: complete — %d unsupportable, "
+                "%d suggested, citations=%s",
+                len(review_data.get("unsupportable_fields", [])),
+                len(review_data.get("suggested_additions", [])),
+                review_data["_source_citations"],
+            )
+            return review_data
+
+        except Exception as exc:
+            log.warning(
+                "_source_grounded_review: failed (%s) — schema review will proceed without source grounding",
+                exc,
+            )
+            return None
+
+    def _prompt_review_schema(
+        self,
+        delta_fields: list[str] | None = None,
+        source_review: dict | None = None,
+    ) -> ConversationTurn:
         delta_note = ""
         original_fields = set(self._data.llm_suggested_specs.keys())
         artifact_was_analyzed = bool(self._data.artifact_path)
@@ -808,7 +1011,7 @@ class SkillBuilderConversation:
             retained_original = original_fields & set(self._data.fields)
             if retained_original:
                 delta_note = (
-                    f"\n⚠️ {len(delta_fields)} field(s) were added after the artifact analysis "
+                    f"\n{len(delta_fields)} field(s) were added after the artifact analysis "
                     f"({', '.join(delta_fields)}) — their descriptions were synthesised from "
                     "context and may need more refinement than the rest.\n"
                 )
@@ -819,7 +1022,7 @@ class SkillBuilderConversation:
             removed = original_fields - set(self._data.fields)
             if removed:
                 delta_note += (
-                    f"ℹ️ {len(removed)} field(s) identified in the artifact were removed "
+                    f"{len(removed)} field(s) identified in the artifact were removed "
                     f"({', '.join(sorted(removed))}) — remove them only if they're truly not needed.\n"
                 )
 
@@ -831,6 +1034,52 @@ class SkillBuilderConversation:
             lines.append(delta_note)
         else:
             lines.append("")
+
+        # Source-grounded review findings (ADR-026 Fix 4)
+        if source_review:
+            citations = source_review.get("_source_citations", [])
+            citation_str = ", ".join(citations) if citations else "live source"
+            lines.append(
+                f"\n=== Source-grounded review (against {citation_str}) ==="
+            )
+            summary = source_review.get("summary", "")
+            if summary:
+                lines.append(f"  {summary}")
+
+            unsupportable = source_review.get("unsupportable_fields", [])
+            if unsupportable:
+                lines.append(
+                    f"\n  Fields the source may NOT support ({len(unsupportable)}):"
+                )
+                for item in unsupportable:
+                    lines.append(
+                        f"    - {item.get('field', '?')}: {item.get('reason', '')}"
+                    )
+
+            additions = source_review.get("suggested_additions", [])
+            if additions:
+                lines.append(
+                    f"\n  Fields the source clearly CONTAINS but schema is missing ({len(additions)}):"
+                )
+                for item in additions:
+                    lines.append(
+                        f"    - {item.get('field', '?')}: {item.get('reason', '')}"
+                    )
+                lines.append(
+                    "  Use 'add <field>' at REVIEW_FIELDS or type the field name below to include it."
+                )
+
+            enum_corrections = source_review.get("enum_corrections", [])
+            if enum_corrections:
+                lines.append(f"\n  Enum corrections ({len(enum_corrections)}):")
+                for item in enum_corrections:
+                    lines.append(
+                        f"    - {item.get('field', '?')}: "
+                        f"declared {item.get('current_enum')} but source uses "
+                        f"{item.get('seen_in_source')} — {item.get('recommendation', '')}"
+                    )
+            lines.append("=== End source review ===\n")
+
         for f in self._data.fields:
             spec = self._data.field_specs.get(f, {})
             t = spec.get("type", "string")
@@ -851,10 +1100,14 @@ class SkillBuilderConversation:
             for f in self._data.fields
         ]
 
+        turn_data: dict = {"field_specs": field_data}
+        if source_review:
+            turn_data["source_review"] = source_review
+
         return ConversationTurn(
             state="REVIEW_SCHEMA",
             message="\n".join(lines),
-            data={"field_specs": field_data},
+            data=turn_data,
             options=["ok", "describe <field> as <text>", "set type of <field> to <type>"],
         )
 

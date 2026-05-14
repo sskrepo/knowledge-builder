@@ -52,10 +52,17 @@ def _analyze_pptx(p: Path) -> tuple[list[str], dict | None]:
         "title": {"kind": "slide_title", "slide": 0, "raw_title": "Title Slide"},
     }
 
+    total_text_shapes = 0
     for i, slide in enumerate(prs.slides):
         raw_title = ""
         if slide.shapes.title and slide.shapes.title.text:
             raw_title = slide.shapes.title.text.strip()
+        # Scan all shapes for any text, even if no slide title is present
+        slide_text_shapes = sum(
+            1 for shape in slide.shapes if shape.has_text_frame and shape.text_frame.text.strip()
+        )
+        total_text_shapes += slide_text_shapes
+
         if not raw_title:
             continue
         field = _to_field_name(raw_title)
@@ -79,6 +86,24 @@ def _analyze_pptx(p: Path) -> tuple[list[str], dict | None]:
                 "raw_title": raw_title,
                 "body_text": body_text,
             }
+
+    # ADR-026 Fix 1: image-only PPTX (no text shapes found) produces no usable fields.
+    # Hard-fail with a clear actionable error instead of silently returning a
+    # nearly-empty field list that triggers keyword heuristics downstream.
+    # Vision-LLM analysis for image-only slides is deferred to ADR-027.
+    if total_text_shapes == 0:
+        raise ValueError(
+            f"The uploaded PPTX '{p.name}' contains no text shapes "
+            f"({len(prs.slides)} slide(s), all image-only). "
+            "The framework cannot extract field names from an image-only presentation. "
+            "Options:\n"
+            "  1. Supply a text-bearing PPTX, DOCX, or Markdown file that represents "
+            "the output structure.\n"
+            "  2. Enter field names manually as a comma-separated list "
+            "(e.g. 'scope, assumptions, status_bullets, next_steps, key_milestones, "
+            "risks_mitigations, orm_status').\n"
+            "Vision-LLM analysis of image slides is planned for ADR-027."
+        )
 
     return fields, mapping if len(mapping) > 1 else None
 

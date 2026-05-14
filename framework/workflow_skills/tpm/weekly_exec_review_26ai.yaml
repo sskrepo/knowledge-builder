@@ -1,0 +1,101 @@
+workflow_skill: weekly_exec_review_26ai
+persona: tpm
+status: draft
+trigger:
+  on_request:
+    enabled: true
+    inputs:
+    - name: input
+      type: string
+      description: Query or filter input
+    output_format: pptx
+    response_mode: artifact_url
+skill_card:
+  summary: create a weekly exec-review PPT for the 26ai project, pulling status from
+    Confluence pages including https://confluence.oraclecorp.com/confluence/pages/viewpage.action?pageId=20030556732
+    (main) and ht
+  use_when: 'User asks for: create a weekly exec-review PPT for the 26ai project,
+    pulling status from Confluence pages including https://confluence.oraclecorp.com/confluence/pages/viewpage.action?pageId=20030556732
+    (main) and ht'
+  example_invocations:
+  - create a weekly exec-review PPT for the 26ai project, pulling status from Confluence
+    pages including
+  do_not_use_for: Single-fact lookups (use vector_search). Live operational data (use
+    query_fleet).
+requires_extractions:
+- kb: tpm.weekly_exec_review_26ai
+  required_fields:
+  - report_date
+  - project_name
+  - jira_id
+  - overall_rag
+  - executive_summary
+  - assumptions
+  - status_bullets
+  - next_steps
+  - key_milestones
+  - risks_mitigations
+  - orm_status
+- kb: tpm.tpm_weekly_ops
+  required_fields:
+  - week_id
+  - exec_asks
+- kb: ops_mgr.ops_mgr_escalation
+  required_fields:
+  - scope
+synthesis:
+  output_format: pptx
+  layout: weekly_exec_review_v1
+  template: synthesis/templates/weekly_exec_review_26ai.pptx
+  slide_mapping: synthesis/mappings/weekly_exec_review_26ai.yaml
+  field_mapping:
+    week_id:
+      section: Week Id
+      source_field: week_id
+    report_date:
+      section: Report Date
+      source_field: report_date
+    project_name:
+      section: Project Name
+      source_field: project_name
+    jira_id:
+      section: Jira Id
+      source_field: jira_id
+    overall_rag:
+      section: Overall Rag
+      source_field: overall_rag
+    executive_summary:
+      section: Executive Summary
+      source_field: executive_summary
+    scope:
+      section: Scope
+      source_field: scope
+    assumptions:
+      section: Assumptions
+      source_field: assumptions
+    status_bullets:
+      section: Status Bullets
+      source_field: status_bullets
+    next_steps:
+      section: Next Steps
+      source_field: next_steps
+    key_milestones:
+      section: Key Milestones
+      source_field: key_milestones
+    risks_mitigations:
+      section: Risks Mitigations
+      source_field: risks_mitigations
+    orm_status:
+      section: Orm Status
+      source_field: orm_status
+    exec_asks:
+      section: Exec Asks
+      source_field: exec_asks
+delivery:
+  kind: filesystem
+  path: ~/.kbf/outputs/weekly_exec_review_26ai.pptx
+eval:
+  gold_set: eval/gold_sets/tpm-weekly_exec_review_26ai-workflow.jsonl
+  exit_criteria:
+    field_accuracy: 0.85
+    delivery_success_rate: 0.99
