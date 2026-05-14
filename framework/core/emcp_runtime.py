@@ -37,6 +37,7 @@ import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
@@ -87,9 +88,14 @@ class EmcpRuntime:
         self._client_version = client_version
         self._seq = 1
         self._lock = threading.Lock()
+        # Serialise refresh-token grant — this server rotates refresh_token
+        # and invalidates the old one on use. Concurrent refreshes would burn
+        # the credential. Refresh from a single thread at a time.
+        self._refresh_lock = threading.Lock()
         self._cached_token: str | None = None
         self._cached_url: str | None = None
         self._cached_expires_at_ms: int | None = None
+        self._token_endpoint_cache: str | None = None
         self._initialized = False
 
     # ------------------------------------------------------------------
@@ -126,11 +132,20 @@ class EmcpRuntime:
             )
         return m.group(1)
 
-    def _load_credential(self) -> tuple[str, str, int]:
-        """Read the credential bundle from macOS Keychain.
+    def _load_credential_bundle(self) -> dict:
+        """Read the full credential bundle from macOS Keychain.
 
-        Returns (url, access_token, expires_at_ms). Raises EmcpAuthError if
-        the keychain item is missing or unparseable.
+        Bundle shape (codex's format):
+          {
+            "server_name": "...",
+            "url": "...",
+            "client_id": "...",
+            "token_response": {
+              "access_token": "...", "refresh_token": "...",
+              "token_type": "Bearer", "expires_in": 3600, "scope": "..."
+            },
+            "expires_at": <unix-ms>
+          }
         """
         try:
             raw = subprocess.check_output(
@@ -146,11 +161,39 @@ class EmcpRuntime:
                 f"Run `codex mcp login {self.server_name}` to (re-)establish the OAuth."
             ) from exc
         try:
-            bundle = json.loads(raw)
+            return json.loads(raw)
         except json.JSONDecodeError as exc:
             raise EmcpAuthError(
                 f"keychain entry for {self._keychain_account!r} is not JSON: {exc}"
             ) from exc
+
+    def _write_credential_bundle(self, bundle: dict) -> None:
+        """Persist updated credential bundle back to macOS Keychain.
+
+        Uses `security add-generic-password -U` (update if exists). Required
+        after a refresh-token grant because this server rotates the
+        refresh_token — codex needs the new bundle for its own subsequent
+        calls or both we and codex will fail with 400 on the next refresh.
+        """
+        proc = subprocess.run(
+            ["security", "add-generic-password", "-U",
+             "-s", "Codex MCP Credentials",
+             "-a", self._keychain_account,
+             "-w", json.dumps(bundle)],
+            capture_output=True, text=True,
+        )
+        if proc.returncode != 0:
+            raise EmcpAuthError(
+                f"keychain write failed for {self._keychain_account!r}: "
+                f"{proc.stderr.strip()[:200]}. "
+                f"This breaks subsequent refreshes — the refresh_token grant "
+                f"already consumed the old refresh_token. Run "
+                f"`codex mcp login {self.server_name}` to recover."
+            )
+
+    def _load_credential(self) -> tuple[str, str, int]:
+        """Legacy 3-tuple shape: (url, access_token, expires_at_ms)."""
+        bundle = self._load_credential_bundle()
         url = bundle.get("url")
         token = (bundle.get("token_response") or {}).get("access_token")
         expires_at = bundle.get("expires_at")
@@ -160,9 +203,154 @@ class EmcpRuntime:
             )
         return url, token, int(expires_at or 0)
 
+    # ------------------------------------------------------------------
+    # OAuth refresh-token flow
+    # ------------------------------------------------------------------
+
+    def _discover_token_endpoint(self) -> str:
+        """Discover the OAuth token endpoint via the RFC 9728 metadata chain:
+
+            POST <resource_url> → 401 with WWW-Authenticate carrying
+                                  resource_metadata=<url>
+            GET  /.well-known/oauth-protected-resource/<path>
+                → authorization_servers[0]
+            GET  /.well-known/oauth-authorization-server/<auth_path>
+                → token_endpoint
+
+        We skip the WWW-Authenticate step and use the resource URL we
+        already have. Cached after first successful discovery.
+        """
+        if self._token_endpoint_cache:
+            return self._token_endpoint_cache
+
+        # url comes from the keychain bundle — has the resource path baked in.
+        url, _, _ = self._load_credential()
+        parsed = urllib.parse.urlparse(url)
+        prm_url = (
+            f"{parsed.scheme}://{parsed.netloc}"
+            f"/.well-known/oauth-protected-resource{parsed.path}"
+        )
+        with urllib.request.urlopen(prm_url, timeout=self.timeout_s) as r:
+            prm = json.loads(r.read().decode("utf-8"))
+        auth_servers = prm.get("authorization_servers") or []
+        if not auth_servers:
+            raise EmcpAuthError(
+                f"{prm_url} returned no authorization_servers — cannot refresh"
+            )
+        as_url = auth_servers[0]
+        au = urllib.parse.urlparse(as_url)
+        asm_url = (
+            f"{au.scheme}://{au.netloc}"
+            f"/.well-known/oauth-authorization-server{au.path}"
+        )
+        with urllib.request.urlopen(asm_url, timeout=self.timeout_s) as r:
+            asm = json.loads(r.read().decode("utf-8"))
+        token_endpoint = asm.get("token_endpoint")
+        if not token_endpoint:
+            raise EmcpAuthError(
+                f"{asm_url} returned no token_endpoint — cannot refresh"
+            )
+        if "refresh_token" not in (asm.get("grant_types_supported") or []):
+            raise EmcpAuthError(
+                f"{asm_url} does not advertise refresh_token grant — "
+                f"manual `codex mcp login {self.server_name}` required"
+            )
+        self._token_endpoint_cache = token_endpoint
+        log.info(
+            "emcp[%s]: discovered token_endpoint=%s",
+            self.server_name, token_endpoint,
+        )
+        return token_endpoint
+
+    def _refresh_access_token(self) -> None:
+        """Run the OAuth refresh_token grant against the IdP, persist new
+        bundle to keychain, and update the in-memory cache.
+
+        Serialised by _refresh_lock — this server rotates refresh tokens
+        and invalidates the old one on use. Concurrent refreshes would
+        burn the credential. Inside the lock we also re-check the keychain
+        because another thread may have already refreshed while we waited.
+        """
+        with self._refresh_lock:
+            # Double-check: another thread may have refreshed while we waited.
+            bundle = self._load_credential_bundle()
+            now_ms = int(time.time() * 1000)
+            if int(bundle.get("expires_at") or 0) > now_ms + 60_000:
+                log.info(
+                    "emcp[%s]: another thread already refreshed; adopting new bundle",
+                    self.server_name,
+                )
+                self._cached_url = bundle["url"]
+                self._cached_token = bundle["token_response"]["access_token"]
+                self._cached_expires_at_ms = int(bundle["expires_at"])
+                return
+
+            refresh_token = (bundle.get("token_response") or {}).get("refresh_token")
+            client_id = bundle.get("client_id")
+            if not refresh_token or not client_id:
+                raise EmcpAuthError(
+                    f"keychain bundle for {self.server_name} missing "
+                    f"refresh_token or client_id — cannot refresh"
+                )
+
+            token_endpoint = self._discover_token_endpoint()
+            body = urllib.parse.urlencode({
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": client_id,
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                token_endpoint, method="POST", data=body,
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json",
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout_s) as r:
+                    new_tokens = json.loads(r.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")[:300]
+                raise EmcpAuthError(
+                    f"refresh_token grant rejected by {token_endpoint} "
+                    f"(HTTP {exc.code}): {detail}. The refresh_token may have "
+                    f"already been consumed or expired — run "
+                    f"`codex mcp login {self.server_name}` to recover."
+                ) from exc
+
+            expires_in_s = int(new_tokens.get("expires_in") or 3600)
+            new_bundle = {
+                **bundle,
+                "token_response": new_tokens,
+                "expires_at": int((time.time() + expires_in_s) * 1000),
+            }
+
+            # CRITICAL: persist back to keychain BEFORE updating in-memory
+            # cache. If write fails we don't want anyone to think we have a
+            # working token — the old refresh_token has been consumed and
+            # is no longer valid for either us or codex.
+            self._write_credential_bundle(new_bundle)
+            self._cached_url = new_bundle["url"]
+            self._cached_token = new_tokens["access_token"]
+            self._cached_expires_at_ms = new_bundle["expires_at"]
+            log.info(
+                "emcp[%s]: refreshed via OAuth refresh_token grant; "
+                "keychain updated (token expires in %.0f min)",
+                self.server_name, expires_in_s / 60,
+            )
+
     def _ensure_token(self, force_refresh: bool = False) -> tuple[str, str]:
-        """Return (url, access_token), refreshing from keychain when needed."""
-        # Refresh if forced, no cached token, or token expires within 60 s.
+        """Return (url, access_token).
+
+        Flow:
+          - Cache miss / force_refresh → reload from keychain.
+          - If keychain token also expired or within 60 s of expiring →
+            run OAuth refresh_token grant (which writes back to keychain).
+
+        The proactive expiry check is critical because the IdP rotates
+        refresh tokens on every use; we want at most one refresh per hour
+        per runtime, not one per request.
+        """
         now_ms = int(time.time() * 1000)
         if (
             force_refresh
@@ -175,10 +363,17 @@ class EmcpRuntime:
             self._cached_token = token
             self._cached_expires_at_ms = expires_at
             log.info(
-                "emcp[%s]: credential refreshed (expires in %.0f min)",
+                "emcp[%s]: credential loaded from keychain (expires in %.0f min)",
                 self.server_name,
                 max(0, (expires_at - now_ms) / 60_000),
             )
+            # Keychain entry itself is expired or near-expiry → refresh via OAuth.
+            if expires_at <= now_ms + 60_000:
+                log.info(
+                    "emcp[%s]: keychain token expired/near-expiry — "
+                    "running OAuth refresh", self.server_name,
+                )
+                self._refresh_access_token()
         return self._cached_url, self._cached_token  # type: ignore[return-value]
 
     # ------------------------------------------------------------------
@@ -223,13 +418,31 @@ class EmcpRuntime:
                 return r.status, r.read().decode("utf-8", errors="replace")
         except urllib.error.HTTPError as exc:
             if exc.code == 401 and not retried:
-                # Token might have just expired between our check and the
-                # request. Force-refresh from keychain (codex rotates them
-                # in the background) and try once more.
-                log.warning("emcp[%s]: 401 — refreshing token and retrying", self.server_name)
-                self._ensure_token(force_refresh=True)
+                # Two possibilities:
+                #   (a) keychain has a newer token codex rotated for us; or
+                #   (b) the token is actually expired and we need to run our
+                #       own refresh_token grant.
+                # Try (a) first by re-reading keychain; if that token is also
+                # stale (expired or matches what we just sent and failed),
+                # _ensure_token's proactive check inside _refresh_access_token
+                # will fire the OAuth grant.
+                log.warning(
+                    "emcp[%s]: 401 — re-reading keychain, then OAuth refresh",
+                    self.server_name,
+                )
+                try:
+                    # Always run the OAuth refresh on a real 401 — re-reading
+                    # the keychain alone won't help if codex hasn't rotated.
+                    self._refresh_access_token()
+                except EmcpAuthError:
+                    # Surface the auth failure, but include the original 401
+                    # body for diagnostics.
+                    raise
                 return self._post(body, retried=True)
-            raise EmcpError(f"HTTP {exc.code} from {self.server_name}: {exc.read().decode(errors='replace')[:200]}") from exc
+            raise EmcpError(
+                f"HTTP {exc.code} from {self.server_name}: "
+                f"{exc.read().decode(errors='replace')[:200]}"
+            ) from exc
         except urllib.error.URLError as exc:
             raise EmcpError(f"network error talking to {self.server_name}: {exc}") from exc
 
