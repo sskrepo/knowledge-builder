@@ -203,6 +203,189 @@ class TestCallTool:
             runtime.call_tool("get_page", {"page_id": "missing"})
 
 
+class TestTransientRetry:
+    """Retry-with-backoff on transient HTTP/network errors.
+
+    Real-world trigger (session synth-tpm-bcbc739d): emcp.oracle.com returned
+    HTTP 504 Gateway Timeout for a get_page call that worked fine 30 min earlier
+    and again 30 min later. Single-shot failure would unnecessarily kill an
+    ingest that a 2-second retry would have completed. Same for transient
+    network blips (DNS hiccup, TCP reset, etc.).
+    """
+
+    @pytest.fixture
+    def runtime(self, monkeypatch):
+        monkeypatch.setattr(
+            EmcpRuntime, "_discover_keychain_account_suffix",
+            staticmethod(lambda _: "deadbeef"),
+        )
+        monkeypatch.setattr(
+            "subprocess.check_output",
+            lambda *a, **kw: json.dumps(_FAKE_CRED),
+        )
+        # Suppress real sleeps so tests run fast.
+        monkeypatch.setattr("time.sleep", lambda _s: None)
+        r = EmcpRuntime(
+            server_name="central_confluence", timeout_s=5.0,
+            max_attempts=3, retry_backoffs_s=(0.01, 0.01),
+        )
+        r._initialized = True  # skip the init handshake for unit tests
+        return r
+
+    def test_504_then_200_succeeds_on_second_attempt(self, runtime, monkeypatch):
+        """Transient 504 from emcp gateway → retry → success."""
+        import urllib.error
+        call_n = {"i": 0}
+        def fake_urlopen(req, timeout):
+            call_n["i"] += 1
+            if call_n["i"] == 1:
+                raise urllib.error.HTTPError(
+                    "https://emcp.test/v2", 504, "Gateway Timeout", {},
+                    MagicMock(read=lambda: b'{"code":504,"message":"Gateway Timeout"}'),
+                )
+            return _mock_urlopen(
+                200,
+                b'event: message\ndata: {"jsonrpc":"2.0","id":7,"result":{"ok":true}}\n\n',
+            )
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+        status, body = runtime._post({"jsonrpc": "2.0", "id": 7, "method": "tools/list"})
+        assert status == 200
+        assert call_n["i"] == 2, "should have retried exactly once after 504"
+
+    @pytest.mark.parametrize("status_code", [408, 429, 500, 502, 503, 504])
+    def test_each_transient_status_triggers_retry(
+        self, runtime, monkeypatch, status_code,
+    ):
+        """Every status in the transient-retry set must trigger a retry."""
+        import urllib.error
+        call_n = {"i": 0}
+        def fake_urlopen(req, timeout):
+            call_n["i"] += 1
+            if call_n["i"] == 1:
+                raise urllib.error.HTTPError(
+                    "https://emcp.test/v2", status_code, "err", {},
+                    MagicMock(read=lambda: b"upstream slow"),
+                )
+            return _mock_urlopen(
+                200,
+                b'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{}}\n\n',
+            )
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+        status, _ = runtime._post({"jsonrpc":"2.0","id":1,"method":"tools/list"})
+        assert status == 200
+        assert call_n["i"] == 2, f"HTTP {status_code} must be retried"
+
+    @pytest.mark.parametrize("status_code", [400, 403, 404, 405, 409, 422])
+    def test_non_transient_status_does_not_retry(
+        self, runtime, monkeypatch, status_code,
+    ):
+        """4xx errors that are NOT in the transient set must fail immediately
+        — retrying a 404 forever wastes time and may hit rate limits."""
+        import urllib.error
+        call_n = {"i": 0}
+        def fake_urlopen(req, timeout):
+            call_n["i"] += 1
+            raise urllib.error.HTTPError(
+                "https://emcp.test/v2", status_code, "err", {},
+                MagicMock(read=lambda: b"client error"),
+            )
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+        with pytest.raises(EmcpError, match=f"HTTP {status_code}"):
+            runtime._post({"jsonrpc":"2.0","id":1,"method":"tools/list"})
+        assert call_n["i"] == 1, (
+            f"non-transient HTTP {status_code} must NOT be retried "
+            f"(got {call_n['i']} attempts)"
+        )
+
+    def test_network_error_triggers_retry(self, runtime, monkeypatch):
+        """URLError (DNS, connection refused, socket timeout) is transient."""
+        import urllib.error, socket
+        call_n = {"i": 0}
+        def fake_urlopen(req, timeout):
+            call_n["i"] += 1
+            if call_n["i"] < 3:
+                raise urllib.error.URLError(socket.timeout("timed out"))
+            return _mock_urlopen(
+                200,
+                b'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{}}\n\n',
+            )
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+        status, _ = runtime._post({"jsonrpc":"2.0","id":1,"method":"tools/list"})
+        assert status == 200
+        assert call_n["i"] == 3, "should have retried twice then succeeded"
+
+    def test_exhausted_retries_raise_with_diagnostic(self, runtime, monkeypatch):
+        """After max_attempts of 504, raise EmcpError with status+body context."""
+        import urllib.error
+        call_n = {"i": 0}
+        def fake_urlopen(req, timeout):
+            call_n["i"] += 1
+            raise urllib.error.HTTPError(
+                "https://emcp.test/v2", 504, "Gateway Timeout", {},
+                MagicMock(read=lambda: b'{"code":504,"message":"Gateway Timeout"}'),
+            )
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+        with pytest.raises(EmcpError, match=r"HTTP 504.*after 3 attempts"):
+            runtime._post({"jsonrpc":"2.0","id":1,"method":"tools/list"})
+        assert call_n["i"] == 3, "exactly max_attempts (3) attempts made"
+
+    def test_401_then_transient_then_success_composes_correctly(
+        self, runtime, monkeypatch,
+    ):
+        """If the very first response is 401 (run refresh) and the post-refresh
+        retry hits a 504 (transient), the runtime should refresh AND apply
+        transient retries — both budgets compose. Server-side 401 with a
+        keychain bundle that LOOKS valid (the case force=True handles)."""
+        import urllib.error
+        runtime._token_endpoint_cache = "https://idp.test/token"
+        monkeypatch.setattr(
+            "subprocess.run",
+            lambda *a, **kw: MagicMock(returncode=0, stderr=""),
+        )
+
+        call_n = {"i": 0, "log": []}
+        def fake_urlopen(req, timeout):
+            call_n["i"] += 1
+            call_n["log"].append(req.full_url)
+            url = req.full_url
+            # Call 1: tools/list returns 401
+            if call_n["i"] == 1:
+                raise urllib.error.HTTPError(
+                    url, 401, "Unauthorized", {},
+                    MagicMock(read=lambda: b'{"error":"invalid_token"}'),
+                )
+            # Call 2: refresh-token grant returns new tokens
+            if "/token" in url:
+                return _mock_urlopen(200, json.dumps({
+                    "access_token":"tok_new","refresh_token":"rt_new",
+                    "token_type":"Bearer","expires_in":3600,"scope":"",
+                }).encode())
+            # Call 3: post-refresh retry of tools/list returns 504 (transient)
+            if call_n["i"] == 3:
+                raise urllib.error.HTTPError(
+                    url, 504, "Gateway Timeout", {},
+                    MagicMock(read=lambda: b'{"code":504}'),
+                )
+            # Call 4: transient retry returns 200
+            return _mock_urlopen(
+                200,
+                b'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"ok":true}}\n\n',
+            )
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+        status, _ = runtime._post({"jsonrpc":"2.0","id":1,"method":"tools/list"})
+        assert status == 200
+        # 1 initial (401) + refresh-grant + 1 retry (504) + 1 retry (200) = 4
+        assert call_n["i"] == 4, (
+            f"expected 4 HTTP calls (init + refresh + 2 retries), got {call_n}"
+        )
+
+
 class TestOAuthRefresh:
     """OAuth refresh-token grant flow — the IdP rotates refresh tokens
     on every use, so the runtime must (a) serialise refreshes, (b) write

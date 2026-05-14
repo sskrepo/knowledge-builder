@@ -66,6 +66,12 @@ class EmcpRuntime:
 
     PROTOCOL_VERSION = "2025-06-18"
 
+    # HTTP statuses we treat as transient — retry with backoff.
+    # 408 = Request Timeout (client side timeout)
+    # 429 = Too Many Requests (rate limit)
+    # 500/502/503/504 = upstream errors (Confluence backend slow/unreachable)
+    _TRANSIENT_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+
     def __init__(
         self,
         server_name: str,
@@ -74,10 +80,17 @@ class EmcpRuntime:
         timeout_s: float = 60.0,
         client_name: str = "kbf-emcp-direct",
         client_version: str = "1.0.0",
+        max_attempts: int = 3,
+        retry_backoffs_s: tuple[float, ...] = (2.0, 5.0),
     ) -> None:
         """server_name: codex MCP server label (e.g. 'central_confluence').
         keychain_account_suffix: hex hash codex appends to the account name.
             If omitted, we auto-discover it from `security dump-keychain`.
+        max_attempts: total attempts per request (1 initial + N retries).
+            Default 3 → up to 2 retries on transient HTTP/network errors.
+        retry_backoffs_s: sleep durations BEFORE retries 2, 3, ... (cycles
+            from the last entry if more retries than entries). Default
+            (2, 5) → waits 2s then 5s before the two retries.
         """
         self.server_name = server_name
         if not keychain_account_suffix:
@@ -86,6 +99,8 @@ class EmcpRuntime:
         self.timeout_s = timeout_s
         self._client_name = client_name
         self._client_version = client_version
+        self.max_attempts = max(1, int(max_attempts))
+        self.retry_backoffs_s = retry_backoffs_s or (2.0,)
         self._seq = 1
         self._lock = threading.Lock()
         # Serialise refresh-token grant — this server rotates refresh_token
@@ -262,28 +277,36 @@ class EmcpRuntime:
         )
         return token_endpoint
 
-    def _refresh_access_token(self) -> None:
+    def _refresh_access_token(self, force: bool = False) -> None:
         """Run the OAuth refresh_token grant against the IdP, persist new
         bundle to keychain, and update the in-memory cache.
 
         Serialised by _refresh_lock — this server rotates refresh tokens
         and invalidates the old one on use. Concurrent refreshes would
-        burn the credential. Inside the lock we also re-check the keychain
-        because another thread may have already refreshed while we waited.
+        burn the credential.
+
+        force=False (default): if the keychain bundle says it's still valid
+            (>60 s remaining), adopt it instead of calling the IdP. This is
+            the "another thread already refreshed" / "codex rotated in the
+            background" path.
+        force=True: bypass the early-return and always call the IdP grant.
+            Use this from the 401-handler in _post — when the server says
+            401, the cached token is bad regardless of what the keychain's
+            expires_at says.
         """
         with self._refresh_lock:
-            # Double-check: another thread may have refreshed while we waited.
             bundle = self._load_credential_bundle()
-            now_ms = int(time.time() * 1000)
-            if int(bundle.get("expires_at") or 0) > now_ms + 60_000:
-                log.info(
-                    "emcp[%s]: another thread already refreshed; adopting new bundle",
-                    self.server_name,
-                )
-                self._cached_url = bundle["url"]
-                self._cached_token = bundle["token_response"]["access_token"]
-                self._cached_expires_at_ms = int(bundle["expires_at"])
-                return
+            if not force:
+                now_ms = int(time.time() * 1000)
+                if int(bundle.get("expires_at") or 0) > now_ms + 60_000:
+                    log.info(
+                        "emcp[%s]: another thread already refreshed; adopting new bundle",
+                        self.server_name,
+                    )
+                    self._cached_url = bundle["url"]
+                    self._cached_token = bundle["token_response"]["access_token"]
+                    self._cached_expires_at_ms = int(bundle["expires_at"])
+                    return
 
             refresh_token = (bundle.get("token_response") or {}).get("refresh_token")
             client_id = bundle.get("client_id")
@@ -397,54 +420,123 @@ class EmcpRuntime:
         # Plain JSON fallback.
         return json.loads(body)
 
-    def _post(self, body: dict, *, retried: bool = False) -> tuple[int, str]:
-        """Single POST; raises EmcpAuthError on 401, EmcpError on other errors.
+    def _post(self, body: dict) -> tuple[int, str]:
+        """POST with retry-on-transient-error and one OAuth refresh.
 
-        On 401 the caller can retry once after force-refreshing the token.
+        Retry policy:
+          - HTTP 5xx (500/502/503/504), 408, 429 → transient, retry with backoff
+          - Network errors (URLError, timeouts) → transient, retry with backoff
+          - 401 → run OAuth refresh-token grant ONCE (separate from transient
+            budget), then continue the loop
+          - Other 4xx / parse errors → raise immediately
+
+        Backoff schedule: self.retry_backoffs_s (default (2, 5) — total ~7 s
+        of sleep plus per-attempt urlopen timeouts). After max_attempts the
+        last error is surfaced with full diagnostic.
+
+        Returns (status, body_text) on success.
         """
-        url, token = self._ensure_token()
-        req = urllib.request.Request(
-            url, method="POST",
-            data=json.dumps(body).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-                "MCP-Protocol-Version": self.PROTOCOL_VERSION,
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout_s) as r:
-                return r.status, r.read().decode("utf-8", errors="replace")
-        except urllib.error.HTTPError as exc:
-            if exc.code == 401 and not retried:
-                # Two possibilities:
-                #   (a) keychain has a newer token codex rotated for us; or
-                #   (b) the token is actually expired and we need to run our
-                #       own refresh_token grant.
-                # Try (a) first by re-reading keychain; if that token is also
-                # stale (expired or matches what we just sent and failed),
-                # _ensure_token's proactive check inside _refresh_access_token
-                # will fire the OAuth grant.
+        refresh_attempted = False
+        transient_attempts = 0
+        last_http_status: int | None = None
+        last_http_body: str = ""
+        last_network_exc: Exception | None = None
+
+        while transient_attempts < self.max_attempts:
+            # Re-fetch token at the top of each attempt — it may have been
+            # refreshed by a previous iteration of this loop, or by another
+            # thread holding the refresh lock.
+            url, token = self._ensure_token()
+
+            if transient_attempts > 0:
+                # Index into backoffs, clamping at the last entry if we
+                # somehow have more retries than backoff entries.
+                idx = min(transient_attempts - 1, len(self.retry_backoffs_s) - 1)
+                delay = self.retry_backoffs_s[idx]
                 log.warning(
-                    "emcp[%s]: 401 — re-reading keychain, then OAuth refresh",
-                    self.server_name,
+                    "emcp[%s]: retry %d/%d — sleeping %.1fs before next attempt",
+                    self.server_name, transient_attempts, self.max_attempts - 1, delay,
                 )
+                time.sleep(delay)
+
+            req = urllib.request.Request(
+                url, method="POST",
+                data=json.dumps(body).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                    "MCP-Protocol-Version": self.PROTOCOL_VERSION,
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout_s) as r:
+                    return r.status, r.read().decode("utf-8", errors="replace")
+            except urllib.error.HTTPError as exc:
+                # 401 is special: run OAuth refresh ONCE, then continue loop
+                # without consuming a transient retry slot.
+                if exc.code == 401 and not refresh_attempted:
+                    log.warning(
+                        "emcp[%s]: 401 — running OAuth refresh-token grant",
+                        self.server_name,
+                    )
+                    # force=True: server said 401, so the cached token is bad
+                    # regardless of what the keychain's expires_at claims.
+                    # The early-return inside _refresh_access_token would
+                    # otherwise adopt the same bad token and we'd loop.
+                    self._refresh_access_token(force=True)  # may raise EmcpAuthError
+                    refresh_attempted = True
+                    continue
+
+                # Read the body once — exc.read() is consumed after first call.
                 try:
-                    # Always run the OAuth refresh on a real 401 — re-reading
-                    # the keychain alone won't help if codex hasn't rotated.
-                    self._refresh_access_token()
-                except EmcpAuthError:
-                    # Surface the auth failure, but include the original 401
-                    # body for diagnostics.
-                    raise
-                return self._post(body, retried=True)
+                    body_preview = exc.read().decode("utf-8", errors="replace")[:300]
+                except Exception:
+                    body_preview = ""
+
+                if exc.code in self._TRANSIENT_HTTP_STATUSES:
+                    last_http_status = exc.code
+                    last_http_body = body_preview
+                    transient_attempts += 1
+                    log.warning(
+                        "emcp[%s]: HTTP %d (transient) — attempt %d/%d failed: %s",
+                        self.server_name, exc.code, transient_attempts,
+                        self.max_attempts, body_preview[:120],
+                    )
+                    continue
+
+                # Non-transient HTTP error — raise immediately.
+                raise EmcpError(
+                    f"HTTP {exc.code} from {self.server_name}: {body_preview}"
+                ) from exc
+
+            except urllib.error.URLError as exc:
+                # Network-level failure (DNS, refused, socket timeout).
+                # urllib wraps socket.timeout in URLError too. Treat as transient.
+                last_network_exc = exc
+                transient_attempts += 1
+                log.warning(
+                    "emcp[%s]: network error (transient) — attempt %d/%d: %s",
+                    self.server_name, transient_attempts, self.max_attempts, exc,
+                )
+                continue
+
+        # Exhausted retry budget — surface the last error with full context.
+        if last_http_status is not None:
             raise EmcpError(
-                f"HTTP {exc.code} from {self.server_name}: "
-                f"{exc.read().decode(errors='replace')[:200]}"
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise EmcpError(f"network error talking to {self.server_name}: {exc}") from exc
+                f"HTTP {last_http_status} from {self.server_name} after "
+                f"{self.max_attempts} attempts (last body: {last_http_body[:200]})"
+            )
+        if last_network_exc is not None:
+            raise EmcpError(
+                f"network error talking to {self.server_name} after "
+                f"{self.max_attempts} attempts: {last_network_exc}"
+            ) from last_network_exc
+        # Should be unreachable
+        raise EmcpError(
+            f"emcp[{self.server_name}]: unreachable retry-loop exit "
+            f"(attempts={transient_attempts}/{self.max_attempts})"
+        )
 
     def _ensure_initialized(self) -> None:
         """Run the MCP initialize handshake once per process lifetime."""
