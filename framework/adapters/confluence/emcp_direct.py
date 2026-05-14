@@ -155,27 +155,42 @@ class ConfluenceEmcpDirectAdapter:
             )
 
     def fetch(self, ref: RawItemRef) -> RawItem:
-        """Fetch a specific Confluence page by id (or full URL passed as id)."""
-        # The emcp server's `get_page` accepts a numeric page_id. If we were
-        # given a full URL, the calling layer (skill_builder) has already
-        # extracted the id where possible. For safety we still pass whatever
-        # we got. If it's a URL, the server's get_page tool typically returns
-        # a sparse/error response that we detect post-parse and surface as a
-        # clear FileNotFoundError rather than letting a downstream
-        # `.lower()` crash on None metadata.
-        text = self.runtime.call_tool_for_text(
-            self._TOOL_GET_PAGE,
-            {
-                "page_id": ref.source_id,
-                "convert_to_markdown": True,
-                "include_metadata": True,
-            },
-        )
+        """Fetch a specific Confluence page by numeric id or URL.
+
+        The emcp Confluence MCP server exposes TWO tools that retrieve a page:
+          - `get_page`: accepts a numeric page_id or (title + space_key).
+                        Explicitly does NOT accept URLs ("Confluence page ID
+                        or tiny-link shortcode only, not a URL").
+          - `fetch`:    accepts a canonical page URL, a tiny link, OR a numeric
+                        page ID. Universal — resolves URLs server-side.
+
+        We dispatch based on input shape so the user can paste either form:
+          - URL or http-prefixed → `fetch` (URL-resolving)
+          - everything else (pure digits, tiny-link)      → `get_page`
+        Both tools return the same response shape, so normalize() is unchanged.
+        """
+        source_id = str(ref.source_id)
+        is_url = source_id.startswith(("http://", "https://"))
+
+        if is_url:
+            text = self.runtime.call_tool_for_text(
+                self._TOOL_FETCH, {"id": source_id},
+            )
+        else:
+            text = self.runtime.call_tool_for_text(
+                self._TOOL_GET_PAGE,
+                {
+                    "page_id": source_id,
+                    "convert_to_markdown": True,
+                    "include_metadata": True,
+                },
+            )
+        tool_used = self._TOOL_FETCH if is_url else self._TOOL_GET_PAGE
         try:
             payload = json.loads(text)
         except json.JSONDecodeError as exc:
             raise EmcpError(
-                f"emcp_direct fetch: non-JSON response from get_page({ref.source_id}): "
+                f"emcp_direct fetch: non-JSON response from {tool_used}({source_id}): "
                 f"{text[:200]}"
             ) from exc
 
@@ -193,18 +208,17 @@ class ConfluenceEmcpDirectAdapter:
         if meta.get("error") == "not_found" or payload.get("error") == "not_found":
             raise FileNotFoundError(f"Confluence page {ref.source_id} not found")
 
-        # Sanity check: a successful get_page MUST yield at least a title
-        # and a space key. If both are missing the server probably returned
-        # an error envelope (e.g. when source_id was a URL it couldn't
-        # resolve to a page-id). Surface as FileNotFoundError so the
-        # ingest pipeline records a clear failure rather than crashing
-        # downstream at `space.lower()`.
+        # Sanity check: a successful fetch MUST yield at least a title and
+        # a space key. If both are missing the server returned an error
+        # envelope or could not resolve the input. Surface as
+        # FileNotFoundError so the ingest pipeline records a clear failure
+        # rather than crashing downstream at `space.lower()`.
         if not meta.get("title") and not (meta.get("space") or {}).get("key"):
             raise FileNotFoundError(
-                f"Confluence page {ref.source_id!r}: get_page returned no usable "
-                f"metadata (title/space missing). If the source_id is a URL, "
-                f"the server may not support URL-based lookup — try the numeric "
-                f"page id from /pages/<id>/ instead."
+                f"Confluence page {source_id!r}: {tool_used} returned no usable "
+                f"metadata (title/space missing). The page may not exist, may be "
+                f"inaccessible to this OAuth identity, or the URL/tiny-link could "
+                f"not be resolved."
             )
 
         return self.normalize(payload=payload, meta=meta, content=content,

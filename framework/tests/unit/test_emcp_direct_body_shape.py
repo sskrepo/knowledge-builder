@@ -115,6 +115,52 @@ class TestEmcpDirectBodyShape:
         ))
         assert item.metadata.get("title") == "At least a title"
 
+    def test_fetch_dispatches_to_fetch_tool_for_url_source_id(self, adapter):
+        """The emcp `fetch` tool natively resolves URLs / tiny-links / IDs.
+        The `get_page` tool explicitly rejects URLs. Dispatch on input shape
+        so users can paste either form. Regression for session
+        synth-tpm-bcbc739d's page-2 failure where a URL was sent to get_page
+        and came back with empty metadata."""
+        adapter.runtime.call_tool_for_text.return_value = (
+            '{"results":{"metadata":{"id":"20090907433","title":"Project Plan",'
+            '"space":{"key":"OCIFACP"},"version":1,"updated":"2026-05-13",'
+            '"content":{"value":"body"}}}}'
+        )
+        adapter.fetch(RawItemRef(
+            kind="confluence_page", source="confluence",
+            source_id="https://confluence.oraclecorp.com/confluence/display/OCIFACP/Project+Plan",
+        ))
+        # Check which tool was called — must be 'fetch', not 'get_page'.
+        call_args = adapter.runtime.call_tool_for_text.call_args
+        tool_name = call_args.args[0] if call_args.args else call_args.kwargs.get("name")
+        assert tool_name == "fetch", (
+            f"URL source_id must dispatch to 'fetch' tool (URL-aware), got {tool_name!r}"
+        )
+        # And the args should be {'id': <url>}, not {'page_id': ...}.
+        tool_args = call_args.args[1] if len(call_args.args) > 1 else None
+        assert tool_args and "id" in tool_args
+        assert tool_args["id"].startswith("https://")
+
+    def test_fetch_dispatches_to_get_page_for_numeric_id(self, adapter):
+        """Numeric IDs use the get_page tool with the richer arg set."""
+        adapter.runtime.call_tool_for_text.return_value = (
+            '{"results":{"metadata":{"id":"20030556732","title":"Status",'
+            '"space":{"key":"OCIFACP"},"version":42,"updated":"2026-05-13",'
+            '"content":{"value":"body"}}}}'
+        )
+        adapter.fetch(RawItemRef(
+            kind="confluence_page", source="confluence",
+            source_id="20030556732",
+        ))
+        call_args = adapter.runtime.call_tool_for_text.call_args
+        tool_name = call_args.args[0] if call_args.args else None
+        tool_args = call_args.args[1] if len(call_args.args) > 1 else None
+        assert tool_name == "get_page"
+        # get_page takes 'page_id' (NOT 'id') and supports the rich options.
+        assert tool_args and tool_args.get("page_id") == "20030556732"
+        assert tool_args.get("convert_to_markdown") is True
+        assert tool_args.get("include_metadata") is True
+
 
 class TestIngestorRobustToBodyShape:
     """Belt-and-suspenders: even if a future adapter regresses to plain-string
