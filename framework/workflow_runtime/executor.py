@@ -305,39 +305,188 @@ class WorkflowExecutor:
         return []
 
     def _synthesize(self, cfg: dict, inputs: dict, passages: list[dict]) -> dict:
-        # Map passages → structured data per slide_mapping
-        # Simple heuristic: if first passage has structured metadata, use it directly
+        """Convert retrieved passages → structured slide data.
+
+        Two paths:
+          1. LLM-based extraction (preferred): when the skill's KB has a JSON
+             schema at framework/parsers/schemas/{persona}/{kb}/v1.json AND
+             passage text content exists AND an LLM client is wired, ask the
+             model to extract the schema-defined fields from passage text and
+             return them as JSON. This is what produces a real exec-review
+             PPT with status_bullets / risks_mitigations / overall_rag /
+             key_milestones etc. — not just page metadata.
+          2. Metadata-merge fallback: if no schema/text/LLM, merge passage
+             metadata dicts and dump them as sections. Preserves the old
+             behaviour for incident_summary / release_brief style skills
+             where retrievers return pre-structured records.
+
+        Field-mapping (cfg.synthesis.field_mapping) is applied last to rename
+        schema field names to human-readable slide section labels.
+        """
         sections: dict[str, Any] = {}
+        extracted: dict[str, Any] = {}
         merged_meta: dict = {}
         for p in passages:
             if isinstance(p.get("metadata"), dict):
                 merged_meta.update(p["metadata"])
 
-        # Apply slide mapping if present
+        # 1. LLM-based extraction from passage text per first KB's schema.
+        schema = self._lookup_schema(cfg)
+        full_text = "\n\n---\n\n".join(
+            p.get("text", "") for p in passages if p.get("text")
+        ).strip()
+
+        if schema and full_text and self.llm is not None:
+            try:
+                extracted = self._llm_extract_fields(schema, full_text, inputs)
+                log.info(
+                    "synth: LLM extracted %d/%d schema fields from %d chars of passage text",
+                    sum(1 for v in extracted.values() if v),
+                    len(schema.get("properties", {})),
+                    len(full_text),
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("synth: LLM extract failed: %s — falling back to metadata", exc)
+                extracted = {}
+
+        # 2. Apply field_mapping (from skill yaml) — maps schema field → section label.
+        field_mapping = cfg.get("synthesis", {}).get("field_mapping") or {}
+        if extracted and field_mapping:
+            for schema_field, fm_cfg in field_mapping.items():
+                if not isinstance(fm_cfg, dict):
+                    continue
+                src = fm_cfg.get("source_field", schema_field)
+                label = fm_cfg.get("section", schema_field.replace("_", " ").title())
+                val = extracted.get(src)
+                if val is not None and val != "" and val != []:
+                    sections[label] = val
+        elif extracted:
+            # No mapping — use Title Case on schema field names.
+            sections = {k.replace("_", " ").title(): v for k, v in extracted.items()
+                        if v not in (None, "", [])}
+
+        # 3. Apply legacy slide_mapping yaml if present (for skills that still
+        # use a separate mapping file rather than inlining it).
         mapping_path = cfg.get("synthesis", {}).get("slide_mapping")
-        if mapping_path:
+        if not sections and mapping_path:
             mp = REPO_ROOT / mapping_path
             if mp.exists():
                 mapping = yaml.safe_load(mp.read_text()) or {}
+                source = extracted or merged_meta
                 for sec_name, sec_cfg in mapping.get("sections", {}).items():
                     src = sec_cfg.get("source_field") if isinstance(sec_cfg, dict) else sec_cfg
-                    val = merged_meta.get(src)
+                    val = source.get(src)
                     if val is not None:
-                        sections[sec_cfg.get("section", sec_name) if isinstance(sec_cfg, dict) else sec_name] = val
+                        label = sec_cfg.get("section", sec_name) if isinstance(sec_cfg, dict) else sec_name
+                        sections[label] = val
 
-        # Fallback: dump everything from merged metadata
+        # 4. Last-resort: dump merged passage metadata as sections.
         if not sections:
+            log.warning(
+                "synth: no schema-extracted fields — falling back to metadata dump"
+                " (this is why slides may look like Page Id / Title / Path)"
+            )
             sections = {k.replace("_", " ").title(): v for k, v in merged_meta.items()}
 
-        title = cfg.get("synthesis", {}).get("title") or merged_meta.get("title") or \
-                cfg.get("workflow_skill", "Generated Output")
+        title = (
+            cfg.get("synthesis", {}).get("title")
+            or extracted.get("project_name")
+            or merged_meta.get("title")
+            or cfg.get("workflow_skill", "Generated Output")
+        )
         return {
             "title": title,
             "subtitle": f"Generated by {cfg.get('workflow_skill')} for inputs={inputs}",
             "sections": sections,
-            "citations": [p.get("citation") for p in passages],
+            "extracted": extracted,
+            "citations": [p.get("citation") for p in passages if p.get("citation")],
             "generated_at": datetime.utcnow().isoformat() + "Z",
         }
+
+    # ------------------------------------------------------------------
+    # Synthesis helpers
+    # ------------------------------------------------------------------
+
+    def _lookup_schema(self, cfg: dict) -> dict | None:
+        """Resolve framework/parsers/schemas/{persona}/{kb}/v1.json from the
+        skill's first requires_extractions entry. Returns parsed schema or
+        None if not found.
+        """
+        requires = cfg.get("requires_extractions") or []
+        if not requires:
+            return None
+        kb_full = requires[0].get("kb") or ""
+        if "." not in kb_full:
+            return None
+        persona, kb_name = kb_full.split(".", 1)
+        schema_path = (
+            REPO_ROOT / "framework" / "parsers" / "schemas"
+            / persona / kb_name / "v1.json"
+        )
+        if not schema_path.exists():
+            log.info("synth: no schema at %s", schema_path)
+            return None
+        try:
+            return json.loads(schema_path.read_text())
+        except Exception as exc:  # noqa: BLE001
+            log.warning("synth: failed to parse schema %s: %s", schema_path, exc)
+            return None
+
+    def _llm_extract_fields(
+        self, schema: dict, text: str, inputs: dict,
+    ) -> dict[str, Any]:
+        """Ask the LLM to extract schema-defined fields from ``text``.
+
+        Uses chat(response_format=json_object) and returns the parsed dict.
+        Truncates the input text to keep prompt size sane.
+        """
+        import re as _re
+
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        field_lines = []
+        for name, prop in properties.items():
+            type_hint = prop.get("type", "string")
+            enum = prop.get("enum")
+            desc = prop.get("description", "")
+            extra = f" (one of: {enum})" if enum else ""
+            req_tag = " [required]" if name in required else ""
+            field_lines.append(f'  - "{name}" ({type_hint}{extra}){req_tag}: {desc}')
+
+        # Truncate to stay well under context budget (Confluence pages are tame
+        # — typical 5-15k chars; we cap at 24k chars of passage text).
+        snippet = text[:24000]
+
+        prompt = (
+            "You are extracting structured fields from a Confluence/wiki page "
+            "to populate an executive-review presentation. Return a single JSON "
+            "object with EXACTLY these keys (use empty string \"\" or empty "
+            "list [] when a field is genuinely absent — do not invent data):\n\n"
+            f"{chr(10).join(field_lines)}\n\n"
+            f"User request: {inputs.get('input', '')}\n\n"
+            "=== Source document ===\n"
+            f"{snippet}\n"
+            "=== End source ===\n\n"
+            "Respond with ONLY the JSON object, no prose, no markdown fences."
+        )
+
+        result = self.llm.chat(
+            model="synthesis",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            max_tokens=4096,
+        )
+        raw = result.get("text", "") if isinstance(result, dict) else str(result)
+        # Some providers wrap JSON in ```json fences despite response_format.
+        cleaned = _re.sub(r"```(?:json)?\n?(.*?)\n?```", r"\1", raw, flags=_re.S).strip()
+        # Best-effort: find the first {...} block if there's stray prose.
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            m = _re.search(r"\{.*\}", cleaned, _re.S)
+            if not m:
+                raise
+            return json.loads(m.group())
 
     def _render(self, cfg: dict, data: dict) -> bytes:
         from ..renderers.registry import get_renderer
