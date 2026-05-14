@@ -1353,8 +1353,47 @@ class SkillBuilderConversation:
             for f, spec in properties.items()
         }
 
-        # Populate reuse_result from design.reuse_plan
+        # Populate reuse_result from design.reuse_plan, but filter out any
+        # hallucinated KB references. The DESIGN_SKILL LLM occasionally
+        # invents KB names (e.g. 'tpm_dependencies') that look plausible
+        # but don't exist in the persona builder index. If we let those
+        # through, ADR-017 link validation correctly blocks promotion.
+        # Filter against the real KB index (ShimKb) so reuse covers only
+        # KBs the framework actually knows about.
         reuse_plan = design.get("reuse_plan", {"covered": {}, "gaps": list(self._data.fields)})
+        known_kbs: set[str] = set()
+        try:
+            from ..orchestrator.shim_kb import ShimKb
+            shim = ShimKb(REPO_ROOT / "framework" / "persona_builders")
+            for card in (shim.all_cards() if hasattr(shim, "all_cards") else []):
+                # Cards are keyed as 'persona.kb_name'; also accept the short form
+                name = card.get("name") or ""
+                persona_owner = card.get("persona") or ""
+                if name:
+                    known_kbs.add(name)
+                    if persona_owner:
+                        known_kbs.add(f"{persona_owner}.{name}")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("_run_design_skill: could not load ShimKb to validate reuse_plan: %s", exc)
+        if known_kbs:
+            filtered_covered: dict = {}
+            dropped: list[str] = []
+            for fld, kb in (reuse_plan.get("covered") or {}).items():
+                if kb in known_kbs:
+                    filtered_covered[fld] = kb
+                else:
+                    dropped.append(f"{fld}→{kb}")
+            if dropped:
+                log.warning(
+                    "_run_design_skill: dropping %d reuse claims referencing unknown KBs: %s",
+                    len(dropped), dropped[:5],
+                )
+            # Any field whose claimed KB was dropped now flows into the new
+            # skill's KB (the workflow synthesizer handles this automatically
+            # via _build_requires_extractions — fields not in covered_fields
+            # are owned by the new KB).
+            reuse_plan = dict(reuse_plan)
+            reuse_plan["covered"] = filtered_covered
         self._data.reuse_result = reuse_plan
 
         # Populate trigger and output_format from design.workflow_shape
@@ -3254,7 +3293,11 @@ Rules:
                     f"'{sample.get('source_citation', '?')}'. Error: {exc}."
                 ) from exc
 
-            source_snippet = str(sample.get("content", ""))[:500]
+            # Faithfulness judge needs to find the extracted value in the
+            # snippet. _llm_extract uses 12k chars; the judge MUST get the
+            # same window or it will return faithful=false for any value
+            # not in the first 500 chars (most of them). Match the budget.
+            source_snippet = str(sample.get("content", ""))[:12000]
             gold_row = {
                 "kind": "auto_generated",
                 "source_citation": sample.get("source_citation", "?"),
