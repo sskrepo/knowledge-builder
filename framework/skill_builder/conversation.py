@@ -75,6 +75,19 @@ def _build_confluence_adapter(kbf_env: str, repo_root: "Path"):
             log.info("Confluence adapter: codex_cli server_name=%s", cc_cfg.get("server_name"))
             return ConfluenceCodexCLIAdapter(cc_cfg)
 
+        if mode == "emcp_direct":
+            # Direct HTTPS+OAuth to the emcp.oracle.com Confluence MCP server.
+            # Uses the bearer token codex stored in the macOS Keychain (after
+            # `codex mcp login central_confluence`). ~10s/page versus the 180s
+            # timeout we saw with codex_proxy (BUG-queue-d3ec0).
+            from ..adapters.confluence.emcp_direct import ConfluenceEmcpDirectAdapter
+            ed_cfg = {**merged.get("emcp_direct", {}), **overrides.get("emcp_direct", {})}
+            log.info(
+                "Confluence adapter: emcp_direct server_name=%s",
+                ed_cfg.get("server_name"),
+            )
+            return ConfluenceEmcpDirectAdapter(ed_cfg)
+
         if mode == "mcp":
             from ..adapters.confluence.mcp import ConfluenceMcpAdapter
             log.info("Confluence adapter: mcp endpoint=%s", merged.get("mcp", {}).get("endpoint"))

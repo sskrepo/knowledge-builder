@@ -67,6 +67,15 @@ def _build_confluence_adapter(cfg: dict, kbf_env: str):
             log.info("ingestion_worker: Confluence codex_cli server_name=%s", cc_cfg.get("server_name"))
             return ConfluenceCodexCLIAdapter(cc_cfg)
 
+        if mode == "emcp_direct":
+            from ..adapters.confluence.emcp_direct import ConfluenceEmcpDirectAdapter
+            ed_cfg = {**merged.get("emcp_direct", {}), **overrides.get("emcp_direct", {})}
+            log.info(
+                "ingestion_worker: Confluence emcp_direct server_name=%s",
+                ed_cfg.get("server_name"),
+            )
+            return ConfluenceEmcpDirectAdapter(ed_cfg)
+
         if mode == "mcp":
             from ..adapters.confluence.mcp import ConfluenceMcpAdapter
             log.info("ingestion_worker: Confluence mcp endpoint=%s", merged.get("mcp", {}).get("endpoint"))
