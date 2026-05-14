@@ -1026,6 +1026,30 @@ class SkillBuilderConversation:
 
     def _advance_to_configure_sources(self) -> ConversationTurn:
         self._state = "CONFIGURE_SOURCES"
+
+        # Pre-populate sources from anything we can salvage out of the intent
+        # text — Confluence URLs and bare 'pageId=N' references. Client LLMs
+        # often compress a pasted URL into 'pageId=N' before the tool-call,
+        # losing the URL but keeping the id. We catch both here so the user
+        # doesn't have to re-state what's already in their intent.
+        # (See session synth-tpm-3bda58fe.) Only auto-add if no sources yet —
+        # don't clobber what the user has explicitly entered.
+        if not self._data.sources and self._data.intent_description:
+            auto = _extract_confluence_sources_from_text(self._data.intent_description)
+            if auto:
+                self._data.sources.extend(auto)
+                summary = "\n".join(f"  • {s}" for s in auto)
+                return ConversationTurn(
+                    state="CONFIGURE_SOURCES",
+                    message=(
+                        "I extracted these Confluence references from your intent:\n\n"
+                        f"{summary}\n\n"
+                        "These are pre-populated as sources. You can add more "
+                        "(URLs, page-ids, label filters, Jira, Git) or type 'done'."
+                    ),
+                    options=["done", "add another source"],
+                )
+
         return ConversationTurn(
             state="CONFIGURE_SOURCES",
             message=(
@@ -2053,6 +2077,56 @@ def _extract_confluence_page_id(url: str) -> str | None:
     return None
 
 
+def _extract_confluence_sources_from_text(text: str) -> list[dict]:
+    """Find Confluence URLs / pageId references in arbitrary text.
+
+    Returns a list of source descriptors of the form
+      {"kind": "confluence", "pages": [<id_or_url>], "page_urls": [<url>]}
+    one per discovered reference. Used to pre-populate sources from a free-form
+    intent description when the user pasted a link (often the MCP client LLM
+    compresses pasted URLs into 'pageId=N' before sending — we catch both).
+
+    Returns [] when nothing matches.
+    """
+    out: list[dict] = []
+
+    # 1. Full Confluence-looking URLs
+    for url_match in re.finditer(r"https?://\S+", text):
+        url = url_match.group(0).rstrip(".,;)\"'")
+        is_confluence = (
+            "confluence" in url.lower()
+            or "atlassian" in url.lower()
+            or "/display/" in url
+            or "/spaces/" in url
+            or "pageId=" in url
+            or "pageid=" in url.lower()
+        )
+        if not is_confluence:
+            continue
+        page_id = _extract_confluence_page_id(url)
+        out.append({
+            "kind": "confluence",
+            "pages": [page_id or url],
+            "page_urls": [url],
+        })
+
+    # 2. Bare 'pageId=NNN' / 'page-id: NNN' / 'pageIds=N,M' references that
+    #    are NOT already part of a URL we just captured. Common when the
+    #    client LLM compressed a URL.
+    captured_ids = {p for s in out for p in s["pages"] if p.isdigit()}
+    for pid_match in re.finditer(
+        r"page[\-\s_]?ids?\s*[:=]\s*([\d,\s]+)", text, re.IGNORECASE
+    ):
+        for pid in pid_match.group(1).split(","):
+            pid = pid.strip()
+            if not pid.isdigit() or pid in captured_ids:
+                continue
+            captured_ids.add(pid)
+            out.append({"kind": "confluence", "pages": [pid]})
+
+    return out
+
+
 def _parse_source_descriptor(user_input: str) -> dict:
     lowered = user_input.lower()
 
@@ -2084,10 +2158,31 @@ def _parse_source_descriptor(user_input: str) -> dict:
             "page_urls": [url],
         }
 
-    # ── Confluence "page-id: 12345" without a URL ───────────────────────────
-    pid_m = re.search(r"page[\-\s_]?id\s*[:=]\s*(\d+)", user_input, re.IGNORECASE)
-    if pid_m and "confluence" in lowered:
-        return {"kind": "confluence", "pages": [pid_m.group(1)]}
+    # ── Confluence "pageId=NNN" / "page-id: NNN" / "pageIds=N,M,O" ──────────
+    # Recognise the LLM-summarised form clients often emit when they compress
+    # a pasted Confluence URL into a tool-call argument. Examples we now match:
+    #   "confluence pageId=20030556732"
+    #   "confluence OCIFACP pageId=20030556732"
+    #   "confluence page-id: 12345"
+    #   "confluence pageIds=20030556732, 20030556733"
+    #   "confluence pageIds: 12345,67890"
+    # If "confluence" appears in the input AND one or more page-ids are found,
+    # treat it as a page-fetch source — the user's intent is "ingest THESE
+    # pages", not a label search.
+    if "confluence" in lowered:
+        pid_list_m = re.search(
+            r"page[\-\s_]?ids?\s*[:=]\s*([\d,\s]+)",
+            user_input,
+            re.IGNORECASE,
+        )
+        if pid_list_m:
+            ids = [
+                pid.strip()
+                for pid in pid_list_m.group(1).split(",")
+                if pid.strip().isdigit()
+            ]
+            if ids:
+                return {"kind": "confluence", "pages": ids}
 
     # ── Confluence space + labels (existing form) ───────────────────────────
     if "confluence" in lowered:

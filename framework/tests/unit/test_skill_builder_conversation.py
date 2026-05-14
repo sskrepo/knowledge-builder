@@ -1102,6 +1102,102 @@ class TestParseSourceDescriptorConfluencePages:
         # And critically: no `pages` field — this is the space-search path.
         assert "pages" not in result
 
+    def test_pageid_equals_form_recognized(self):
+        """Client LLMs often compress a pasted URL into 'pageId=N' before
+        sending. Regression for synth-tpm-3bda58fe: the user pasted a link,
+        the client sent 'pageId=20030556732' in the input, and the parser
+        previously fell through to labels-search.
+        """
+        from framework.skill_builder.conversation import _parse_source_descriptor
+        result = _parse_source_descriptor("confluence pageId=20030556732")
+        assert result["kind"] == "confluence"
+        assert result["pages"] == ["20030556732"]
+        assert "include_labels" not in result
+
+    def test_multiple_pageids_recognized(self):
+        from framework.skill_builder.conversation import _parse_source_descriptor
+        result = _parse_source_descriptor(
+            "confluence pageIds=20030556732, 12345, 67890"
+        )
+        assert result["kind"] == "confluence"
+        assert result["pages"] == ["20030556732", "12345", "67890"]
+
+    def test_pageid_with_space_takes_precedence_over_labels(self):
+        """User input that mentions both labels and a pageId should be parsed
+        as a page-fetch (more specific) rather than a label-search.
+        """
+        from framework.skill_builder.conversation import _parse_source_descriptor
+        result = _parse_source_descriptor(
+            "confluence OCIFACP pageId=20030556732 labels: 26ai"
+        )
+        assert result["kind"] == "confluence"
+        assert result["pages"] == ["20030556732"]
+
+
+class TestExtractConfluenceSourcesFromText:
+    """Pre-population from intent text. Client LLMs sometimes drop URLs and
+    only send 'pageId=N' in the tool input — we recover them here at session
+    start so the user doesn't have to re-state what they already wrote.
+    """
+
+    def test_extracts_url_from_intent(self):
+        from framework.skill_builder.conversation import _extract_confluence_sources_from_text
+        intent = (
+            "Generate a weekly exec review from "
+            "https://confluence.example.com/wiki/spaces/OCIFACP/pages/20030556732/26ai-status "
+            "and the FAaaS deck."
+        )
+        sources = _extract_confluence_sources_from_text(intent)
+        assert len(sources) == 1
+        assert sources[0]["kind"] == "confluence"
+        assert sources[0]["pages"] == ["20030556732"]
+        assert "20030556732" in sources[0]["page_urls"][0]
+
+    def test_extracts_bare_pageid_when_no_url(self):
+        from framework.skill_builder.conversation import _extract_confluence_sources_from_text
+        intent = (
+            "pulling status from the main 26ai exec page "
+            "(Confluence pageId=20030556732) and per-workstream pages"
+        )
+        sources = _extract_confluence_sources_from_text(intent)
+        assert len(sources) == 1
+        assert sources[0]["pages"] == ["20030556732"]
+        # No URL field when only pageId is found
+        assert "page_urls" not in sources[0]
+
+    def test_extracts_multiple_pageids(self):
+        from framework.skill_builder.conversation import _extract_confluence_sources_from_text
+        intent = "with pageIds=20030556732, 12345, 67890 from OCIFACP"
+        sources = _extract_confluence_sources_from_text(intent)
+        all_ids = [p for s in sources for p in s["pages"]]
+        assert "20030556732" in all_ids
+        assert "12345" in all_ids
+        assert "67890" in all_ids
+
+    def test_pageid_inside_url_not_duplicated(self):
+        """If the same id appears in a URL and as a separate pageId reference,
+        emit only one source for it."""
+        from framework.skill_builder.conversation import _extract_confluence_sources_from_text
+        intent = (
+            "see https://confluence.example.com/pages/20030556732/Title — "
+            "i.e. pageId=20030556732"
+        )
+        sources = _extract_confluence_sources_from_text(intent)
+        all_ids = [p for s in sources for p in s["pages"]]
+        # The id should appear exactly once across all sources.
+        assert all_ids.count("20030556732") == 1
+
+    def test_no_confluence_reference_returns_empty(self):
+        from framework.skill_builder.conversation import _extract_confluence_sources_from_text
+        assert _extract_confluence_sources_from_text("just a plain intent") == []
+
+    def test_non_confluence_url_ignored(self):
+        from framework.skill_builder.conversation import _extract_confluence_sources_from_text
+        sources = _extract_confluence_sources_from_text(
+            "see https://example.com/blog/post-1 for context"
+        )
+        assert sources == []
+
 
 # ---------------------------------------------------------------------------
 # _run_ingest — real ingestion path (Gap 1 fix)

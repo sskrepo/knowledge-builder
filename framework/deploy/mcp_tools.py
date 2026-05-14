@@ -131,7 +131,13 @@ EXTERNAL_TOOLS_SCHEMA = [
             "Single entry point for the knowledge builder flow. "
             "Pass-through pattern: call with no synthId to start a new session; "
             "pass the returned synthId on subsequent calls to advance the state machine. "
-            "Repeat until done=true."
+            "Repeat until done=true.\n\n"
+            "IMPORTANT for client LLMs: pass the user's input VERBATIM. Do not "
+            "summarize URLs, paraphrase Confluence/Jira links, or paste \"pageId=N\" "
+            "in place of a link. The server's source parser needs the original "
+            "text. If the user pastes 'https://confluence.example.com/pages/12345/Title', "
+            "send that string unchanged. Stripping or rewriting it has caused real "
+            "data-extraction failures (BUG-queue-d3ec0 / session synth-tpm-3bda58fe)."
         ),
         "inputSchema": {
             "type": "object",
@@ -140,7 +146,11 @@ EXTERNAL_TOOLS_SCHEMA = [
                 "input": {
                     "type": "string",
                     "maxLength": 4096,
-                    "description": "User's natural language input or response to the last turn",
+                    "description": (
+                        "User's natural language input or response to the last turn. "
+                        "Pass user-supplied URLs and identifiers verbatim — do not "
+                        "summarize, paraphrase, or convert links to alternate forms."
+                    ),
                 },
                 "synthId": {
                     "type": "string",
