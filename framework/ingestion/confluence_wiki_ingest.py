@@ -136,9 +136,15 @@ class ConfluenceWikiIngestor:
 
         html_content = _raw.get("body", "") or _raw.get("html", "")
         markdown = self._convert_to_markdown(html_content)
-        title = _raw.get("title", page_id)
-        space = _raw.get("space", "unknown")
-        source_url = _raw.get("url", f"confluence://{space}/{page_id}")
+        # Adapters may return None for missing fields (not the dict default).
+        # Coerce defensively — line 150's space.lower() previously crashed
+        # with `'NoneType' object has no attribute 'lower'` when the get_page
+        # response had no resolvable space key (e.g. when source_id was a URL
+        # instead of a numeric page-id, or when the tool returned an error
+        # body).
+        title = _raw.get("title") or page_id
+        space = _raw.get("space") or "unknown"
+        source_url = _raw.get("url") or f"confluence://{space}/{page_id}"
 
         content_hash = hashlib.sha256(markdown.encode()).hexdigest()
         existing_hash = self._hash_index.get(page_id)

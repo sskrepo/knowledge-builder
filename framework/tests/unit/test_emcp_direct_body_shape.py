@@ -89,6 +89,32 @@ class TestEmcpDirectBodyShape:
         assert isinstance(body, dict)
         assert body.get("storage", {}).get("value") == ""
 
+    def test_fetch_raises_file_not_found_when_metadata_is_sparse(self, adapter):
+        """Regression for the URL-as-page-id case in session synth-tpm-bcbc739d:
+        when source_id is a URL the server's get_page can't resolve, it
+        returns a sparse response with no title and no space.key. Previously
+        normalize() proceeded with None values, and the downstream ingestor
+        crashed at `space.lower()`. Now we detect and raise."""
+        adapter.runtime.call_tool_for_text.return_value = (
+            '{"results":{"metadata":{}}}'  # sparse — no title, no space
+        )
+        with pytest.raises(FileNotFoundError, match="no usable metadata"):
+            adapter.fetch(RawItemRef(
+                kind="confluence_page", source="confluence",
+                source_id="https://confluence.example.com/display/SPACE/Title",
+            ))
+
+    def test_fetch_proceeds_when_only_title_present(self, adapter):
+        """If get_page returns at least a title, accept it — don't be too strict."""
+        adapter.runtime.call_tool_for_text.return_value = (
+            '{"results":{"metadata":{"title":"At least a title",'
+            '"content":{"value":"body"}}}}'
+        )
+        item = adapter.fetch(RawItemRef(
+            kind="confluence_page", source="confluence", source_id="x",
+        ))
+        assert item.metadata.get("title") == "At least a title"
+
 
 class TestIngestorRobustToBodyShape:
     """Belt-and-suspenders: even if a future adapter regresses to plain-string
@@ -150,3 +176,26 @@ class TestIngestorRobustToBodyShape:
         )
         raw = ing._fetch_page("123")
         assert raw["body"] == ""
+
+    def test_handles_none_space_in_metadata(self, tmp_path):
+        """Regression for session synth-tpm-bcbc739d: when adapter returned
+        metadata.space=None, the old code crashed at
+            space_dir = self._wiki_root / space.lower()
+        with AttributeError: 'NoneType' object has no attribute 'lower'.
+        Now defensively coerced to 'unknown' so the write proceeds."""
+        from framework.adapters._base import RawItem
+        adapter = MagicMock()
+        adapter.fetch.return_value = RawItem(
+            kind="confluence_page", source="confluence", source_id="123",
+            payload={"body": {"storage": {"value": "<p>hi</p>"}}},
+            metadata={"title": None, "space": None, "labels": [], "url": None},
+        )
+        ing = ConfluenceWikiIngestor(wiki_root=tmp_path / "wiki", adapter=adapter)
+        # Full ingest_page — would have crashed at space.lower() before the fix.
+        result = ing.ingest_page("123")
+        assert result["status"] in ("new", "updated", "unchanged")
+        # Verify the file landed under the "unknown" fallback dir, not None.
+        md_files = list((tmp_path / "wiki").rglob("*.md"))
+        assert any("unknown" in str(f) for f in md_files), (
+            f"expected fallback dir 'unknown', got files: {md_files}"
+        )

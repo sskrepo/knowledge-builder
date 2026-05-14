@@ -159,7 +159,10 @@ class ConfluenceEmcpDirectAdapter:
         # The emcp server's `get_page` accepts a numeric page_id. If we were
         # given a full URL, the calling layer (skill_builder) has already
         # extracted the id where possible. For safety we still pass whatever
-        # we got — the server will 404 on a truly unparseable input.
+        # we got. If it's a URL, the server's get_page tool typically returns
+        # a sparse/error response that we detect post-parse and surface as a
+        # clear FileNotFoundError rather than letting a downstream
+        # `.lower()` crash on None metadata.
         text = self.runtime.call_tool_for_text(
             self._TOOL_GET_PAGE,
             {
@@ -189,6 +192,20 @@ class ConfluenceEmcpDirectAdapter:
 
         if meta.get("error") == "not_found" or payload.get("error") == "not_found":
             raise FileNotFoundError(f"Confluence page {ref.source_id} not found")
+
+        # Sanity check: a successful get_page MUST yield at least a title
+        # and a space key. If both are missing the server probably returned
+        # an error envelope (e.g. when source_id was a URL it couldn't
+        # resolve to a page-id). Surface as FileNotFoundError so the
+        # ingest pipeline records a clear failure rather than crashing
+        # downstream at `space.lower()`.
+        if not meta.get("title") and not (meta.get("space") or {}).get("key"):
+            raise FileNotFoundError(
+                f"Confluence page {ref.source_id!r}: get_page returned no usable "
+                f"metadata (title/space missing). If the source_id is a URL, "
+                f"the server may not support URL-based lookup — try the numeric "
+                f"page id from /pages/<id>/ instead."
+            )
 
         return self.normalize(payload=payload, meta=meta, content=content,
                               source_id=str(ref.source_id))
