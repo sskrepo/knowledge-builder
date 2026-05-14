@@ -38,13 +38,41 @@ def synthesize_persona_builder_diff(
 
     fields = fields or []
 
+    # Infer KB `kind` + retrieval tools from source types. Hardcoding
+    # `kind: vector` regardless of source caused live retrieval to fail for
+    # the weekly_exec_review_26ai skill (session synth-tpm-bcbc739d): the
+    # ingest path for confluence sources writes markdown + WikiMetadataStore
+    # records, which the `search_wiki` retriever queries — NOT the
+    # vector_search retriever's embedded chunks. Map per-kind:
+    #   confluence       → wiki         → search_wiki
+    #   git              → code_wiki    → find_symbol + read_code_page
+    #   jira             → vector       → vector_search
+    #   adb              → adb          → query_fleet
+    #   mixed / unknown  → vector       → vector_search (safest default)
+    source_kinds = {s.get("kind") for s in normalized_sources if isinstance(s, dict)}
+    if source_kinds == {"confluence"}:
+        kind = "wiki"
+        retrieval_tools = ["search_wiki"]
+    elif source_kinds == {"git"}:
+        kind = "code_wiki"
+        retrieval_tools = ["find_symbol", "read_code_page"]
+    elif source_kinds == {"jira"}:
+        kind = "vector"
+        retrieval_tools = ["vector_search"]
+    elif source_kinds == {"adb"}:
+        kind = "adb"
+        retrieval_tools = ["query_fleet"]
+    else:
+        kind = "vector"
+        retrieval_tools = ["vector_search"]
+
     return {
         "name": short_name,
-        "kind": "vector",
+        "kind": kind,
         "extraction_schema": schema_path,
         "provides_fields": list(fields),
         "sources": normalized_sources,
-        "retrieval_tools": ["vector_search"],
+        "retrieval_tools": retrieval_tools,
         "kb_card": {
             "summary": f"Synthesized by skill_builder. Refine after first dry-run.",
             "use_when": (

@@ -1448,7 +1448,16 @@ class SkillBuilderConversation:
 
         confluence_adapter = _build_confluence_adapter(kbf_env, REPO_ROOT)
         mode = "live" if confluence_adapter is not None else "fixture"
-        ingestor = ConfluenceWikiIngestor(adapter=confluence_adapter)
+        # Wire WikiMetadataStore so ingest_page populates the index that
+        # search_wiki retriever queries. Without this, pages land on disk
+        # as markdown but the retrieval layer can't find them at query time
+        # — exactly the gap behind "no relevant context found" after the
+        # weekly_exec_review_26ai skill's INGEST in synth-tpm-bcbc739d.
+        # Default root (~/.kbf/store/wiki_metadata) is shared with the
+        # search_wiki retriever instance in the MCP server's lifespan.
+        from ..stores.wiki_metadata_store import WikiMetadataStore
+        wiki_store = WikiMetadataStore()
+        ingestor = ConfluenceWikiIngestor(adapter=confluence_adapter, wiki_store=wiki_store)
 
         total_new = 0
         total_updated = 0

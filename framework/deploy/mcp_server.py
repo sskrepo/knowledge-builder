@@ -107,6 +107,8 @@ def _load_app():
     from ..retrievers.text_to_sql import TextToSqlRetriever
     from ..retrievers.find_symbol import FindSymbolRetriever
     from ..retrievers.read_code_page import ReadCodePageRetriever
+    from ..retrievers.search_wiki import SearchWikiRetriever
+    from ..stores.wiki_metadata_store import WikiMetadataStore
     from ..adapters.udap_adapter import UdapAdapter
     from ..retrievers.tools import register_v1_tools
     from ..workflow_runtime.skill_registry import register_workflow_skills_as_mcp_tools
@@ -226,6 +228,13 @@ def _load_app():
         udap_adapter = UdapAdapter(udap_cfg)
         state["udap_adapter"] = udap_adapter
 
+        # Shared WikiMetadataStore: the same default root (~/.kbf/store/wiki_metadata)
+        # used by ConfluenceWikiIngestor in skill_builder.conversation._run_ingest
+        # and ingestion_worker. Both processes write into it; this server reads
+        # from it via search_wiki. Persistence is per-machine, fine for laptop.
+        wiki_store = WikiMetadataStore()
+        state["wiki_store"] = wiki_store
+
         retrievers = {
             "vector_search": VectorSearchRetriever(state["stores"]),
             "get_incident_summary": GetIncidentSummaryRetriever(store),
@@ -235,6 +244,11 @@ def _load_app():
             "text_to_sql": TextToSqlRetriever(llm=state["llm"], udap_adapter=udap_adapter),
             "find_symbol": FindSymbolRetriever(store_root=store_root),
             "read_code_page": ReadCodePageRetriever(store_root=store_root),
+            # search_wiki: lexical search over WikiMetadataStore records,
+            # written by ConfluenceWikiIngestor when KB.kind == "wiki".
+            # Closes the retrieval gap that left
+            # synth-tpm-bcbc739d/weekly_exec_review_26ai with no answers.
+            "search_wiki": SearchWikiRetriever(wiki_store=wiki_store),
         }
         state["retrievers"] = retrievers
         # Internal tool registry — NOT exposed on /mcp/tools
