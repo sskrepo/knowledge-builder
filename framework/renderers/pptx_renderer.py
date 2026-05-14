@@ -118,11 +118,19 @@ class PptxRenderer(BaseRenderer):
         run.font.color.rgb = RGBColor(*_ORACLE_DARK)
 
         # --- Jira ID top-right ---
-        jira_id = (
-            data.get("jira_id")
-            or data.get("sections", {}).get("Jira Id")
-            or data.get("extracted", {}).get("jira_id", "")
-        )
+        # Accept canonical 'jira_id' and ADR-027 design-derived variants
+        # like 'primary_faaaspmo_jira', 'primary_faaaspmo_jira_key', etc.
+        # If multiple keys appear, join them with comma for the header.
+        ex = data.get("extracted", {}) or {}
+        sec = data.get("sections", {}) or {}
+        jira_candidates = []
+        for key in ("jira_id",
+                    "primary_faaaspmo_jira_key", "primary_faaaspmo_jira",
+                    "primary_faaasinges_jira_key", "primary_faaasinges_jira"):
+            v = ex.get(key) or sec.get(key.replace("_", " ").title())
+            if v:
+                jira_candidates.append(str(v).strip())
+        jira_id = data.get("jira_id") or sec.get("Jira Id") or ex.get("jira_id") or ", ".join(jira_candidates)
         if jira_id:
             tx_jira = slide.shapes.add_textbox(
                 Inches(9.4), Inches(0.5),
@@ -368,12 +376,49 @@ def _format_value(val) -> str:
 
 def _to_bullets(val) -> list[str]:
     if isinstance(val, list):
-        return [str(v) for v in val]
+        return [_format_bullet_item(v) for v in val]
     if isinstance(val, str):
         # Split on newlines / bullet chars
         lines = re.split(r"[\n•\-\*]", val)
         return [ln.strip() for ln in lines if ln.strip()]
+    if isinstance(val, dict):
+        return [_format_bullet_item(val)]
     return [str(val)]
+
+
+def _format_bullet_item(item) -> str:
+    """Render a single bullet item — collapse dict rows into a readable line.
+
+    ADR-027 DESIGN_SKILL frequently extracts table rows as dicts
+    ({Milestone ID: M1, Milestone: Requirements Locked, Target Date: ...}).
+    The default Python repr ({'Milestone ID': 'M1', ...}) is unreadable on
+    a slide. This formatter picks the most informative non-empty fields
+    in a stable preferred order.
+    """
+    if isinstance(item, dict):
+        # Preferred column order — pick the first 3-4 non-empty fields
+        preferred = (
+            "Milestone", "Milestone Name", "Name",
+            "Target Date", "Date", "Due",
+            "Status", "RAG", "Owner",
+            "Exit Criteria", "Notes",
+        )
+        seen = set()
+        parts: list[str] = []
+        # First: take preferred fields in order
+        for k in preferred:
+            v = item.get(k)
+            if v and k not in seen:
+                parts.append(str(v))
+                seen.add(k)
+        # Fallback: dump remaining non-empty fields as "key: value"
+        if not parts:
+            for k, v in item.items():
+                if v and k not in seen:
+                    parts.append(f"{k}: {v}")
+                    seen.add(k)
+        return " — ".join(parts) if parts else ""
+    return str(item)
 
 
 def _add_section_cell(cell, header: str, body: str) -> None:
