@@ -383,10 +383,22 @@ class ConfluenceWikiIngestor:
             from ..adapters._base import RawItemRef
             ref = RawItemRef(kind="confluence_page", source="confluence", source_id=page_id)
             raw = self._adapter.fetch(ref)
-            body_html = (
-                raw.payload.get("body", {}).get("storage", {}).get("value", "")
-                or raw.payload.get("body", "")
-            )
+            # Body may arrive in two shapes from different adapters:
+            #   (a) nested:  {"storage": {"value": "<html|md>"}}  (Confluence native)
+            #   (b) flat:    "<html|md>"                           (some custom adapters)
+            # The previous chain `body.get("storage", {})` blew up with
+            # AttributeError when body was a string (BUG-queue-cf562).
+            body_raw = raw.payload.get("body", "")
+            if isinstance(body_raw, dict):
+                body_html = (
+                    body_raw.get("storage", {}).get("value", "")
+                    or body_raw.get("value", "")
+                    or ""
+                )
+            elif isinstance(body_raw, str):
+                body_html = body_raw
+            else:
+                body_html = ""
             return {
                 "id": page_id,
                 "title": raw.metadata.get("title", ""),

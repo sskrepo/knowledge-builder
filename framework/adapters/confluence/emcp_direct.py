@@ -240,16 +240,23 @@ class ConfluenceEmcpDirectAdapter:
     ) -> RawItem:
         """Translate emcp get_page response into the framework's flat RawItem shape.
 
-        Downstream consumers (ConfluenceWikiIngestor.ingest_page) expect:
-          payload.body                  -> markdown / html
-          payload.title                 -> page title
-          payload.space.key             -> space key
-          payload.version.number, .when -> version metadata
-          payload.metadata.labels.results[i].name -> labels
+        Downstream consumer ConfluenceWikiIngestor._fetch_page does:
+          body_html = (
+            raw.payload.get("body", {}).get("storage", {}).get("value", "")
+            or raw.payload.get("body", "")
+          )
 
-        emcp `get_page` returns these as:
-          results.metadata.{id,title,space.key,version,updated,labels[]}
-          results.content.value
+        That chain REQUIRES `body` to be a dict ({"storage": {"value": "..."}})
+        — if `body` is a plain string, Python raises
+          AttributeError: 'str' object has no attribute 'get'
+        before the `or` fallback can fire (BUG-queue-cf562, session
+        synth-tpm-8bb804ae). We therefore emit `body` in the nested Confluence-
+        native shape so this adapter is interchangeable with mcp/native/
+        codex_proxy adapters — all of which already use the nested form.
+
+        emcp `get_page` returns:
+          results.metadata.{id,title,space.key,version,updated,labels[],
+                            content.value}
         """
         body_text = content.get("value", "") if isinstance(content, dict) else ""
 
@@ -272,7 +279,8 @@ class ConfluenceEmcpDirectAdapter:
                 "number": meta.get("version"),
                 "when": meta.get("updated") or meta.get("lastModified"),
             },
-            "body": body_text,
+            # Nested Confluence-native shape — see comment above.
+            "body": {"storage": {"value": body_text}},
             "metadata": {"labels": {"results": labels_normalized}},
             "url": meta.get("url"),
         }
