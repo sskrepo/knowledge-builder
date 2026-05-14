@@ -259,6 +259,11 @@ def _load_app():
         workflow_registry = register_workflow_skills_as_mcp_tools(WORKFLOW_SKILLS_DIR)
         state["workflow_registry"] = workflow_registry
         state["workflow_executor"] = WorkflowExecutor(store=None, llm=state["llm"])
+        # Expose on app.state so the ask route + MCP handler can call it from
+        # within a request (see _maybe_render_artifact in routes/ask.py).
+        # Without this attribute the render hook silently no-ops with
+        # "render: app.state.workflow_executor missing".
+        app.state.workflow_executor = state["workflow_executor"]
 
         def _make_wf_callable(skill_path: str, executor):
             def _call(inputs: dict) -> dict:
