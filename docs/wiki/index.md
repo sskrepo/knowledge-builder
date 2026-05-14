@@ -55,6 +55,7 @@
 - [ADR-023 — KBF-ops persona + reviewSkillSession quality review](adr/ADR-023-kbf-ops-persona-session-quality-review.md)
 - [ADR-024 — Dedicated bug DB connection](adr/ADR-024-bug-db-connection.md)
 - [ADR-025 — Vector index INMEMORY rebuild on first production deploy ⚠️ prod gate](adr/ADR-025-vector-index-inmemory-prod-rebuild.md)
+- [ADR-026 — Source-grounded schema review + layout-aware PPTX rendering](adr/ADR-026-source-grounded-schema-review-and-layout-aware-pptx.md)
 
 ## Engineering
 - 🚀 **[laptop-quickstart](engineering/laptop-quickstart.md)** — V2; run framework end-to-end on laptop with no provisioning (no ADB, no Vault, no OpenAI required)
