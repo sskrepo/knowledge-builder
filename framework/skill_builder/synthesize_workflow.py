@@ -115,20 +115,30 @@ def _build_requires_extractions(
     if explicit_requires:
         return explicit_requires
 
-    # Derive from intent: look for new_kb / reuse_kbs in intent
+    # Derive from intent: look for new_kb / reuse_kbs in intent.
+    # Note: under ADR-027, intent["reuse"]["gaps"] from DESIGN_SKILL is the
+    # "fields the source cannot supply" list (advisory), NOT the
+    # "fields needing a new extraction skill" list. So we cannot use gaps
+    # to populate required_fields directly — that would put unsupportable
+    # fields into the workflow contract, which then fails ADR-017 link check
+    # because the schema doesn't list them. The correct semantic: for a
+    # brand-new skill, required_fields = ALL designed fields not already
+    # covered by an existing (reused) KB.
     reuse = intent.get("reuse", {})
     covered = reuse.get("covered", {})
-    gaps = reuse.get("gaps", [])
 
     entries: list[dict] = []
 
-    if gaps:
-        kb_name = f"{persona}.{skill_name}"
+    # Fields not covered by any existing KB → go into the new KB for this skill
+    covered_fields = set(covered.keys())
+    new_kb_fields = [f for f in fields if f not in covered_fields]
+    if new_kb_fields:
         entries.append({
-            "kb": kb_name,
-            "required_fields": gaps,
+            "kb": f"{persona}.{skill_name}",
+            "required_fields": new_kb_fields,
         })
 
+    # Group covered fields by their reused KB
     seen_kbs: dict[str, list[str]] = {}
     for field, kb in covered.items():
         seen_kbs.setdefault(kb, []).append(field)
