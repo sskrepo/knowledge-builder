@@ -57,6 +57,9 @@
 - [ADR-025 — Vector index INMEMORY rebuild on first production deploy ⚠️ prod gate](adr/ADR-025-vector-index-inmemory-prod-rebuild.md)
 - [ADR-026 — Source-grounded schema review + layout-aware PPTX rendering](adr/ADR-026-source-grounded-schema-review-and-layout-aware-pptx.md)
 
+## Skill builder
+- **[authorSkill flow — state-by-state LLM usage map](authorskill-flow.md)** — all 15 states, which use the LLM vs heuristic, code refs, known gaps (post-ADR-026)
+
 ## Engineering
 - 🚀 **[laptop-quickstart](engineering/laptop-quickstart.md)** — V2; run framework end-to-end on laptop with no provisioning (no ADB, no Vault, no OpenAI required)
 - 🎯 **[workshop-ops-guide](engineering/workshop-ops-guide.md)** — how to run the application + stand up the NL gold-set feeder for persona workshops
