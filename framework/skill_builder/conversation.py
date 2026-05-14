@@ -1645,10 +1645,14 @@ class SkillBuilderConversation:
                 "Per ADR-027, there is no synthetic sample fallback at this state."
             )
 
-        # Build schema from current field_specs
-        gaps = self._data.reuse_result.get("gaps", list(self._data.fields))
-        schema = synthesize_extraction_schema(gaps, self._data.persona, self._data.skill_name)
-        for f in gaps:
+        # Build schema from ALL fields in the design (not just reuse_plan.gaps).
+        # Bug fix (post-ADR-027 walk): reuse_plan.gaps from DESIGN_SKILL output
+        # is the "cannot extract" subset, NOT "fields needing a new extraction
+        # skill". For a brand-new skill with no reuse, we want every designed
+        # field to appear in the schema, the gold set, and the preview/eval.
+        all_fields = list(self._data.fields)
+        schema = synthesize_extraction_schema(all_fields, self._data.persona, self._data.skill_name)
+        for f in all_fields:
             if f in self._data.field_specs and f in schema.get("properties", {}):
                 schema["properties"][f] = dict(self._data.field_specs[f])
 
@@ -3226,11 +3230,13 @@ Rules:
                 schema = None
 
         if not schema_text or not schema:
-            # Build from current field_specs (in-memory)
+            # Build from current field_specs (in-memory). See PREVIEW_EXTRACTION
+            # comment for why this uses self._data.fields (full list) instead
+            # of reuse_result.gaps (cannot-extract subset).
             from .synthesize_schema import synthesize_extraction_schema
-            gaps = self._data.reuse_result.get("gaps", list(self._data.fields))
-            schema = synthesize_extraction_schema(gaps, persona, skill_name)
-            for f in gaps:
+            all_fields = list(self._data.fields)
+            schema = synthesize_extraction_schema(all_fields, persona, skill_name)
+            for f in all_fields:
                 if f in self._data.field_specs and f in schema.get("properties", {}):
                     schema["properties"][f] = dict(self._data.field_specs[f])
 
@@ -3726,14 +3732,18 @@ Rules:
 
         persona = self._data.persona
         skill_name = self._data.skill_name
-        gaps = self._data.reuse_result.get("gaps", list(self._data.fields))
+        # Bug fix (post-ADR-027 walk): use ALL designed fields, not just the
+        # reuse_plan.gaps subset. DESIGN_SKILL's gaps means "cannot extract"
+        # (8 of 22 for the 26ai walk), but the schema/KB/gold set should
+        # cover everything the user wants to extract.
+        all_fields = list(self._data.fields)
 
         artifacts: dict[str, Any] = {}
 
-        if gaps:
-            schema = synthesize_extraction_schema(gaps, persona, skill_name)
+        if all_fields:
+            schema = synthesize_extraction_schema(all_fields, persona, skill_name)
             if self._data.field_specs:
-                for f in gaps:
+                for f in all_fields:
                     if f in self._data.field_specs and f in schema.get("properties", {}):
                         schema["properties"][f] = dict(self._data.field_specs[f])
             schema_path = f"framework/parsers/schemas/{persona}/{skill_name}/v1.json"
@@ -3744,7 +3754,7 @@ Rules:
                 kb_name=f"{persona}.{skill_name}",
                 schema_path=schema_path,
                 sources=self._data.sources,
-                fields=gaps,
+                fields=all_fields,
             )
             artifacts[f"framework/persona_builders/{persona}.yaml.new_kb"] = pb_entry
 
@@ -3752,7 +3762,7 @@ Rules:
                 persona=persona,
                 kb_name=skill_name,
                 artifact_path=self._data.artifact_path,
-                extracted_fields={f: None for f in gaps},
+                extracted_fields={f: None for f in all_fields},
             )
             artifacts[f"eval/gold_sets/{persona}-{skill_name}-extraction.jsonl"] = gold_entries
 
