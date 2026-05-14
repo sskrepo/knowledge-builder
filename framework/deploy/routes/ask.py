@@ -99,79 +99,93 @@ async def ask_knowledge_base(req: Request):
         max_results=max_results,
     )
 
-    # If the matched workflow_skill (tier 1) declared response_mode=artifact_url,
-    # invoke the WorkflowExecutor to render the artifact (e.g. .pptx) and
-    # surface the artifact path back to the caller. Without this hook the
-    # ask path returned only the extracted text — the user got data but never
-    # got a deck. (Surfaced live in session synth-tpm-bcbc739d /
-    # tpm.weekly_exec_review_26ai which declares output_format=pptx.)
-    artifact_info = _maybe_render_artifact(req, result, question)
-    if artifact_info:
-        result.setdefault("delivery", artifact_info)
+    # Single choke point — used by both REST + MCP handlers.
+    maybe_render_artifact(req.app.state, result, question)
 
     response = _build_ask_response(result, consumer)
     return to_camel_response(response)
 
 
-def _maybe_render_artifact(req, result: dict, question: str) -> dict | None:
+def maybe_render_artifact(app_state, result: dict, question: str) -> None:
     """If tier-1 matched a workflow_skill with response_mode=artifact_url,
-    run the WorkflowExecutor to produce the rendered artifact and return
-    {kind, path, url} for inclusion in the response. None otherwise."""
+    run the WorkflowExecutor to render the artifact (PPT/DOCX/etc.) and
+    mutate `result` in place with a `delivery` dict for the response builder.
+
+    Mutates instead of returning so that callers in both the REST route and
+    the MCP tool handler can use a single call without re-plumbing return
+    values. Failures are logged and the result is left untouched — the
+    text answer always reaches the user even if rendering fails.
+
+    Implementation notes:
+      - WorkflowExecutor.execute() runs its own retrieve → synthesize →
+        render → deliver chain. This duplicates the retrieve work the
+        ContextBuilder already did, but the alternative (threading
+        passages into the executor) is a bigger refactor.
+      - We accept `app_state` (not `req`) so the MCP tool handler can call
+        the same function — it has `app` but not a `Request`.
+    """
     import yaml as _yaml
     if result.get("tier") != 1:
-        return None
+        return
     intent = result.get("intent") or {}
     skill_name = intent.get("workflow_skill")
     persona = intent.get("persona") or ""
     if not skill_name or not persona:
-        return None
+        log.debug(
+            "render: tier 1 but no workflow_skill/persona in intent (skill=%r persona=%r) — skipping",
+            skill_name, persona,
+        )
+        return
 
     skill_yaml_path = (
         Path(__file__).resolve().parents[3]
         / "framework" / "workflow_skills" / persona / f"{skill_name}.yaml"
     )
     if not skill_yaml_path.exists():
-        log.warning("ask: workflow_skill yaml not found at %s — skipping render",
+        log.warning("render: workflow_skill yaml not found at %s — skipping",
                     skill_yaml_path)
-        return None
+        return
     try:
         cfg = _yaml.safe_load(skill_yaml_path.read_text())
     except Exception as exc:  # noqa: BLE001
-        log.warning("ask: failed to parse %s: %s — skipping render",
+        log.warning("render: failed to parse %s: %s — skipping",
                     skill_yaml_path, exc)
-        return None
+        return
 
     response_mode = (
         (cfg.get("trigger", {}).get("on_request") or {}).get("response_mode")
     )
     if response_mode != "artifact_url":
-        return None  # text-only skill; nothing to render
+        return  # text-only skill; nothing to render
 
-    executor = getattr(req.app.state, "workflow_executor", None)
+    executor = getattr(app_state, "workflow_executor", None)
     if executor is None:
-        log.warning("ask: app.state.workflow_executor missing — cannot render")
-        return None
+        log.warning("render: app.state.workflow_executor missing — cannot render")
+        return
 
     log.info(
-        "ask: rendering artifact for tier-1 skill %s.%s (response_mode=%s)",
+        "render: invoking WorkflowExecutor for tier-1 skill %s.%s (response_mode=%s)",
         persona, skill_name, response_mode,
     )
     try:
         exec_result = executor.execute(skill_yaml_path, inputs={"input": question})
     except Exception as exc:  # noqa: BLE001
-        log.error("ask: WorkflowExecutor.execute failed: %s", exc)
-        return None
+        log.error("render: WorkflowExecutor.execute failed: %s", exc, exc_info=True)
+        return
 
     delivery = exec_result.get("delivery") or {}
-    info = {
+    result["delivery"] = {
         "kind": delivery.get("kind") or "filesystem",
         "path": delivery.get("path") or delivery.get("url") or "",
         "url": delivery.get("url") or "",
         "skill": exec_result.get("skill", skill_name),
         "render_ms": (exec_result.get("metrics") or {}).get("render_ms"),
     }
-    log.info("ask: artifact rendered → %s", info.get("path") or info.get("url"))
-    return info
+    log.info(
+        "render: artifact ready → %s (skill=%s.%s render_ms=%s)",
+        result["delivery"].get("path") or result["delivery"].get("url"),
+        persona, skill_name, result["delivery"].get("render_ms"),
+    )
 
 
 # ---------------------------------------------------------------------------

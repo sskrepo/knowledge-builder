@@ -327,7 +327,7 @@ def build_external_tool_registry(app) -> dict[str, Any]:
 def _make_ask_handler(app):
     """Build the askKnowledgeBase MCP tool handler."""
 
-    from .routes.ask import _build_ask_response
+    from .routes.ask import _build_ask_response, maybe_render_artifact
 
     async def ask_handler(
         *,
@@ -376,6 +376,12 @@ def _make_ask_handler(app):
             func_area_hint=functionalArea,
             max_results=maxResults,
         )
+
+        # Same render hook as the REST route — both paths go through this
+        # so a tier-1 skill with response_mode=artifact_url actually produces
+        # the PPT/DOCX/etc. Without this the MCP path silently returned only
+        # the extracted text (the trap I fell into on the first fix attempt).
+        maybe_render_artifact(app.state, result, question)
 
         response = _build_ask_response(result, consumer)
         return response
