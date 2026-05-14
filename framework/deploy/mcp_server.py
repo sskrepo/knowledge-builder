@@ -24,9 +24,67 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+
+def _configure_framework_logging() -> None:
+    """Wire the root logger so framework.* log.info()/warning()/error() calls
+    land in ~/.kbf/kbf-server.log alongside uvicorn's lines.
+
+    Previously, anything emitted via `log = logging.getLogger(__name__)` and
+    `log.info(...)` was silently dropped: uvicorn's --log-level=info only
+    configures uvicorn's OWN loggers, not the framework's. That made
+    incidents (BUG-queue-d3ec0, synth-tpm-14a54555, synth-tpm-3bda58fe)
+    much harder to diagnose because the application-level signal — INGEST
+    starting, codex calls, write_artifacts attempts, retry exhaustion —
+    was never persisted.
+
+    Configuration:
+      - INFO level by default (override via KBF_LOG_LEVEL=DEBUG/WARNING/etc.)
+      - Rotating file handler at ~/.kbf/kbf-server.log
+      - 10 MB per file, 5 backups (~50 MB ceiling)
+      - Idempotent: safe to call from lifespan even if uvicorn already added
+        handlers — we attach to the root logger, not to uvicorn's specific ones.
+    """
+    log_dir = Path(os.environ.get("KBF_LOG_DIR", str(Path.home() / ".kbf")))
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "kbf-server.log"
+
+    level_name = os.environ.get("KBF_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+
+    root = logging.getLogger()
+    # Don't double-attach if this function ran already (e.g. uvicorn --reload).
+    for h in root.handlers:
+        if isinstance(h, RotatingFileHandler) and getattr(h, "baseFilename", "") == str(log_path):
+            root.setLevel(level)
+            return
+
+    handler = RotatingFileHandler(
+        log_path,
+        maxBytes=10 * 1024 * 1024,  # 10 MB per file
+        backupCount=5,               # keep 5 rotations (~50 MB total)
+        encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter(
+        fmt="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    handler.setLevel(level)
+    root.addHandler(handler)
+    root.setLevel(level)
+
+    # Quiet down noisy third-party loggers; their INFO is mostly traffic detail.
+    for noisy in ("urllib3", "httpx", "oracledb"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+    log.info(
+        "framework logging configured: level=%s file=%s rotation=10MB×5",
+        level_name, log_path,
+    )
 
 
 def _load_app():
@@ -81,6 +139,11 @@ def _load_app():
         # ----------------------------------------------------------------
         # Startup: infrastructure first, then retrieval layer, then wiring
         # ----------------------------------------------------------------
+
+        # Configure logging FIRST — every subsequent log.info() in this
+        # function (and across framework.*) needs the file handler in place.
+        # Anything emitted before this call would land on stderr only.
+        _configure_framework_logging()
 
         # --- Auth + session + cost telemetry ---
         log.info("initialising auth/session/cost infrastructure…")
