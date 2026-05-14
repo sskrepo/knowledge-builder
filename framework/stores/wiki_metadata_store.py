@@ -60,14 +60,21 @@ class WikiMetadataStore:
             "content_hash": page_meta.get("content_hash"),
             "extraction_version": page_meta.get("extraction_version"),
         }
-        dest = self.root / f"{page_id}.json"
+        # page_id may contain characters illegal in filenames (slashes from a
+        # URL, colons, '+' etc.). Sanitise to a filesystem-safe stem for the
+        # JSON file while preserving the original page_id inside the record.
+        # Without this, URL-form page_ids crashed at write_text(...) with
+        # FileNotFoundError because '/' was treated as a directory separator.
+        safe_stem = re.sub(r"[^\w.-]", "_", page_id) or "_unnamed"
+        dest = self.root / f"{safe_stem}.json"
         dest.write_text(json.dumps(record, indent=2, default=str))
-        log.debug("wiki_metadata upsert: %s", page_id)
+        log.debug("wiki_metadata upsert: page_id=%s stem=%s", page_id, safe_stem)
         return page_id
 
     def delete_page(self, page_id: str) -> bool:
         """Delete a page metadata record. Returns True if it existed."""
-        path = self.root / f"{page_id}.json"
+        safe_stem = re.sub(r"[^\w.-]", "_", page_id) or "_unnamed"
+        path = self.root / f"{safe_stem}.json"
         if path.exists():
             path.unlink()
             log.debug("wiki_metadata delete: %s", page_id)
@@ -80,7 +87,8 @@ class WikiMetadataStore:
 
     def get_page(self, page_id: str) -> dict | None:
         """Return metadata record for page_id, or None if not found."""
-        path = self.root / f"{page_id}.json"
+        safe_stem = re.sub(r"[^\w.-]", "_", page_id) or "_unnamed"
+        path = self.root / f"{safe_stem}.json"
         if not path.exists():
             return None
         return json.loads(path.read_text())
