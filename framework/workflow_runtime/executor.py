@@ -24,9 +24,19 @@ _TELEMETRY_DIR = Path.home() / ".kbf" / "telemetry"
 
 
 class WorkflowExecutor:
-    def __init__(self, store=None, llm=None):
+    def __init__(self, store=None, llm=None, retrievers=None, shim_kb=None):
+        """retrievers: dict of {name -> retriever_callable} (e.g. search_wiki,
+        vector_search). When provided, _retrieve_for_inputs uses the
+        retriever named in each requires_extractions[i].kb's KB-card
+        `retrieval_tools` instead of falling back to fixtures.
+
+        shim_kb: ShimKb instance — used to resolve a KB name like
+        'tpm.weekly_exec_review_26ai' to its card (kind, retrieval_tools).
+        """
         self.store = store
         self.llm = llm
+        self.retrievers = retrievers or {}
+        self.shim_kb = shim_kb
 
     def execute(self, skill_yaml_path: Path, inputs: dict) -> dict:
         t_start = time.monotonic()
@@ -136,18 +146,75 @@ class WorkflowExecutor:
         return []
 
     def _retrieve_for_inputs(self, cfg: dict, inputs: dict, sources: list[dict]) -> list[dict]:
-        # If we have a real store, query it; else use fixture data
-        passages = []
-        if self.store:
+        """Retrieve passages for each required KB. Priority order:
+          1. Live retrievers (search_wiki, vector_search, ...) when KB-card
+             specifies retrieval_tools and the corresponding retriever is
+             registered. This is the prod/live path and the only way to get
+             actual ingested Confluence content into the rendered artifact.
+          2. Legacy direct store query (incident_summary / vector_knn).
+          3. Fixture data — last resort for laptop dev when no live data
+             exists. Previously this fell through too eagerly and rendered
+             tpm_weekly_ops fixture content into a 26ai weekly-exec PPT,
+             surfaced when the artifact-render hook went live.
+        """
+        passages: list[dict] = []
+        query_text = " ".join(str(v) for v in inputs.values() if v)
+
+        if self.retrievers and self.shim_kb:
+            # Build a quick lookup: short-name → card. KB names in
+            # requires_extractions look like 'tpm.weekly_exec_review_26ai'
+            # but cards live keyed by their short name.
+            all_cards = self.shim_kb.all_cards() if hasattr(self.shim_kb, "all_cards") else []
+            cards_by_name = {c.get("name"): c for c in all_cards if c.get("name")}
+            for req in cfg.get("requires_extractions", []):
+                kb_full_name = req.get("kb") or ""
+                short_name = kb_full_name.split(".")[-1]
+                card = cards_by_name.get(short_name) or cards_by_name.get(kb_full_name)
+                if not card:
+                    log.warning("executor: KB %s not found in shim_kb (short=%s) — skipping",
+                                kb_full_name, short_name)
+                    continue
+                tools = card.get("retrieval_tools") or []
+                for tool_name in tools:
+                    retriever = self.retrievers.get(tool_name)
+                    if retriever is None:
+                        log.warning(
+                            "executor: KB %s requires retriever %s but it's not registered",
+                            kb_full_name, tool_name,
+                        )
+                        continue
+                    try:
+                        results = retriever(query=query_text, persona=card.get("persona"))
+                    except TypeError:
+                        results = retriever(query=query_text)
+                    except Exception as exc:  # noqa: BLE001
+                        log.error("executor: retriever %s raised: %s", tool_name, exc)
+                        continue
+                    for r in results or []:
+                        # Result protocol: .text, .citation_url, .metadata
+                        passages.append({
+                            "text": getattr(r, "text", "") or "",
+                            "citation": getattr(r, "citation_url", "") or "",
+                            "metadata": getattr(r, "metadata", {}) or {},
+                            "kb": kb_full_name,
+                        })
+                    if passages:
+                        log.info(
+                            "executor: retrieved %d passages from %s via %s",
+                            len(results) if results else 0, kb_full_name, tool_name,
+                        )
+                        break  # first retriever that yielded results wins for this KB
+
+        # Legacy direct-store fallback (incident_summary etc.)
+        if not passages and self.store:
             from ..core.interfaces import Query
             for req in cfg.get("requires_extractions", []):
-                # Build query from inputs (simple pass-through: input as filter)
                 if "incident_id" in inputs:
                     q = Query(kind="incident_summary", payload={"incident_id": inputs["incident_id"]})
                 elif "release_id" in inputs:
                     q = Query(kind="filter", payload={"source_id": inputs["release_id"]})
                 else:
-                    q = Query(kind="vector_knn", payload={"query": " ".join(str(v) for v in inputs.values())})
+                    q = Query(kind="vector_knn", payload={"query": query_text})
                 results = self.store.query(q)
                 for r in results:
                     passages.append({
@@ -156,8 +223,12 @@ class WorkflowExecutor:
                         "metadata": r.metadata,
                     })
 
-        # Fallback: load from fixture data
+        # Last-resort fixture fallback — only when truly nothing else worked.
         if not passages:
+            log.warning(
+                "executor: no live retriever results — falling back to fixture data "
+                "(this is laptop-mode behaviour; production should always hit a real retriever)"
+            )
             passages = self._load_fixture_passages(inputs, cfg=cfg)
 
         return passages

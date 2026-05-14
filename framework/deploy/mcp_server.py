@@ -258,7 +258,18 @@ def _load_app():
         log.info("registering workflow skills as MCP tools…")
         workflow_registry = register_workflow_skills_as_mcp_tools(WORKFLOW_SKILLS_DIR)
         state["workflow_registry"] = workflow_registry
-        state["workflow_executor"] = WorkflowExecutor(store=None, llm=state["llm"])
+        # Wire retrievers + shim_kb into the executor so it can fetch actual
+        # ingested content (search_wiki for wiki KBs, vector_search for
+        # vector KBs, etc.) instead of falling back to fixture data.
+        # Without this, on-request artifact_url skills got rendered with
+        # the FIRST matching fixture file's content (weekly_exec_review_26ai
+        # ended up filled with tpm_weekly_ops fixture data).
+        state["workflow_executor"] = WorkflowExecutor(
+            store=None,
+            llm=state["llm"],
+            retrievers=retrievers,
+            shim_kb=state["shim_kb"],
+        )
         # Expose on app.state so the ask route + MCP handler can call it from
         # within a request (see _maybe_render_artifact in routes/ask.py).
         # Without this attribute the render hook silently no-ops with
