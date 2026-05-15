@@ -1366,6 +1366,237 @@ def cmd_backfill_skills(args):
 
 
 # ============================================================================
+# session recover — operator tool for stuck sessions (BUG-queue-573e3)
+# ============================================================================
+
+# Per-state fields that must be cleared / initialized when the operator
+# manually advances a session to a new state.  Only states that need
+# special treatment are listed; others need no field resets.
+_STATE_RESET_FIELDS: dict[str, dict] = {
+    # PREVIEW_EXTRACTION re-derives extraction_preview from source_samples
+    # via review_extractions().  Clearing it forces a fresh derivation on
+    # the next advance rather than replaying stale (possibly corrupt) data.
+    "PREVIEW_EXTRACTION": {
+        "extraction_preview": None,
+    },
+    # CONFIRM re-derives synthesized_artifacts from the design.  Leave them
+    # in place so the operator sees what was already designed; the session
+    # can move forward from there.
+}
+
+# Steps that were already completed at the state the session is stuck at.
+# Used to print the "you are bypassing these steps" warning.
+_BYPASSED_STEPS: dict[str, list[str]] = {
+    "PREVIEW_EXTRACTION": [
+        "CONFIGURE_TRIGGERS — operator must ensure trigger + output_format are "
+        "already set correctly in the session data (they were for synth-tpm-9571f396).",
+    ],
+}
+
+
+def _build_adb_pool_from_env(env: str):
+    """Build an oracledb pool for the given env config. Returns pool or raises."""
+    config_path = REPO_ROOT / "framework" / "config" / f"{env}.yaml"
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config not found: {config_path}")
+
+    with open(config_path) as fh:
+        cfg = yaml.safe_load(fh)
+
+    adb_cfg = cfg.get("adb", {})
+    from ..core.adb_pool import create_adb_pool  # type: ignore[import]
+
+    wallet_path = str(Path(adb_cfg.get("wallet_path", "")).expanduser())
+    wallet_password = _resolve_secret_cli(adb_cfg.get("wallet_password_secret", ""))
+    admin_user = adb_cfg.get("admin_user", "Admin")
+    admin_password = _resolve_secret_cli(adb_cfg.get("admin_password_secret", ""))
+    service_name = adb_cfg.get("dsn") or adb_cfg.get("service_name", "")
+
+    pool = create_adb_pool({
+        "deployment_mode": cfg.get("deployment_mode", "laptop"),
+        "adb": {
+            "service_name":    service_name,
+            "wallet_path":     wallet_path,
+            "user":            admin_user,
+            "password":        admin_password,
+            "wallet_password": wallet_password,
+        },
+        "bastion": cfg.get("bastion", {}),
+    })
+    return pool, service_name
+
+
+def cmd_session_recover(args):
+    """Recover a stuck authorSkill session to a valid state.
+
+    This is an operator-only escape hatch.  It does NOT fabricate skill
+    artifacts and does NOT silently skip required work.  The command prints
+    a clear warning of what is being bypassed and requires --confirm to write.
+
+    Usage:
+        kb-cli session recover --synth-id <id> --to-state <STATE> \\
+            [--env laptop] [--confirm]
+
+    Example (BUG-queue-573e3 fix):
+        kb-cli session recover \\
+            --synth-id synth-tpm-9571f396 \\
+            --to-state PREVIEW_EXTRACTION \\
+            --env laptop \\
+            --confirm
+    """
+    from ..skill_builder.conversation import STATES
+
+    synth_id = args.synth_id
+    to_state = args.to_state
+    env = args.env or os.environ.get("KBF_ENV", "laptop")
+    do_confirm = args.confirm
+
+    # --- Validate target state is a real member of the ADR-027 STATES list ---
+    if to_state not in STATES:
+        print(
+            f"ERROR: '{to_state}' is not a valid ADR-027 state.\n"
+            f"Valid states: {', '.join(STATES)}",
+            file=sys.stderr,
+        )
+        return 1
+
+    # --- Load the session from ADB ----------------------------------------
+    print(f"Connecting to ADB (env={env}) ...")
+    try:
+        pool, service_name = _build_adb_pool_from_env(env)
+        print(f"  Connected: {service_name}")
+    except Exception as exc:
+        print(f"ERROR: Could not connect to ADB: {exc}", file=sys.stderr)
+        return 1
+
+    # Direct SQL lookup — bypasses user_id ownership check so the operator
+    # can recover any session without knowing the user_id.
+    import json as _json
+    session: dict | None = None
+    user_id_in_db: str = ""
+    try:
+        with pool.acquire() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT synth_id, user_id, state, status, session_data "
+                    "FROM kb_shim.author_skill_sessions "
+                    "WHERE synth_id = :synth_id",
+                    {"synth_id": synth_id},
+                )
+                cols = [d[0].lower() for d in cur.description]
+                cur.rowfactory = lambda *vals: dict(zip(cols, vals))
+                row = cur.fetchone()
+    except Exception as exc:
+        print(f"ERROR: ADB query failed: {exc}", file=sys.stderr)
+        _close_pool(pool)
+        return 1
+
+    if row is None:
+        print(f"ERROR: Session '{synth_id}' not found in ADB.", file=sys.stderr)
+        _close_pool(pool)
+        return 1
+
+    user_id_in_db = row["user_id"] or ""
+    current_state = row["state"] or ""
+    current_status = row["status"] or ""
+    raw_data = row["session_data"]
+    session = raw_data if isinstance(raw_data, dict) else _json.loads(raw_data)
+
+    print(f"\nFound session:")
+    print(f"  synth_id    : {synth_id}")
+    print(f"  user_id     : {user_id_in_db}")
+    print(f"  current state: {current_state}  (status={current_status})")
+    print(f"  target state : {to_state}")
+
+    session_has_last_turn = "last_turn" in session
+    if current_state == to_state:
+        if not session_has_last_turn:
+            print(f"\nSession is already at {to_state} and has no stale last_turn. No change needed.")
+            _close_pool(pool)
+            return 0
+        # State already correct but last_turn may be stale from before the recovery.
+        # Clearing it ensures GET returns a fresh envelope derived from the new state.
+        print(f"\nSession is already at {to_state} but has a stale last_turn — clearing it.")
+        if not do_confirm:
+            print("Dry-run: would clear last_turn. Re-run with --confirm to apply.")
+            _close_pool(pool)
+            return 0
+        session.pop("last_turn", None)
+        session["status"] = "in_progress"
+        from ..deploy.session.adb_store import AdbSessionStore
+        store = AdbSessionStore(pool=pool)
+        try:
+            store.save(session, user_id=user_id_in_db)
+        except Exception as exc:
+            print(f"ERROR: Failed to save session: {exc}", file=sys.stderr)
+            _close_pool(pool)
+            return 1
+        _close_pool(pool)
+        print(f"  Cleared stale last_turn from session '{synth_id}' (state remains {to_state})")
+        return 0
+
+    # --- Print bypass warning ---------------------------------------------
+    bypassed = _BYPASSED_STEPS.get(to_state, [])
+    resets = _STATE_RESET_FIELDS.get(to_state, {})
+
+    print()
+    print("WARNING: This operator recovery will:")
+    print(f"  - Force state from {current_state!r} -> {to_state!r}")
+    if bypassed:
+        print("  - Bypass the following steps/checks:")
+        for b in bypassed:
+            print(f"      * {b}")
+    if resets:
+        print(f"  - Clear/initialize these per-state cached fields: {list(resets.keys())}")
+    print("  - This action MUST NOT be used to fabricate skill artifacts.")
+    print("  - Existing session data (fields, design, sources) is preserved.")
+
+    if not do_confirm:
+        print(
+            "\nDry-run complete (no changes written). "
+            "Re-run with --confirm to apply.",
+            file=sys.stderr,
+        )
+        _close_pool(pool)
+        return 0
+
+    # --- Apply the state change -------------------------------------------
+    session["state"] = to_state
+
+    # Apply per-state field resets
+    for field, value in resets.items():
+        session[field] = value
+
+    # Clear last_turn so the GET endpoint derives a fresh envelope from the new
+    # state rather than serving the stale CONFIGURE_TRIGGERS turn message.
+    session.pop("last_turn", None)
+
+    # Keep status in_progress (session is not committed/abandoned)
+    session["status"] = "in_progress"
+
+    # Persist back via AdbSessionStore (which handles CLOB binding correctly)
+    from ..deploy.session.adb_store import AdbSessionStore
+    store = AdbSessionStore(pool=pool)
+    try:
+        store.save(session, user_id=user_id_in_db)
+    except Exception as exc:
+        print(f"ERROR: Failed to save session: {exc}", file=sys.stderr)
+        _close_pool(pool)
+        return 1
+
+    _close_pool(pool)
+
+    print(f"\nSession '{synth_id}' recovered:")
+    print(f"  {current_state} -> {to_state}")
+    print(f"  status: in_progress")
+    print()
+    print("Verify with:")
+    print(f"  curl -s -H 'Authorization: Bearer dev-only-token-replace-me' \\")
+    print(f"    http://localhost:8080/api/v1/kb/authorSkill/{synth_id}")
+    return 0
+
+
+# ============================================================================
 # main
 # ============================================================================
 def main():
@@ -1469,6 +1700,40 @@ def main():
     pbf.add_argument("--persona", default=None, help="backfill only this persona (e.g. tpm)")
     pbf.add_argument("--dry-run", action="store_true", help="discover skills but don't write to ADB")
     pbf.set_defaults(fn=cmd_backfill_skills)
+
+    # ── session subcommand group ──────────────────────────────────────────
+    p_session = sub.add_parser(
+        "session",
+        help="operator tools for authorSkill sessions",
+    )
+    session_sub = p_session.add_subparsers(dest="session_cmd", required=True)
+
+    p_recover = session_sub.add_parser(
+        "recover",
+        help="force a stuck session to a valid state (operator only — BUG-queue-573e3)",
+    )
+    p_recover.add_argument(
+        "--synth-id",
+        required=True,
+        help="authorSkill session ID to recover (e.g. synth-tpm-9571f396)",
+    )
+    p_recover.add_argument(
+        "--to-state",
+        required=True,
+        help="target ADR-027 state to force the session into (e.g. PREVIEW_EXTRACTION)",
+    )
+    p_recover.add_argument(
+        "--env",
+        default=None,
+        help="config env name (overrides KBF_ENV, default: laptop)",
+    )
+    p_recover.add_argument(
+        "--confirm",
+        action="store_true",
+        help="actually write the change (omit for dry-run)",
+    )
+    p_recover.set_defaults(fn=cmd_session_recover)
+    p_session.set_defaults(fn=lambda a: (session_sub.print_help() or 1))
 
     args = p.parse_args()
     return args.fn(args)
