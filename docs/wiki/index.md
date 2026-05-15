@@ -57,9 +57,11 @@
 - [ADR-025 — Vector index INMEMORY rebuild on first production deploy ⚠️ prod gate](adr/ADR-025-vector-index-inmemory-prod-rebuild.md)
 - [ADR-026 — Source-grounded schema review + layout-aware PPTX rendering](adr/ADR-026-source-grounded-schema-review-and-layout-aware-pptx.md)
 - [ADR-027 — Design-first authorSkill — 16-state machine](adr/ADR-027-design-first-authorskill.md)
+- [ADR-028 — authorSkill: prompt investment, human-loop enforcement, and conversational clarification](adr/ADR-028-authorskill-prompt-investment-human-loop-conversation.md) — **PROPOSED — awaiting user direction (DECISION-011)**
 
 ## Skill builder
 - **[authorSkill flow — state-by-state LLM usage map](authorskill-flow.md)** — NEW 16-state machine (post-ADR-027): design-first, source inspection before schema design, real EVAL with auto-generated gold sets
+- **[authorSkill prompts — full prompt dump](authorskill-prompts.md)** — living reference: every LLM prompt in the authorSkill flow with format kwargs and persona-awareness audit (ADR-028 Item 1)
 - [authorSkill flow — pre-ADR-027 (archived)](authorskill-flow-pre-adr-027.md) — 15-state machine; preserved for reference and in-flight session support
 
 ## Engineering
