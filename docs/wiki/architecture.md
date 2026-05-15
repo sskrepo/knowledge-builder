@@ -248,6 +248,29 @@ For Phase 1 (incident KB end-to-end), the active subset is:
 
 Everything else (other personas' skills, code wiki, FA graph, ACL) lives behind feature flags / unfilled config — present in the codebase but inactive until later phases enable them.
 
+## LLM JSON output sanitisation (BUG-queue-573e3)
+
+`framework/skill_builder/review.py::_llm_extract` must sanitise bare control
+characters from OCI LLM JSON responses before calling `json.loads()`. The OCI
+`JSON_OBJECT` response mode does NOT guarantee that `\n`, `\r`, or `\t`
+characters inside JSON string values are backslash-escaped — multi-line
+Confluence table-cell content can produce raw newlines that break the JSON
+parser with "Unterminated string".
+
+The helper `_escape_bare_control_chars(s)` walks the string character by
+character, escaping raw control chars only while inside a double-quoted JSON
+string (respecting `\`-escape sequences). Structural whitespace between keys is
+outside any string and is left untouched.
+
+Parse order in `_llm_extract` (fail-loud, no silent return {}):
+1. `json.loads(cleaned)` — fast path for well-formed output.
+2. `json.loads(_escape_bare_control_chars(cleaned))` — OCI bare-newline fix.
+3. Extract `{...}` slice from sanitised text, `json.loads()` that.
+4. If all fail: raise `ValueError` with the first 500 chars of the payload
+   and a reference to BUG-queue-573e3. Never return `{}`.
+
+See also: `framework/tests/unit/test_review.py` for unit coverage.
+
 ## Where to read deeper
 
 - [PDD](pdd/PDD-Knowledge-Builder-Framework.md) — executive narrative
