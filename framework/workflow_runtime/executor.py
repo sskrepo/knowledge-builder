@@ -488,6 +488,8 @@ class WorkflowExecutor:
             "Respond with ONLY the JSON object, no prose, no markdown fences."
         )
 
+        # max_tokens=4096 must stay in sync with _EXTRACT_MAX_TOKENS in
+        # skill_builder/review.py — see BUG-queue-44364.
         result = self.llm.chat(
             model="synthesis",
             messages=[{"role": "user", "content": prompt}],

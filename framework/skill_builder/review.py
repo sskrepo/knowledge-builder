@@ -15,6 +15,18 @@ values, causing json.loads() to raise JSONDecodeError("Unterminated string").
 The fix is _escape_bare_control_chars() — a state-machine that escapes those
 characters ONLY while inside a double-quoted JSON string, leaving structural
 whitespace between keys untouched.  See _llm_extract for usage.
+
+BUG-queue-44364 (2026-05-15): Schemas with many fields (e.g. 32+ fields) cause
+the OCI model to emit exactly _EXTRACT_MAX_TOKENS output tokens — the hard
+ceiling — so the JSON is TRUNCATED mid-string.  All three parse-recovery
+attempts fail because the trailing fields are structurally absent, not merely
+containing unescaped control chars (that is BUG-queue-573e3, a distinct issue).
+The fix: raise _EXTRACT_MAX_TOKENS from 2048 to 4096 (matching
+WorkflowExecutor._llm_extract_fields — the production path this preview
+mirrors), and add explicit post-call truncation detection.  If all parse
+attempts fail AND tokens_out >= max_tokens the error names the truncation root
+cause and instructs the operator to increase max_tokens or reduce schema size.
+See _llm_extract for the detection logic.
 """
 from __future__ import annotations
 
@@ -24,6 +36,12 @@ import re
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+# Maximum tokens requested from the LLM for extraction.  Must match
+# WorkflowExecutor._llm_extract_fields (executor.py ~line 495) so the eval
+# preview path and the production runtime path cannot drift.
+# Raised from 2048 → 4096 to fix BUG-queue-44364 (truncation on 32-field schemas).
+_EXTRACT_MAX_TOKENS = 4096
 
 
 def review_extractions(
@@ -232,13 +250,19 @@ def _llm_extract(sample: dict, schema: dict, llm) -> dict[str, Any]:
         text=text,
     )
 
+    n_fields = len(properties)
+    max_tokens = _EXTRACT_MAX_TOKENS
+
     try:
         result = llm.chat(
             model="synthesis",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            max_tokens=2048,
+            max_tokens=max_tokens,
         )
+        # Capture tokens_out for truncation detection (BUG-queue-44364).
+        # llm_oci.py returns {"text": ..., "tokens_in": ..., "tokens_out": ..., ...}.
+        tokens_out = result.get("tokens_out") if isinstance(result, dict) else None
         raw = result.get("text", "") if isinstance(result, dict) else str(result)
         cleaned = re.sub(r"```(?:json)?\n?(.*?)\n?```", r"\1", raw, flags=re.S).strip()
 
@@ -265,18 +289,48 @@ def _llm_extract(sample: dict, schema: dict, llm) -> dict[str, Any]:
             except json.JSONDecodeError:
                 pass
 
-        # --- All attempts failed: raise a loud, actionable error.
-        # Do NOT return {} — that is silent data loss (no-stub-mode policy).
+        # --- All parse attempts failed.  Determine the most likely root cause
+        # so the error is actionable.  Do NOT return {} — that is silent data
+        # loss (no-stub-mode policy).
+
+        # BUG-queue-44364 detection: if the response hit the token ceiling the
+        # JSON is structurally truncated — missing trailing fields and closing
+        # braces.  This is DISTINCT from BUG-queue-573e3 (bare control chars).
+        if tokens_out is not None and tokens_out >= max_tokens:
+            log.error(
+                "_llm_extract: LLM response hit token ceiling "
+                "(tokens_out=%d >= max_tokens=%d, schema_fields=%d). "
+                "JSON is structurally truncated — this is BUG-queue-44364, "
+                "NOT a control-char issue. First 500 chars: %s",
+                tokens_out, max_tokens, n_fields, sanitized[:500],
+            )
+            raise ValueError(
+                f"_llm_extract: LLM response truncated at max_tokens={max_tokens} "
+                f"(tokens_out={tokens_out}); schema has {n_fields} fields. "
+                f"Increase max_tokens or reduce schema size. "
+                f"This is NOT BUG-queue-573e3 (control chars) — it is structural "
+                f"truncation (BUG-queue-44364). "
+                f"First 500 chars: {sanitized[:500]!r}"
+            )
+
+        # Non-ceiling failure: could be BUG-queue-573e3 (bare control chars),
+        # other model formatting issues, or a combination of both.  Both bug IDs
+        # are named so the operator can investigate either path.
         log.error(
-            "_llm_extract: all JSON parse attempts failed (BUG-queue-573e3). "
-            "First 500 chars of sanitized payload: %s",
-            sanitized[:500],
+            "_llm_extract: all JSON parse attempts failed "
+            "(tokens_out=%s, max_tokens=%d, schema_fields=%d). "
+            "Possible causes: unescaped control chars (BUG-queue-573e3) or "
+            "other malformed output. First 500 chars of sanitized payload: %s",
+            tokens_out, max_tokens, n_fields, sanitized[:500],
         )
         raise ValueError(
             f"_llm_extract: could not parse LLM JSON response after sanitization. "
-            f"OCI JSON_OBJECT mode may have emitted unescaped control characters. "
+            f"Possible causes: (1) unescaped control characters in OCI JSON_OBJECT "
+            f"output (see BUG-queue-573e3); (2) other model formatting error. "
+            f"tokens_out={tokens_out}, max_tokens={max_tokens}, "
+            f"schema_fields={n_fields}. "
             f"First 500 chars: {sanitized[:500]!r} "
-            f"(see BUG-queue-573e3)"
+            f"(see BUG-queue-573e3, BUG-queue-44364)"
         )
     except Exception as exc:
         log.error("_llm_extract: LLM call failed: %s", exc)

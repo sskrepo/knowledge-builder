@@ -266,8 +266,35 @@ Parse order in `_llm_extract` (fail-loud, no silent return {}):
 1. `json.loads(cleaned)` — fast path for well-formed output.
 2. `json.loads(_escape_bare_control_chars(cleaned))` — OCI bare-newline fix.
 3. Extract `{...}` slice from sanitised text, `json.loads()` that.
-4. If all fail: raise `ValueError` with the first 500 chars of the payload
-   and a reference to BUG-queue-573e3. Never return `{}`.
+4. If all fail: check `tokens_out` vs `max_tokens` (see BUG-queue-44364 below).
+   - If `tokens_out >= max_tokens`: raise `ValueError` naming structural truncation
+     (BUG-queue-44364). Never return `{}`.
+   - Otherwise: raise `ValueError` naming both possible causes (BUG-queue-573e3
+     and BUG-queue-44364) without asserting which is definite. Never return `{}`.
+
+## LLM output max-token truncation (BUG-queue-44364)
+
+`_llm_extract` uses `_EXTRACT_MAX_TOKENS = 4096` (raised from 2048 in the fix).
+This matches `WorkflowExecutor._llm_extract_fields` (`executor.py` ~line 495)
+so the eval preview path and the production runtime path cannot drift.
+
+Root cause of original defect: with the old 2048-token ceiling, a 32-field
+schema caused the OCI model to emit exactly 2048 tokens — the hard ceiling —
+truncating the JSON mid-string (observed: cut at field 19, key beginning `"m`).
+All three parse-recovery attempts failed because 14 fields were structurally
+absent, not merely containing unescaped control chars (that is BUG-queue-573e3).
+
+Detection: after `llm.chat()` returns, `tokens_out` is captured from the result
+dict (`llm_oci.py` returns `{"text": ..., "tokens_out": ..., ...}`). If all
+parse attempts fail AND `tokens_out >= max_tokens`, the error message explicitly
+names structural truncation and BUG-queue-44364, directing the operator to
+increase `max_tokens` or reduce schema size rather than chasing control chars.
+
+Residual risk: 4096 is higher than 2048 but is still a finite ceiling. A schema
+with significantly more than 32 dense fields, or with very long field
+descriptions, could still hit the ceiling. If that occurs, the truncation
+detection will fire and name the issue — the operator should reduce schema size
+or split extraction into batches.
 
 See also: `framework/tests/unit/test_review.py` for unit coverage.
 
