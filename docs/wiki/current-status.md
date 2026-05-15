@@ -11,7 +11,7 @@ status: current
 # Current Status
 
 ## Where we are
-**Phase 1-3 + V3 deployment layer + laptop mode code complete. ADR-027 design-first authorSkill live.** 160+ Python files, ~18K LOC, 600+ tests passing. ADR-027 replaces the 15-state machine with a 16-state design-first flow: sources are inspected BEFORE schema design; DESIGN_SKILL produces schema + bindings + workflow shape in one integrated LLM call; EVAL runs real extraction scoring with auto-generated gold rows. Last filed: ADR-027, DECISION-010.
+**Phase 1-3 + V3 deployment layer + laptop mode code complete. ADR-027 design-first authorSkill live. ADR-029 proposed (design + feasibility — no code change).** 160+ Python files, ~18K LOC, 600+ tests passing. ADR-027 replaces the 15-state machine with a 16-state design-first flow: sources are inspected BEFORE schema design; DESIGN_SKILL produces schema + bindings + workflow shape in one integrated LLM call; EVAL runs real extraction scoring with auto-generated gold rows. ADR-029 proposes replacing intrinsic EVAL with an outcome-based acceptance loop (reference artifact as ground truth, user acceptance as terminal gate, constrained replan-routing). Two open decisions: DECISION-011 (ADR-028 Items 1-4) and ADR-029 options. Last filed: ADR-027, DECISION-010, ADR-028, ADR-029.
 
 ### What's runnable today
 ```bash

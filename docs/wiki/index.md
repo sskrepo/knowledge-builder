@@ -58,6 +58,7 @@
 - [ADR-026 — Source-grounded schema review + layout-aware PPTX rendering](adr/ADR-026-source-grounded-schema-review-and-layout-aware-pptx.md)
 - [ADR-027 — Design-first authorSkill — 16-state machine](adr/ADR-027-design-first-authorskill.md)
 - [ADR-028 — authorSkill: prompt investment, human-loop enforcement, and conversational clarification](adr/ADR-028-authorskill-prompt-investment-human-loop-conversation.md) — **PROPOSED — awaiting user direction (DECISION-011)**
+- [ADR-029 — Outcome-based EVAL: demonstration-artifact acceptance loop](adr/ADR-029-outcome-based-eval-acceptance-loop.md) — **PROPOSED — supersedes DECISION-010 terminal gate; reconciles DECISION-011; awaiting user direction**
 
 ## Skill builder
 - **[authorSkill flow — state-by-state LLM usage map](authorskill-flow.md)** — NEW 16-state machine (post-ADR-027): design-first, source inspection before schema design, real EVAL with auto-generated gold sets

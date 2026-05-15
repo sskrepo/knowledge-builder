@@ -4,6 +4,12 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-15] architect | ADR-029 proposed: outcome-based EVAL + DECISION-011 reconciliation
+
+Filed ADR-029 (proposed, NOT accepted). Proposes replacing the ADR-027 intrinsic EVAL (recall@k + faithfulness numeric gate) with an outcome-based, demonstration-artifact acceptance loop: (1) extract, (2) run full workflow to produce artifact, (3) compare produced artifact against user's reference using a semantic comparator (structure/density/layout/fidelity rubric), (4) surface gap report + CHANGE PROPOSAL, (5) route back to the appropriate prior state via a constrained failure-class → target-state map, (6) loop until user explicitly accepts. User acceptance is the terminal gate, not a numeric threshold. Root cause of the failure: reference artifact uploaded at UPLOAD_ARTIFACT_EXAMPLE is parsed into a layout dict then discarded — `_run_eval` (conversation.py:3180-3563) never reads `_data.artifact_layout` and never compares the produced PPTX against the reference. Feasibility analysis covers image-only reference problem (vision-LLM recommended, OCI constraint flagged), semantic rubric design, constrained routing map with loop guardrails (max 3 iterations, $2 cost ceiling, pathological-loop detector), and per-iteration cost (~$0.03-0.07). Three options presented (full loop, scoring-only, hybrid phased) with Option C recommended. DECISION-011 reconciliation: Items 2 + 4 are prerequisites for ADR-029; Item 3 is complementary; Item 1 is independent. DECISION-010 auto-gold rows retained as diagnostic signal, superseded only as terminal gate. Single recommended decision path provided. DECISION-010 marked with superseded-by note. dashboard.md + index.md updated. No code changes.
+
+---
+
 ## [2026-05-15] backend-dev | fixed BUG-queue-44364 (eval _llm_extract max_tokens truncation)
 
 Root cause: `_llm_extract` in `framework/skill_builder/review.py` called `llm.chat(..., max_tokens=2048)` — a 32-field schema caused the OCI model to hit the ceiling and emit structurally truncated JSON. The production path `WorkflowExecutor._llm_extract_fields` already used `max_tokens=4096`; the eval preview was inconsistent.

@@ -11,7 +11,7 @@ status: current
 # Knowledgebase — Dashboard
 
 **Current phase:** Phase 1-3 + V3 + laptop mode — ADR-027 design-first authorSkill live
-**Updated:** 2026-05-15 by architect (ADR-028 filed + DECISION-011 open)
+**Updated:** 2026-05-15 by architect (ADR-029 proposed: outcome-based EVAL + DECISION-011 reconciliation)
 
 ## Session update — 2026-05-14 (ADR-027 design-first authorSkill + DECISION-010)
 
@@ -221,6 +221,7 @@ python -m framework.cli.kb_cli promote framework/persona_builders/ops-eng.yaml -
 | # | Title | Why | Options |
 |---|-------|-----|---------|
 | [DECISION-011](decisions/DECISION-011-authorskill-prompt-and-human-loop-direction.md) | authorSkill: prompt investment, human-loop enforcement, clarification strategy | ADR-028 audit found: static prompts, no human-loop signal, "ok" steamrolls ambiguities. 4 items to decide. | See DECISION-011 — reply "DECISION-011: Item1=A, Item2=A, Item3=A, Item4=A" |
+| [ADR-029](../docs/wiki/adr/ADR-029-outcome-based-eval-acceptance-loop.md) | Outcome-based EVAL — demonstration-artifact acceptance loop | EVAL passes while artifact is wrong; reference artifact discarded at UPLOAD_ARTIFACT_EXAMPLE; intrinsic scoring measures consistency not correctness. ADR-029 proposes outcome scoring + user-acceptance gate + constrained replan-routing. Supersedes DECISION-010 terminal gate. Reconciles DECISION-011 items. | Read ADR-029 sections D + E. Reply with chosen option (A/B/C) and DECISION-011 reconciliation path. |
 
 ## 🟡 In-flight work
 

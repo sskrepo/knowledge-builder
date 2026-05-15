@@ -6,8 +6,16 @@ owner: architect
 deciders: user
 outcome: "Option A — auto-generate gold rows from live samples; surface to user with kind=auto_generated"
 tags: [eval, gold-sets, quality]
-related: [ADR-027]
+related: [ADR-027, ADR-029]
 ---
+
+> **NOTE (2026-05-15) — Partially superseded by ADR-029 (proposed).**
+> ADR-029 proposes replacing the numeric recall@k + faithfulness TERMINAL GATE
+> with user-acceptance as the gate. The auto-generated gold rows are RETAINED
+> and continue to be computed — they are demoted from "gate" to "diagnostic
+> signal." If ADR-029 is accepted, DECISION-010's Option A outcome survives for
+> gold-row generation but its pass/fail gating function is superseded.
+> Do NOT delete this file. Read ADR-029 section E for the full disposition.
 
 # DECISION-010 — EVAL gold sets: auto-generated vs human-curated
 
