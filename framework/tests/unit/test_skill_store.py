@@ -721,6 +721,160 @@ class TestAdbPersonaBuilderKbs:
 
 
 # ---------------------------------------------------------------------------
+# CLOB binding — BUG-queue-440da
+#
+# AdbSkillStore.write_artifacts and upsert_persona_builder_kb must call
+# cursor.setinputsizes(content=DB_TYPE_CLOB) / (content_yaml=DB_TYPE_CLOB)
+# before executing the MERGE statement. Without this the oracledb thin driver
+# binds Python str as VARCHAR2(4000) by default, causing ORA-03146 when
+# artifact content exceeds 4000 bytes (e.g. 9488-byte extraction schema or
+# 5358-byte workflow YAML for a 32-field skill).
+#
+# The mock-pool approach can only verify that setinputsizes is called (the
+# mock happily accepts any arguments). Real ORA-03146 reproduction requires
+# a live ADB connection (tested by the team against synth-tpm-9571f396).
+# ---------------------------------------------------------------------------
+
+
+class TestAdbSkillStoreWriteArtifactsClobBinding:
+    """Regression tests for BUG-queue-440da: write_artifacts must call
+    setinputsizes(content=DB_TYPE_CLOB) before the MERGE execute so that
+    the oracledb thin driver uses the LOB binding protocol instead of
+    VARCHAR2, which overflows at 4000 bytes (ORA-03146).
+    """
+
+    def test_setinputsizes_called_with_content_clob(self):
+        """setinputsizes must be invoked with content=DB_TYPE_CLOB before
+        the first cur.execute(_SQL_UPSERT, ...) call in write_artifacts.
+        """
+        mock_pool, mock_conn, mock_cur = _make_mock_pool()
+
+        # Patch the module-level flag so the branch is taken
+        import framework.deploy.skill_store.adb as adb_mod
+        original_flag = adb_mod._ORACLEDB_AVAILABLE
+        adb_mod._ORACLEDB_AVAILABLE = True
+
+        # Use a sentinel that confirms the keyword arg is the CLOB type
+        clob_sentinel = object()
+        original_oracledb = getattr(adb_mod, "oracledb", None)
+        mock_oracledb = MagicMock()
+        mock_oracledb.DB_TYPE_CLOB = clob_sentinel
+        adb_mod.oracledb = mock_oracledb
+
+        try:
+            store = AdbSkillStore(pool=mock_pool)
+            store.write_artifacts(
+                synth_id="synth-440da",
+                persona="tpm",
+                skill_name="26ai_fa_db_upgrade",
+                artifacts={"workflow_skill": "x" * 5500},  # > 4000 bytes
+            )
+        finally:
+            adb_mod._ORACLEDB_AVAILABLE = original_flag
+            if original_oracledb is not None:
+                adb_mod.oracledb = original_oracledb
+            else:
+                del adb_mod.oracledb
+
+        # setinputsizes must have been called once
+        mock_cur.setinputsizes.assert_called_once()
+        call_kwargs = mock_cur.setinputsizes.call_args.kwargs
+        assert call_kwargs.get("content") is clob_sentinel, (
+            f"Expected setinputsizes(content=DB_TYPE_CLOB) but got {call_kwargs!r}. "
+            "Without this the oracledb thin driver binds large content as "
+            "VARCHAR2(4000), causing ORA-03146 for artifacts > 4000 bytes "
+            "(extraction_schema is 9488 bytes for a 32-field skill)."
+        )
+
+    def test_large_content_does_not_raise_when_setinputsizes_wired(self):
+        """Smoke test: write_artifacts with content > 4000 bytes must not
+        raise — the mock driver does not enforce the VARCHAR2 limit, but
+        the absence of setinputsizes is what caused ORA-03146 on real ADB.
+        This test verifies the code path is exercised without error.
+        """
+        mock_pool, mock_conn, mock_cur = _make_mock_pool()
+        store = AdbSkillStore(pool=mock_pool)
+
+        large_artifacts = {
+            "extraction_schema": "{" + "a" * 10000 + "}",  # >> 4000 bytes
+            "workflow_skill": "y" * 6000,
+        }
+
+        # Must not raise (regardless of real DB or mock)
+        store.write_artifacts(
+            synth_id="synth-440da",
+            persona="tpm",
+            skill_name="26ai_fa_db_upgrade",
+            artifacts=large_artifacts,
+        )
+        # execute called once per artifact
+        assert mock_cur.execute.call_count == 2
+
+    def test_setinputsizes_not_called_when_oracledb_unavailable(self):
+        """When _ORACLEDB_AVAILABLE is False (oracledb not installed),
+        setinputsizes must NOT be called — there is no DB_TYPE_CLOB constant
+        to reference. The write still proceeds (mock driver, no real DB check).
+        """
+        mock_pool, mock_conn, mock_cur = _make_mock_pool()
+
+        import framework.deploy.skill_store.adb as adb_mod
+        original_flag = adb_mod._ORACLEDB_AVAILABLE
+        adb_mod._ORACLEDB_AVAILABLE = False
+
+        try:
+            store = AdbSkillStore(pool=mock_pool)
+            store.write_artifacts(
+                synth_id="s", persona="tpm", skill_name="sk",
+                artifacts={"workflow_skill": "c"},
+            )
+        finally:
+            adb_mod._ORACLEDB_AVAILABLE = original_flag
+
+        mock_cur.setinputsizes.assert_not_called()
+
+
+class TestAdbPersonaBuilderClobBinding:
+    """Regression for BUG-queue-440da: upsert_persona_builder_kb must call
+    setinputsizes(content_yaml=DB_TYPE_CLOB) before executing the MERGE so
+    that large persona-builder YAML diffs don't trigger ORA-03146.
+    """
+
+    def test_setinputsizes_called_with_content_yaml_clob(self):
+        mock_pool, mock_conn, mock_cur = _make_mock_pool()
+
+        import framework.deploy.skill_store.adb as adb_mod
+        original_flag = adb_mod._ORACLEDB_AVAILABLE
+        adb_mod._ORACLEDB_AVAILABLE = True
+
+        clob_sentinel = object()
+        original_oracledb = getattr(adb_mod, "oracledb", None)
+        mock_oracledb = MagicMock()
+        mock_oracledb.DB_TYPE_CLOB = clob_sentinel
+        adb_mod.oracledb = mock_oracledb
+
+        try:
+            store = AdbSkillStore(pool=mock_pool)
+            store.upsert_persona_builder_kb(
+                persona="tpm",
+                kb_name="26ai_fa_db_upgrade",
+                content_yaml="name: big_skill\n" + "field: value\n" * 500,
+                status="production",
+            )
+        finally:
+            adb_mod._ORACLEDB_AVAILABLE = original_flag
+            if original_oracledb is not None:
+                adb_mod.oracledb = original_oracledb
+            else:
+                del adb_mod.oracledb
+
+        mock_cur.setinputsizes.assert_called_once()
+        call_kwargs = mock_cur.setinputsizes.call_args.kwargs
+        assert call_kwargs.get("content_yaml") is clob_sentinel, (
+            f"Expected setinputsizes(content_yaml=DB_TYPE_CLOB) but got {call_kwargs!r}."
+        )
+
+
+# ---------------------------------------------------------------------------
 # deleteSkill MCP tool
 # ---------------------------------------------------------------------------
 

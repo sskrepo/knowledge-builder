@@ -27,6 +27,12 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+try:
+    import oracledb
+    _ORACLEDB_AVAILABLE = True
+except ImportError:
+    _ORACLEDB_AVAILABLE = False
+
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -209,6 +215,16 @@ class AdbErrorStore(ErrorStore):
         try:
             with self._pool.acquire() as conn:
                 with conn.cursor() as cur:
+                    # message, stack_trace, extra_json are CLOB columns.
+                    # Stack traces from complex sessions can exceed the 4000-byte
+                    # Oracle SQL VARCHAR2 limit (ORA-03146 without setinputsizes).
+                    # Same fix as write_artifacts/content (BUG-queue-440da).
+                    if _ORACLEDB_AVAILABLE:
+                        cur.setinputsizes(
+                            message=oracledb.DB_TYPE_CLOB,
+                            stack_trace=oracledb.DB_TYPE_CLOB,
+                            extra_json=oracledb.DB_TYPE_CLOB,
+                        )
                     cur.execute(_SQL_INSERT_ERROR, params)
                 conn.commit()
         except Exception as exc:
@@ -248,6 +264,13 @@ class AdbErrorStore(ErrorStore):
         try:
             with self._pool.acquire() as conn:
                 with conn.cursor() as cur:
+                    # description and extra_json are CLOB columns.
+                    # Same fix as write_artifacts/content (BUG-queue-440da).
+                    if _ORACLEDB_AVAILABLE:
+                        cur.setinputsizes(
+                            description=oracledb.DB_TYPE_CLOB,
+                            extra_json=oracledb.DB_TYPE_CLOB,
+                        )
                     cur.execute(_SQL_INSERT_BUG, params)
                 conn.commit()
         except Exception as exc:

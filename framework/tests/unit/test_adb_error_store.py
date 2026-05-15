@@ -175,3 +175,115 @@ class TestAdbErrorStoreRecordUserBug:
         bugs = store.read_user_bugs()
         assert len(bugs) == 1
         assert bugs[0]["queue_id"] == "BUG-abc"
+
+
+# ---------------------------------------------------------------------------
+# CLOB binding — BUG-queue-440da
+#
+# AdbErrorStore.record_error and record_user_bug must call setinputsizes for
+# CLOB columns (stack_trace, message, extra_json, description) so the
+# oracledb thin driver uses LOB binding rather than VARCHAR2(4000).
+# Stack traces for 32-field sessions easily exceed 4000 bytes.
+# ---------------------------------------------------------------------------
+
+
+class TestAdbErrorStoreClobBinding:
+    """Regression tests for BUG-queue-440da: AdbErrorStore must declare
+    CLOB columns via setinputsizes so that long stack traces and large
+    bug descriptions don't trigger ORA-03146 on real ADB.
+    """
+
+    def _patch_clob_flag(self, error_mod, value: bool):
+        original = error_mod._ORACLEDB_AVAILABLE
+        error_mod._ORACLEDB_AVAILABLE = value
+        return original
+
+    def _patch_oracledb(self, error_mod, clob_sentinel):
+        original = getattr(error_mod, "oracledb", None)
+        mock_oracledb = MagicMock()
+        mock_oracledb.DB_TYPE_CLOB = clob_sentinel
+        error_mod.oracledb = mock_oracledb
+        return original
+
+    def _restore_oracledb(self, error_mod, original):
+        if original is not None:
+            error_mod.oracledb = original
+        elif hasattr(error_mod, "oracledb"):
+            del error_mod.oracledb
+
+    def test_record_error_calls_setinputsizes_for_clob_columns(self, tmp_store):
+        """record_error must call setinputsizes with message, stack_trace,
+        and extra_json declared as DB_TYPE_CLOB before the INSERT execute.
+        """
+        import framework.deploy.error_store as error_mod
+        pool, mock_conn, mock_cur = _make_mock_pool()
+
+        clob_sentinel = object()
+        orig_flag = self._patch_clob_flag(error_mod, True)
+        orig_odb = self._patch_oracledb(error_mod, clob_sentinel)
+
+        try:
+            store = AdbErrorStore(pool, tmp_store)
+            store.record_error({
+                "request_id": "req-clob",
+                "message": "m" * 5000,           # > 4000 bytes
+                "stack_trace": "t" * 6000,        # > 4000 bytes
+            })
+        finally:
+            self._patch_clob_flag(error_mod, orig_flag)
+            self._restore_oracledb(error_mod, orig_odb)
+
+        mock_cur.setinputsizes.assert_called_once()
+        kwargs = mock_cur.setinputsizes.call_args.kwargs
+        assert kwargs.get("message") is clob_sentinel, (
+            f"Expected setinputsizes(message=DB_TYPE_CLOB), got {kwargs!r}"
+        )
+        assert kwargs.get("stack_trace") is clob_sentinel, (
+            f"Expected setinputsizes(stack_trace=DB_TYPE_CLOB), got {kwargs!r}"
+        )
+        assert kwargs.get("extra_json") is clob_sentinel, (
+            f"Expected setinputsizes(extra_json=DB_TYPE_CLOB), got {kwargs!r}"
+        )
+
+    def test_record_user_bug_calls_setinputsizes_for_clob_columns(self, tmp_store):
+        """record_user_bug must declare description and extra_json as CLOB."""
+        import framework.deploy.error_store as error_mod
+        pool, mock_conn, mock_cur = _make_mock_pool()
+
+        clob_sentinel = object()
+        orig_flag = self._patch_clob_flag(error_mod, True)
+        orig_odb = self._patch_oracledb(error_mod, clob_sentinel)
+
+        try:
+            store = AdbErrorStore(pool, tmp_store)
+            store.record_user_bug({
+                "request_id": "req-bug-clob",
+                "queue_id": "BUG-queue-440da",
+                "description": "d" * 5000,  # > 4000 bytes
+            })
+        finally:
+            self._patch_clob_flag(error_mod, orig_flag)
+            self._restore_oracledb(error_mod, orig_odb)
+
+        mock_cur.setinputsizes.assert_called_once()
+        kwargs = mock_cur.setinputsizes.call_args.kwargs
+        assert kwargs.get("description") is clob_sentinel, (
+            f"Expected setinputsizes(description=DB_TYPE_CLOB), got {kwargs!r}"
+        )
+        assert kwargs.get("extra_json") is clob_sentinel, (
+            f"Expected setinputsizes(extra_json=DB_TYPE_CLOB), got {kwargs!r}"
+        )
+
+    def test_setinputsizes_not_called_when_oracledb_unavailable(self, tmp_store):
+        """When _ORACLEDB_AVAILABLE is False, setinputsizes must NOT be called."""
+        import framework.deploy.error_store as error_mod
+        pool, mock_conn, mock_cur = _make_mock_pool()
+
+        orig_flag = self._patch_clob_flag(error_mod, False)
+        try:
+            store = AdbErrorStore(pool, tmp_store)
+            store.record_error({"request_id": "r", "message": "short"})
+        finally:
+            self._patch_clob_flag(error_mod, orig_flag)
+
+        mock_cur.setinputsizes.assert_not_called()

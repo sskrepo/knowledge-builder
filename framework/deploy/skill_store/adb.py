@@ -23,6 +23,12 @@ import json
 import logging
 from datetime import datetime, timezone
 
+try:
+    import oracledb
+    _ORACLEDB_AVAILABLE = True
+except ImportError:
+    _ORACLEDB_AVAILABLE = False
+
 from ._base import ARTIFACT_TYPES, SkillStore, make_artifact_id
 
 log = logging.getLogger(__name__)
@@ -243,6 +249,14 @@ class AdbSkillStore(SkillStore):
             try:
                 with self._pool.acquire() as conn:
                     with conn.cursor() as cur:
+                        # content is a CLOB column. The oracledb thin driver
+                        # binds Python str as VARCHAR2 by default, which
+                        # overflows at 4000 bytes (SQL context) with ORA-03146.
+                        # Declare content as CLOB so the driver uses the LOB
+                        # binding protocol — identical fix to the one applied
+                        # to session_data in adb_store.py (BUG-008 / BUG-queue-440da).
+                        if _ORACLEDB_AVAILABLE:
+                            cur.setinputsizes(content=oracledb.DB_TYPE_CLOB)
                         for artifact_type, content in artifacts.items():
                             art_id = make_artifact_id(persona, skill_name, artifact_type)
                             rel = _rel_path(persona, skill_name, artifact_type)
@@ -431,6 +445,11 @@ class AdbSkillStore(SkillStore):
 
         with self._pool.acquire() as conn:
             with conn.cursor() as cur:
+                # content_yaml is a CLOB column — must declare as CLOB so the
+                # oracledb thin driver uses LOB binding, not VARCHAR2.
+                # Same fix as write_artifacts/content (BUG-queue-440da).
+                if _ORACLEDB_AVAILABLE:
+                    cur.setinputsizes(content_yaml=oracledb.DB_TYPE_CLOB)
                 cur.execute(_SQL_UPSERT_PB, params)
             conn.commit()
 
