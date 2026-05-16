@@ -35,6 +35,8 @@ import logging
 import re
 from typing import Any
 
+from .prompt_registry import get_registry  # noqa: E402
+
 log = logging.getLogger(__name__)
 
 
@@ -239,22 +241,8 @@ def _escape_bare_control_chars(s: str) -> str:
 # LLM extraction (ADR-026 Fix 3)
 # ---------------------------------------------------------------------------
 
-_REVIEW_EXTRACT_PROMPT = """\
-You are extracting structured fields from a source document to preview what an
-LLM parser would produce when this schema is applied at ingest time.
-
-Return a single JSON object with EXACTLY these field keys
-(use empty string "" or empty list [] when a field is genuinely absent —
-do NOT invent data that is not in the source document):
-
-{field_lines}
-
-=== Source document ===
-{text}
-=== End source ===
-
-Respond with ONLY the JSON object, no prose, no markdown fences.
-"""
+# ADR-030 C3: _REVIEW_EXTRACT_PROMPT deleted; prompt served by PromptRegistry.
+# Use get_registry().get_prompt("review_extract", field_lines=..., text=...) at call sites.
 
 
 # ---------------------------------------------------------------------------
@@ -391,19 +379,21 @@ def _llm_extract(sample: dict, schema: dict, llm) -> dict[str, Any]:
         log.warning("_llm_extract: sample has no extractable text, returning empty")
         return {}
 
-    prompt = _REVIEW_EXTRACT_PROMPT.format(
+    # ADR-030 C3: prompt via PromptRegistry.
+    spec = get_registry().get_prompt(
+        "review_extract",
         field_lines="\n".join(field_lines),
         text=text,
     )
 
     n_fields = len(properties)
-    max_tokens = _EXTRACT_MAX_TOKENS
+    max_tokens = spec.max_tokens  # 4096 per YAML, matching _EXTRACT_MAX_TOKENS
 
     try:
         result = llm.chat(
-            model="synthesis",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
+            model=spec.model,
+            messages=[{"role": "user", "content": spec.text}],
+            response_format=spec.response_format,
             max_tokens=max_tokens,
         )
         # Capture tokens_out for truncation detection (BUG-queue-44364).
