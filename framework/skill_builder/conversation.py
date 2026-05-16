@@ -420,7 +420,19 @@ _LEGACY_ONLY_STATES = frozenset(_STATES_LEGACY) - frozenset(STATES)
 
 @dataclass
 class ConversationTurn:
-    """Return value from every state handler."""
+    """Return value from every state handler.
+
+    ADR-028 Item 2 additions:
+      awaiting_user:  True on every turn that requires a human response. False only
+                      for deterministic auto-transitions where no human input is needed
+                      (e.g. DESIGN_SKILL auto-starting after UPLOAD_ARTIFACT_EXAMPLE).
+      must_show_human: True for turns the client MUST NEVER auto-answer. The authorSkill
+                      tool description enforces this at the MCP level. Set True for:
+                      CAPTURE_INTENT (when blocking_ambiguities is non-empty),
+                      CLARIFY (all turns), REVIEW_DESIGN (always), PREVIEW_EXTRACTION
+                      (always), and any EVAL turn that carries a gap report or change
+                      proposal.
+    """
 
     synth_id: str = ""
     state: str = ""
@@ -430,6 +442,8 @@ class ConversationTurn:
     artifacts_preview: dict | None = None
     progress: dict | None = None
     done: bool = False
+    awaiting_user: bool = True
+    must_show_human: bool = False
 
 
 def _progress(state: str) -> dict:
@@ -879,15 +893,36 @@ class SkillBuilderConversation:
         )
 
         ambiguities = normalised.get("ambiguities", [])
+        # ADR-028 S3: distinguish blocking from nice-to-know
+        blocking_ambiguities = normalised.get("blocking_ambiguities", [])
+        nice_to_know_ambiguities = normalised.get("nice_to_know_ambiguities", [])
+
+        # If LLM returned the old 'ambiguities' key (pre-S3 prompts or old LLM output),
+        # treat all of them as blocking (safer default — prevent silent steamrolling).
+        if ambiguities and not blocking_ambiguities and not nice_to_know_ambiguities:
+            blocking_ambiguities = ambiguities
+
+        # ADR-028 S3: route to CLARIFY when blocking ambiguities exist
+        if blocking_ambiguities:
+            self._data._clarify_questions = [
+                {"question": q, "resolved": False}
+                for q in blocking_ambiguities
+            ]
+            return self._advance_to_clarify(self._data._clarify_questions)
+
+        all_ambiguities = list(ambiguities) + list(nice_to_know_ambiguities)
         ambig_text = ""
-        if ambiguities:
+        if all_ambiguities:
             ambig_text = (
-                "\n\nAmbiguities detected — please confirm or correct:\n"
-                + "\n".join(f"  • {a}" for a in ambiguities)
-                + "\n\nType 'ok' to proceed with the above, or clarify any of the above."
+                "\n\nAdvisory notes (proceeding with assumptions):\n"
+                + "\n".join(f"  • {a}" for a in all_ambiguities)
+                + "\n\nType 'ok' to proceed, or provide additional context."
             )
         else:
             ambig_text = "\n\nNo ambiguities. Type 'ok' to proceed."
+
+        # ADR-028 Item 2: set must_show_human when there are any ambiguities (even advisory)
+        has_any_ambiguity = bool(all_ambiguities)
 
         return ConversationTurn(
             state="CAPTURE_INTENT",
@@ -902,7 +937,9 @@ class SkillBuilderConversation:
                 + ambig_text
             ),
             data={"normalised_intent": normalised, "skill_name": self._data.skill_name},
-            options=["ok"] + (["clarify"] if ambiguities else []),
+            options=["ok"] + (["clarify"] if all_ambiguities else []),
+            must_show_human=has_any_ambiguity,  # ADR-028 Item 2
+            awaiting_user=True,
         )
 
     def _handle_capture_intent(self, user_input: str) -> ConversationTurn:
@@ -1519,6 +1556,8 @@ class SkillBuilderConversation:
             message="\n".join(lines),
             data={"design": design},
             options=["ok", "describe <field> as <text>", "remove field <name>"],
+            must_show_human=True,   # ADR-028 Item 2: client must show full design to human
+            awaiting_user=True,
         )
 
     def _handle_review_design_response(self, user_input: str) -> ConversationTurn:
@@ -1758,6 +1797,8 @@ class SkillBuilderConversation:
             message="\n".join(lines),
             data={"extraction_preview": review_result},
             options=["ok, commit", "back to design"],
+            must_show_human=True,   # ADR-028 Item 2: human must review extraction before commit
+            awaiting_user=True,
         )
 
     def _handle_preview_extraction_response(self, user_input: str) -> ConversationTurn:

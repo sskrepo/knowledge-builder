@@ -347,7 +347,11 @@ def _turn_to_envelope(turn) -> dict:
     """Map a ConversationTurn dataclass -> snake_case dict.
 
     Fields: synth_id, state, message, data, options, artifacts_preview,
-            progress, done.
+            progress, done, awaiting_user, must_show_human.
+
+    ADR-028 Item 2: awaiting_user and must_show_human are included so the
+    to_camel_response serializer converts them to awaitingUser / mustShowHuman
+    in the JSON response. Client LLMs use mustShowHuman to enforce human-in-loop.
     """
     return {
         "synth_id": turn.synth_id,
@@ -358,6 +362,8 @@ def _turn_to_envelope(turn) -> dict:
         "artifacts_preview": turn.artifacts_preview,
         "progress": turn.progress,
         "done": turn.done,
+        "awaiting_user": getattr(turn, "awaiting_user", True),
+        "must_show_human": getattr(turn, "must_show_human", False),
     }
 
 
