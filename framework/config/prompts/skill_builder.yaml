@@ -24,7 +24,7 @@ prompts:
     id: capture_intent
     version: "1.0"
     model: synthesis
-    max_tokens: 1024
+    max_tokens: 2048
     response_format: json_object
     description: "Parse the user's raw intent into a normalised goal object for downstream design steps."
     required_vars: [persona, intent, persona_key_fields]
@@ -73,7 +73,7 @@ prompts:
     id: configure_sources
     version: "1.0"
     model: synthesis
-    max_tokens: 1024
+    max_tokens: 2048
     response_format: json_object
     description: "Propose the most likely source descriptors given the user's intent and available adapters."
     required_vars: [persona, normalised_intent, adapter_list, intent_text]
@@ -116,7 +116,7 @@ prompts:
     id: inspect_sources
     version: "1.0"
     model: synthesis
-    max_tokens: 2048
+    max_tokens: 4096
     response_format: json_object
     description: "Review sample content from a source and produce a capability inventory with confidence levels."
     required_vars: [source_id, persona, normalised_intent, sample_content]
@@ -178,7 +178,7 @@ prompts:
     id: design_skill
     version: "1.0"
     model: synthesis
-    max_tokens: 4096
+    max_tokens: 8192
     response_format: json_object
     description: "Design a complete skill from intent, source capability inventory, artifact layout, and reusable KB cards."
     required_vars: [persona, normalised_intent, source_capability, artifact_layout, existing_kb_cards, persona_key_fields, persona_extraction_style, persona_few_shot_example]
@@ -269,7 +269,7 @@ prompts:
     id: review_design_replan
     version: "1.0"
     model: synthesis
-    max_tokens: 2048
+    max_tokens: 4096
     response_format: json_object
     description: "Return a diff object for user-requested modifications to the current skill design."
     required_vars: [current_design, edit_request, updated_source_capability]
@@ -493,7 +493,7 @@ prompts:
     id: description_synthesis
     version: "1.0"
     model: synthesis
-    max_tokens: 2048
+    max_tokens: 4096
     response_format: json_object
     description: "Write precise extraction instructions for each field in an extraction schema."
     required_vars: [artifact_type, persona, intent, field_contexts]
@@ -524,7 +524,7 @@ prompts:
     id: review_extract
     version: "1.0"
     model: synthesis
-    max_tokens: 4096
+    max_tokens: 16384
     response_format: json_object
     description: "Preview extraction: extract structured fields from a source document using the committed schema."
     required_vars: [field_lines, text]

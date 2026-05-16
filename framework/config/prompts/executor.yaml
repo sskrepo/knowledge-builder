@@ -28,7 +28,7 @@ prompts:
     id: executor_extract
     version: "1.0"
     model: synthesis
-    max_tokens: 4096
+    max_tokens: 16384
     response_format: json_object
     description: "Production render-time extraction prompt for /api/v1/ask workflow output. Extracts structured fields from Confluence pages using the committed skill schema."
     notes: "Template uses {field_lines} (pre-joined with newlines by caller), {user_request} (the user's input string), {snippet} (source text truncated to 24000 chars). These map directly to the f-string variables in the original executor.py _llm_extract_fields method."
