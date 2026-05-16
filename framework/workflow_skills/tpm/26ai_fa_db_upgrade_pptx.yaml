@@ -1,0 +1,89 @@
+workflow_skill: 26ai_fa_db_upgrade_pptx
+persona: tpm
+status: draft
+trigger:
+  on_request:
+    enabled: true
+    inputs:
+    - name: input
+      type: string
+      description: Query or filter input
+    output_format: pptx
+    response_mode: artifact_url
+skill_card:
+  summary: tpm persona - I want to create a weekly ppt for exec review, for 26ai project
+    .. there are different pages .. main one being https://confluence.oraclecorp.com/confluence/pages/viewpage.action?pageId=2
+  use_when: 'User asks for: tpm persona - I want to create a weekly ppt for exec review,
+    for 26ai project .. there are different pages .. main one being https://confluence.oraclecorp.com/confluence/pages/viewpage.action?pageId=2'
+  example_invocations:
+  - tpm persona - I want to create a weekly ppt for exec review, for 26ai project
+    .. there are different
+  do_not_use_for: Single-fact lookups (use vector_search). Live operational data (use
+    query_fleet).
+requires_extractions:
+- kb: tpm.26ai_fa_db_upgrade_pptx
+  required_fields:
+  - reporting_week
+  - program_title
+  - rag_summary
+  - schedule_health
+  - orm_status
+  - exec_summary
+  - key_milestones
+  - blocking_issues
+  - next_steps
+  - scope_and_impact
+  - key_links
+- kb: tpm.tpm_weekly_ops
+  required_fields:
+  - exec_asks
+synthesis:
+  output_format: pptx
+  template: synthesis/templates/26ai_fa_db_upgrade_pptx.pptx
+  slide_mapping: synthesis/mappings/26ai_fa_db_upgrade_pptx.yaml
+  layout: weekly_exec_review_v1
+  field_mapping:
+    reporting_week:
+      section: Reporting Week
+      source_field: reporting_week
+    program_title:
+      section: Program Title
+      source_field: program_title
+    rag_summary:
+      section: Rag Summary
+      source_field: rag_summary
+    schedule_health:
+      section: Schedule Health
+      source_field: schedule_health
+    orm_status:
+      section: Orm Status
+      source_field: orm_status
+    exec_summary:
+      section: Exec Summary
+      source_field: exec_summary
+    key_milestones:
+      section: Key Milestones
+      source_field: key_milestones
+    blocking_issues:
+      section: Blocking Issues
+      source_field: blocking_issues
+    next_steps:
+      section: Next Steps
+      source_field: next_steps
+    exec_asks:
+      section: Exec Asks
+      source_field: exec_asks
+    scope_and_impact:
+      section: Scope And Impact
+      source_field: scope_and_impact
+    key_links:
+      section: Key Links
+      source_field: key_links
+delivery:
+  kind: filesystem
+  path: ~/.kbf/outputs/26ai_fa_db_upgrade_pptx.pptx
+eval:
+  gold_set: eval/gold_sets/tpm-26ai_fa_db_upgrade_pptx-workflow.jsonl
+  exit_criteria:
+    field_accuracy: 0.85
+    delivery_success_rate: 0.99

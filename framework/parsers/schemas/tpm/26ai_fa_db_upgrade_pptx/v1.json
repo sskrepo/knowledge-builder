@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/tpm/26ai_fa_db_upgrade_pptx/v1.json",
+  "title": "tpm \u2014 26ai_fa_db_upgrade_pptx \u2014 v1",
+  "description": "Synthesized by skill_builder for persona=tpm, kb=26ai_fa_db_upgrade_pptx. Refine before promoting.",
+  "type": "object",
+  "required": [
+    "reporting_week",
+    "program_title",
+    "rag_summary",
+    "schedule_health",
+    "orm_status",
+    "exec_summary",
+    "key_milestones",
+    "blocking_issues",
+    "next_steps",
+    "exec_asks",
+    "scope_and_impact",
+    "key_links"
+  ],
+  "properties": {
+    "reporting_week": {
+      "type": "string",
+      "description": "Set the reporting week label for the deck (e.g., \"Week of 2026-05-13\"). If no explicit week/date exists in sources, use the deck generation date as \"Week of YYYY-MM-DD\" and state it is the generation week.",
+      "maxLength": 200
+    },
+    "program_title": {
+      "type": "string",
+      "description": "Extract the program name to use as the slide title. Prefer the Confluence project_name; if multiple pages imply a broader program, synthesise a single exec-safe title that expands acronyms (e.g., \"FA Database Upgrade to Oracle Database 26ai\").",
+      "maxLength": 200
+    },
+    "rag_summary": {
+      "type": "string",
+      "description": "Derive a single Red/Amber/Green status for the overall program by aggregating schedule signals from: (a) the OCIFACP Project Plan date ranges and remarks/restrictions, and (b) the FA DB Upgrade page overall_status/current_phase/milestones status. Always include a 1-sentence justification in the same field (e.g., \"AMBER \u2014 non-prod rollout dates are at risk due to stated restrictions and unresolved dependencies.\").",
+      "maxLength": 500
+    },
+    "schedule_health": {
+      "type": "string",
+      "description": "Derive schedule health as one concise statement (e.g., \"On track\", \"At risk\", \"Behind\") by combining: upcoming rollout/dev ETA ranges and 'need by' dates from the OCIFACP Project Plan with milestone target dates/status from the FA DB Upgrade page. If sources lack baseline vs actual, treat any stated restrictions, dependency chains, or compressed timelines as risk signals and say why in one clause.",
+      "maxLength": 500
+    },
+    "orm_status": {
+      "type": "string",
+      "description": "Extract the closest available overall status indicator for exec reporting. Use FA DB Upgrade page overall_status (e.g., PLANNED) and current_phase; format as \"<overall_status> \u2014 <current_phase>\". Do not invent ORM if not explicitly present.",
+      "maxLength": 200
+    },
+    "exec_summary": {
+      "type": "string",
+      "description": "Write a 2\u20134 bullet equivalent paragraph (exec-scannable) summarising what changed/what matters this week by combining: FA DB Upgrade executive_summary/business_outcome/scope and the most time-imminent items from the OCIFACP Project Plan (earliest upcoming dates, major rollout phases). Avoid internal code names; expand acronyms on first use.",
+      "maxLength": 2000
+    },
+    "key_milestones": {
+      "type": "array",
+      "description": "List 4-8 program-level milestones that an exec would care about. PREFER concrete milestones that have an ACTUAL date and a status (Completed / In Progress / Planned) \u2014 synthesise these primarily from the Work Breakdown Structure rows' Status, Notes and Update Notes columns and any dated progress statements in the page (e.g. 'GI Gold Image received', 'POC Completed', 'SUT 05/16-06/01', dated 'Completed (3/31)' style entries), and from the OCIFACP Project Plan work_items date ranges. Do NOT just echo the generic Milestones-table scaffold rows (M1..M5) when they have no dates and only 'PLANNED' status \u2014 only include those if no richer dated/status milestone information exists. Each entry: '<milestone> \u2014 <date or window> (<status>)'. Order by date; put Completed first.",
+      "maxLength": 2000,
+      "items": {
+        "type": "object",
+        "properties": {
+          "milestone": {
+            "type": "string",
+            "description": "Milestone name in exec-safe language; expand acronyms.",
+            "maxLength": 300
+          },
+          "target_date_or_window": {
+            "type": "string",
+            "description": "Target date or date window as stated (e.g., \"2026-06-01 to 2026-08-31\" or \"1-Jun to 31-Aug\").",
+            "maxLength": 200
+          },
+          "status": {
+            "type": "string",
+            "description": "Status if explicitly present (e.g., Completed/Planned/In progress). If not present, use \"Planned\" and do not imply completion.",
+            "maxLength": 200
+          },
+          "notes": {
+            "type": "string",
+            "description": "One short note capturing scope/constraints from remarks/additional_details (e.g., downtime estimate, cluster counts, restrictions).",
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "milestone",
+          "target_date_or_window"
+        ]
+      }
+    },
+    "blocking_issues": {
+      "type": "array",
+      "description": "Derive blockers by aggregating the OCIFACP Project Plan 'restrictions', 'remarks', and dependency notes that indicate gating constraints (e.g., \"Restriction:\", \"will need to\", \"blocked\", \"waiting on\") and any FA DB Upgrade dependencies text. Convert each into exec-safe risk language: \"X is at risk because Y; mitigation is Z.\" If mitigation is not stated, set mitigation to \"Mitigation not stated in source\". Return an empty array if none are evidenced.",
+      "maxLength": 2000,
+      "items": {
+        "type": "object",
+        "properties": {
+          "risk_statement": {
+            "type": "string",
+            "description": "Exec-safe risk statement in the form \"X is at risk because Y; mitigation is Z.\"",
+            "maxLength": 500
+          },
+          "source_evidence": {
+            "type": "string",
+            "description": "Short citation-style pointer to the originating element (e.g., \"OCIFACP Project Plan: Restrictions row\" or \"FA DB Upgrade: Dependencies section\").",
+            "maxLength": 300
+          },
+          "critical_path": {
+            "type": "boolean",
+            "description": "Set true if the blocker is tied to rollout start/end dates, 'need by' dates, or explicit dependency chains that gate multiple items; otherwise false.",
+            "maxLength": 200
+          }
+        },
+        "required": [
+          "risk_statement",
+          "critical_path"
+        ]
+      }
+    },
+    "next_steps": {
+      "type": "array",
+      "description": "Derive 3\u20136 next steps by combining: (a) the earliest upcoming OCIFACP Project Plan items by date (development start/end, rollout start), and (b) any FA DB Upgrade milestones with near-term target dates. Each next step must be time-bound using the stated date; if only a month/day is present, keep that format and do not guess the year.",
+      "maxLength": 2000,
+      "items": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "One-line action in active voice, exec-safe language.",
+            "maxLength": 400
+          },
+          "due_by": {
+            "type": "string",
+            "description": "Due date as stated in source (e.g., \"19-Jun\" or \"2026-07-31\"). If no date is stated, use \"This sprint\" only if the source implies immediate work; otherwise omit the item.",
+            "maxLength": 200
+          },
+          "source_evidence": {
+            "type": "string",
+            "description": "Short pointer to the originating table row/section.",
+            "maxLength": 300
+          }
+        },
+        "required": [
+          "action",
+          "due_by"
+        ]
+      }
+    },
+    "exec_asks": {
+      "type": "array",
+      "description": "Derive executive asks by aggregating any explicit constraints/restrictions/downtime requirements/need-by date changes in the OCIFACP Project Plan and any dependency/escalation needs implied by the FA DB Upgrade dependencies section. Convert into decision-oriented asks (e.g., approve downtime window, prioritize dependency, unblock restriction). If no evidence supports an ask, return an empty array.",
+      "maxLength": 2000,
+      "items": {
+        "type": "object",
+        "properties": {
+          "ask": {
+            "type": "string",
+            "description": "One-line decision or support request, written for VP+ audience.",
+            "maxLength": 400
+          },
+          "by_when": {
+            "type": "string",
+            "description": "Date needed by, derived from 'Need By' or nearest impacted rollout date; if none stated, set to \"As soon as possible\" and explain why in one clause within the ask.",
+            "maxLength": 200
+          },
+          "source_evidence": {
+            "type": "string",
+            "description": "Short pointer to the originating element (e.g., restriction/downtime/need-by note).",
+            "maxLength": 300
+          }
+        },
+        "required": [
+          "ask",
+          "by_when"
+        ]
+      }
+    },
+    "scope_and_impact": {
+      "type": "string",
+      "description": "Summarise scope and operational impact in 2\u20133 sentences by combining: FA DB Upgrade in_scope/out_of_scope/assumptions and OCIFACP Project Plan cluster_counts/downtime_estimate. Keep it exec-safe and quantify where stated (clusters, downtime hours).",
+      "maxLength": 1000
+    },
+    "key_links": {
+      "type": "array",
+      "description": "Collect the most useful follow-up links by extracting: FA DB Upgrade primary Jira keys, bug list link, repository link, and Slack channels. Include the OCIFACP Project Plan page link as a reference. Do not add links not present in sources.",
+      "maxLength": 2000,
+      "items": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "Human-readable label (e.g., \"Primary Jira (Program)\", \"Bug list\", \"Project repository\", \"Slack channel\").",
+            "maxLength": 200
+          },
+          "value": {
+            "type": "string",
+            "description": "URL or key as present in source.",
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "label",
+          "value"
+        ]
+      }
+    }
+  },
+  "additionalProperties": false
+}
