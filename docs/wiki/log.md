@@ -4,6 +4,21 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] backend-dev | ADR-032 P2-Infra — Confluence adapter factory relocated + lifespan optional dependency wired
+
+**P2-Infra complete.** Commit 91ecff6.
+
+- `framework/adapters/confluence/factory.py` — NEW: shared factory exporting `build_confluence_adapter(kbf_env, repo_root) -> adapter | None`. Body relocated verbatim from `conversation.py::_build_confluence_adapter` — same YAML-merge + mode dispatch logic; same None-on-error contract.
+- `framework/skill_builder/conversation.py` — INGEST call site updated: body of `_build_confluence_adapter` replaced with a one-line import alias (`from ..adapters.confluence.factory import build_confluence_adapter as _build_confluence_adapter`). Name preserved at module level for backward compat with existing INGEST callers and tests. INGEST behavior unchanged.
+- `framework/workflow_runtime/executor.py` — NEW function `_any_promoted_skill_requires_ephemeral(workflow_skills_dir)` scans skill YAMLs for `source_binding.ingest_on_demand:true` (guards the lifespan adapter init).
+- `framework/deploy/mcp_server.py` — lifespan block initializes `app.state.confluence_adapter` (None or adapter instance) after the WorkflowExecutor block. Guarded by `_any_promoted_skill_requires_ephemeral`; server starts even when Confluence is unavailable (logs WARNING when a skill requires it but no adapter is configured).
+- `framework/tests/unit/test_mcp_server_lifespan_confluence.py` — NEW: 20 tests covering `_any_promoted_skill_requires_ephemeral` (7 cases), `build_confluence_adapter` factory (3 cases), lifespan decision logic (7 cases), backward-compat alias (3 cases). All pass.
+- Full test suite: 8 failures (pre-existing baseline: test_smoke_validate ×7 + test_code_wiki ×1) — 0 new regressions.
+
+P2-Exec can now consume `app.state.confluence_adapter` (None check required; never absent).
+
+---
+
 ## [2026-05-16] backend-dev | ADR-032 P1-E — 4 TPM email skills promoted to ask_parameterized with typed page_id input + space allow-list
 
 **P1-E complete.**
