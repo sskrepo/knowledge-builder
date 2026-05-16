@@ -217,6 +217,108 @@ Respond with ONLY the JSON object, no prose, no markdown fences.
 """
 
 
+# ---------------------------------------------------------------------------
+# Shared JSON parse helper — BUG-573e3 + BUG-44364 parity
+# ---------------------------------------------------------------------------
+
+def _parse_llm_json_response(
+    raw: str,
+    *,
+    tokens_out: int | None = None,
+    max_tokens: int | None = None,
+    n_fields: int | None = None,
+) -> dict:
+    """Parse an LLM JSON response with the full BUG-573e3 + BUG-44364 fix sequence.
+
+    This is the SINGLE canonical JSON-parse implementation for all LLM extraction
+    calls in the framework.  Both review._llm_extract and executor._llm_extract_fields
+    must call this function so they cannot drift.
+
+    Parse sequence:
+      1. Strip markdown fences; try strict json.loads (fast path).
+      2. Sanitize bare control chars (BUG-queue-573e3); retry json.loads.
+      3. Slice outermost {...} and retry json.loads.
+      4. If all fail:
+         a. If tokens_out >= max_tokens: raise ValueError naming BUG-queue-44364
+            (structural truncation — increase max_tokens or reduce schema).
+         b. Otherwise: raise ValueError naming BUG-queue-573e3 (control chars or
+            other model formatting error).
+
+    NEVER returns {} silently — any irrecoverable failure raises ValueError.
+
+    Args:
+        raw:        Raw text from the LLM (may include markdown fences).
+        tokens_out: Number of tokens the LLM emitted (for truncation detection).
+                    Pass None when the LLM client does not expose this.
+        max_tokens: The max_tokens ceiling used in the LLM call.
+        n_fields:   Number of schema fields (for diagnostic messages).
+
+    Returns:
+        Parsed dict from the LLM response.
+
+    Raises:
+        ValueError: with actionable error message when parsing fails.
+    """
+    cleaned = re.sub(r"```(?:json)?\n?(.*?)\n?```", r"\1", raw, flags=re.S).strip()
+
+    # Attempt 1: strict parse (fast path — well-formed JSON)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt 2: sanitize bare control chars (BUG-queue-573e3)
+    sanitized = _escape_bare_control_chars(cleaned)
+    try:
+        return json.loads(sanitized)
+    except json.JSONDecodeError:
+        pass
+
+    # Attempt 3: extract outermost {...} slice and retry
+    m = re.search(r"\{.*\}", sanitized, re.S)
+    if m:
+        try:
+            return json.loads(m.group())
+        except json.JSONDecodeError:
+            pass
+
+    # All parse attempts failed — raise with actionable diagnosis.
+    # BUG-queue-44364: response hit token ceiling -> structural truncation
+    if tokens_out is not None and max_tokens is not None and tokens_out >= max_tokens:
+        log.error(
+            "_parse_llm_json_response: LLM response hit token ceiling "
+            "(tokens_out=%d >= max_tokens=%d, schema_fields=%s). "
+            "JSON is structurally truncated (BUG-queue-44364). "
+            "First 500 chars: %s",
+            tokens_out, max_tokens, n_fields, sanitized[:500],
+        )
+        raise ValueError(
+            f"LLM response truncated at max_tokens={max_tokens} "
+            f"(tokens_out={tokens_out}); schema has {n_fields} fields. "
+            f"Increase max_tokens or reduce schema size. "
+            f"This is structural truncation (BUG-queue-44364), not a control-char "
+            f"issue. First 500 chars: {sanitized[:500]!r}"
+        )
+
+    # BUG-queue-573e3 or other model formatting error
+    log.error(
+        "_parse_llm_json_response: all JSON parse attempts failed "
+        "(tokens_out=%s, max_tokens=%s, schema_fields=%s). "
+        "Possible: unescaped control chars (BUG-queue-573e3) or malformed output. "
+        "First 500 chars: %s",
+        tokens_out, max_tokens, n_fields, sanitized[:500],
+    )
+    raise ValueError(
+        f"Could not parse LLM JSON response after sanitization. "
+        f"Possible causes: (1) unescaped control characters (BUG-queue-573e3); "
+        f"(2) other model formatting error. "
+        f"tokens_out={tokens_out}, max_tokens={max_tokens}, "
+        f"schema_fields={n_fields}. "
+        f"First 500 chars: {sanitized[:500]!r} "
+        f"(see BUG-queue-573e3, BUG-queue-44364)"
+    )
+
+
 def _llm_extract(sample: dict, schema: dict, llm) -> dict[str, Any]:
     """Extract field values from a sample using the LLM.
 
@@ -224,6 +326,10 @@ def _llm_extract(sample: dict, schema: dict, llm) -> dict[str, Any]:
     It uses the same prompt structure as WorkflowExecutor._llm_extract_fields
     so the authorSkill preview is consistent with what the skill does at
     query time.
+
+    JSON parsing uses the shared _parse_llm_json_response helper so that
+    BUG-queue-573e3 (control-char sanitization) and BUG-queue-44364
+    (truncation detection) fixes are applied uniformly here and in executor.
     """
     properties = schema.get("properties", {})
     required = schema.get("required", [])
@@ -264,73 +370,12 @@ def _llm_extract(sample: dict, schema: dict, llm) -> dict[str, Any]:
         # llm_oci.py returns {"text": ..., "tokens_in": ..., "tokens_out": ..., ...}.
         tokens_out = result.get("tokens_out") if isinstance(result, dict) else None
         raw = result.get("text", "") if isinstance(result, dict) else str(result)
-        cleaned = re.sub(r"```(?:json)?\n?(.*?)\n?```", r"\1", raw, flags=re.S).strip()
 
-        # --- Attempt 1: try the cleaned output as-is (fast path for well-formed JSON)
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            pass
-
-        # --- Attempt 2: sanitize bare control chars inside string values
-        # (BUG-queue-573e3: OCI JSON_OBJECT mode does not escape \\n/\\r/\\t
-        # inside string values from multi-line Confluence table-cell content)
-        sanitized = _escape_bare_control_chars(cleaned)
-        try:
-            return json.loads(sanitized)
-        except json.JSONDecodeError:
-            pass
-
-        # --- Attempt 3: extract the outermost {...} slice and sanitize it
-        m = re.search(r"\{.*\}", sanitized, re.S)
-        if m:
-            try:
-                return json.loads(m.group())
-            except json.JSONDecodeError:
-                pass
-
-        # --- All parse attempts failed.  Determine the most likely root cause
-        # so the error is actionable.  Do NOT return {} — that is silent data
-        # loss (no-stub-mode policy).
-
-        # BUG-queue-44364 detection: if the response hit the token ceiling the
-        # JSON is structurally truncated — missing trailing fields and closing
-        # braces.  This is DISTINCT from BUG-queue-573e3 (bare control chars).
-        if tokens_out is not None and tokens_out >= max_tokens:
-            log.error(
-                "_llm_extract: LLM response hit token ceiling "
-                "(tokens_out=%d >= max_tokens=%d, schema_fields=%d). "
-                "JSON is structurally truncated — this is BUG-queue-44364, "
-                "NOT a control-char issue. First 500 chars: %s",
-                tokens_out, max_tokens, n_fields, sanitized[:500],
-            )
-            raise ValueError(
-                f"_llm_extract: LLM response truncated at max_tokens={max_tokens} "
-                f"(tokens_out={tokens_out}); schema has {n_fields} fields. "
-                f"Increase max_tokens or reduce schema size. "
-                f"This is NOT BUG-queue-573e3 (control chars) — it is structural "
-                f"truncation (BUG-queue-44364). "
-                f"First 500 chars: {sanitized[:500]!r}"
-            )
-
-        # Non-ceiling failure: could be BUG-queue-573e3 (bare control chars),
-        # other model formatting issues, or a combination of both.  Both bug IDs
-        # are named so the operator can investigate either path.
-        log.error(
-            "_llm_extract: all JSON parse attempts failed "
-            "(tokens_out=%s, max_tokens=%d, schema_fields=%d). "
-            "Possible causes: unescaped control chars (BUG-queue-573e3) or "
-            "other malformed output. First 500 chars of sanitized payload: %s",
-            tokens_out, max_tokens, n_fields, sanitized[:500],
-        )
-        raise ValueError(
-            f"_llm_extract: could not parse LLM JSON response after sanitization. "
-            f"Possible causes: (1) unescaped control characters in OCI JSON_OBJECT "
-            f"output (see BUG-queue-573e3); (2) other model formatting error. "
-            f"tokens_out={tokens_out}, max_tokens={max_tokens}, "
-            f"schema_fields={n_fields}. "
-            f"First 500 chars: {sanitized[:500]!r} "
-            f"(see BUG-queue-573e3, BUG-queue-44364)"
+        return _parse_llm_json_response(
+            raw,
+            tokens_out=tokens_out,
+            max_tokens=max_tokens,
+            n_fields=n_fields,
         )
     except Exception as exc:
         log.error("_llm_extract: LLM call failed: %s", exc)

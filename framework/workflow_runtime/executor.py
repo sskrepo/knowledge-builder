@@ -457,8 +457,19 @@ class WorkflowExecutor:
 
         Uses chat(response_format=json_object) and returns the parsed dict.
         Truncates the input text to keep prompt size sane.
+
+        JSON parsing delegates to the shared _parse_llm_json_response helper
+        from skill_builder/review.py, which applies the full BUG-queue-573e3
+        (control-char sanitization) and BUG-queue-44364 (truncation detection)
+        fix sequence.  This ensures executor and review._llm_extract cannot
+        drift in their parse logic.
+
+        Raises:
+            ValueError: with actionable message when JSON parsing fails (never
+                        silently returns {} — no-stub-mode policy).
+            Exception:  propagates any LLM-call-level exception.
         """
-        import re as _re
+        from framework.skill_builder.review import _parse_llm_json_response
 
         properties = schema.get("properties", {})
         required = schema.get("required", [])
@@ -490,23 +501,33 @@ class WorkflowExecutor:
 
         # max_tokens=4096 must stay in sync with _EXTRACT_MAX_TOKENS in
         # skill_builder/review.py — see BUG-queue-44364.
+        _MAX_TOKENS = 4096
         result = self.llm.chat(
             model="synthesis",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            max_tokens=4096,
+            max_tokens=_MAX_TOKENS,
         )
         raw = result.get("text", "") if isinstance(result, dict) else str(result)
-        # Some providers wrap JSON in ```json fences despite response_format.
-        cleaned = _re.sub(r"```(?:json)?\n?(.*?)\n?```", r"\1", raw, flags=_re.S).strip()
-        # Best-effort: find the first {...} block if there's stray prose.
+        tokens_out = result.get("tokens_out") if isinstance(result, dict) else None
+
+        # Delegate to shared parse helper — BUG-queue-573e3 + BUG-queue-44364
+        # parity with review._llm_extract.  Raises ValueError with actionable
+        # error on irrecoverable failure (no silent {} return).
         try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            m = _re.search(r"\{.*\}", cleaned, _re.S)
-            if not m:
-                raise
-            return json.loads(m.group())
+            return _parse_llm_json_response(
+                raw,
+                tokens_out=tokens_out,
+                max_tokens=_MAX_TOKENS,
+                n_fields=len(properties),
+            )
+        except ValueError as exc:
+            log.error(
+                "_llm_extract_fields: JSON parse failed — "
+                "persona=%s skill=[inferred from schema]. Error: %s",
+                inputs.get("persona", "?"), exc,
+            )
+            raise
 
     def _render(self, cfg: dict, data: dict) -> bytes:
         from ..renderers.registry import get_renderer
