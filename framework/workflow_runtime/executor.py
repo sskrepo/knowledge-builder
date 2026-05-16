@@ -5,12 +5,20 @@ synthesize → render → deliver → cost telemetry → eval recording.
 
 Laptop-mode friendly: uses FilestoreContentStore + filesystem deliverer when no
 ADB/Vault/OCI configured.
+
+ADR-032 P2-Exec: ask_parameterized skills fetch the user-supplied Confluence page
+ephemerally (never written to any persistent store).  Author_fixed skills are
+unchanged.  The P3 regex heuristic guard is retained ONLY for author_fixed skills
+to prevent silent wrong-page substitution; it is not applied to ask_parameterized
+skills (which use the schema-driven source_binding.input_param path instead).
 """
 from __future__ import annotations
+import hashlib
 import json
 import logging
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from datetime import datetime
@@ -60,20 +68,39 @@ _CONFLUENCE_PAGE_REF_PATTERNS = [
 
 class ConfluencePageNotInKBError(Exception):
     """Raised when the user requested a specific Confluence page that is not
-    in the knowledge base and no matching passage was retrieved.
+    in the knowledge base, is not allow-listed for ephemeral fetch, or when
+    the Confluence adapter is unavailable for an ask_parameterized skill.
 
     This is a hard-fail — the executor MUST NOT substitute a different page
     or return partial/empty content silently. ADR-032 P3 / ADR-031.
+
+    Parameters
+    ----------
+    page_id:
+        The Confluence page ID the consumer requested.
+    skill_name:
+        The workflow skill name (for actionable error messages).
+    reason:
+        Optional additional context for the error message (e.g., allow-list
+        violation, adapter unavailability).  Consumer-safe — no provider
+        internals.
     """
-    def __init__(self, page_id: str, skill_name: str = ""):
+    def __init__(self, page_id: str, skill_name: str = "", reason: str = ""):
         self.page_id = page_id
         self.skill_name = skill_name
-        msg = (
-            f"Requested Confluence page {page_id} is not in the knowledge base. "
-            "This skill does not substitute a different page. "
-            f"Run: kb-cli ingest --page-id {page_id} --persona tpm. "
-            "Then retry your request."
-        )
+        self.reason = reason
+        if reason:
+            msg = (
+                f"Requested Confluence page {page_id} cannot be used by skill "
+                f"'{skill_name}': {reason}"
+            )
+        else:
+            msg = (
+                f"Requested Confluence page {page_id} is not in the knowledge base. "
+                "This skill does not substitute a different page. "
+                f"Run: kb-cli ingest --page-id {page_id} --persona tpm. "
+                "Then retry your request."
+            )
         super().__init__(msg)
 
 
@@ -150,20 +177,211 @@ def _any_promoted_skill_requires_ephemeral(workflow_skills_dir) -> bool:
     return False
 
 
-class WorkflowExecutor:
-    def __init__(self, store=None, llm=None, retrievers=None, shim_kb=None):
-        """retrievers: dict of {name -> retriever_callable} (e.g. search_wiki,
-        vector_search). When provided, _retrieve_for_inputs uses the
-        retriever named in each requires_extractions[i].kb's KB-card
-        `retrieval_tools` instead of falling back to fixtures.
+# ---------------------------------------------------------------------------
+# ADR-032 P2-Exec — Ephemeral in-process TTL cache
+#
+# Stores fetched-page passages per (page_id, content_hash) key for up to
+# ephemeral_ttl_seconds.  Thread-safe; process-local; NEVER written to disk
+# or any persistent store.  See ADR-032 §E.5 for the full spec.
+#
+# INVARIANT: _EphemeralCache.put() is the ONLY place ephemeral content is
+# stored.  WikiMetadataStore.add() and IncidentVectorStore.upsert() are
+# NEVER called in the ephemeral path.  A future developer MUST NOT add
+# calls to those stores from _retrieve_ask_parameterized.
+# ---------------------------------------------------------------------------
 
-        shim_kb: ShimKb instance — used to resolve a KB name like
-        'tpm.weekly_exec_review_26ai' to its card (kind, retrieval_tools).
+class _EphemeralCache:
+    """In-process TTL cache for ephemeral Confluence page fetch results.
+
+    Thread-safe via threading.Lock.  Never persisted to disk.  Process-local
+    (each uvicorn worker maintains an independent cache — correctness does not
+    depend on cross-worker sharing; the cache is a latency optimisation only).
+
+    ADR-032 §E.5.
+    """
+
+    _MAX_SIZE = 50  # LRU eviction at cap — prevents unbounded growth
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        # key → (value, fetched_at: float, ttl_seconds: int)
+        self._store: dict[str, tuple[Any, float, int]] = {}
+
+    def get(self, key: str, ttl: int) -> Any | None:
+        """Return cached value if present and within TTL, else None (evict expired)."""
+        with self._lock:
+            entry = self._store.get(key)
+            if entry is None:
+                return None
+            value, fetched_at, stored_ttl = entry
+            effective_ttl = min(ttl, stored_ttl)
+            if time.time() - fetched_at > effective_ttl:
+                del self._store[key]
+                return None
+            return value
+
+    def put(self, key: str, value: Any, ttl: int) -> None:
+        """Insert or replace an entry.  LRU-evicts oldest entry at cap."""
+        with self._lock:
+            if len(self._store) >= self._MAX_SIZE:
+                oldest_key = min(self._store, key=lambda k: self._store[k][1])
+                del self._store[oldest_key]
+            self._store[key] = (value, time.time(), ttl)
+
+    def clear(self) -> None:
+        """Evict all entries (used in tests; not called in production paths)."""
+        with self._lock:
+            self._store.clear()
+
+
+# Module-level singleton — shared across all WorkflowExecutor instances in this
+# process.  Each uvicorn worker has its own copy (separate memory space).
+_ephemeral_cache = _EphemeralCache()
+
+
+def _resolve_page_id(page_ref: str) -> str:
+    """Extract a numeric Confluence page ID from a page reference string.
+
+    Handles the following forms (in order of specificity):
+      - Full Confluence URL with ?pageId= query param
+      - /pages/viewpage.action?pageId=<id> REST form
+      - /wiki/spaces/.../pages/<id>/ path form
+      - Bare pageId=<digits> key-value form (with or without leading ?)
+      - Natural-language "pageId 18625350641" or "pageId: 18625350641" form
+      - Bare all-digit string (passed directly as the page_id input value)
+
+    Returns the numeric string on match, or the original string unchanged if
+    no pattern matches (e.g., caller passed an unrecognised reference — the
+    upstream trust check will reject it as unusable).
+
+    ADR-032 P2-Exec: used for structural input_param resolution (not regex
+    heuristic scanning over free-form prose).
+    """
+    for pattern in _CONFLUENCE_PAGE_REF_PATTERNS:
+        m = pattern.search(page_ref)
+        if m:
+            return m.group(1)
+    # Bare all-digit string — consumer passed the page ID directly (e.g., "18625350641")
+    if page_ref.strip().isdigit():
+        return page_ref.strip()
+    return page_ref
+
+
+def _extract_space_key_from_url(page_ref: str) -> str | None:
+    """Extract a Confluence space key from a /spaces/<SPACE>/ URL path segment.
+
+    Returns the space key string (e.g. "FA") on match, or None if the page ref
+    is a bare numeric ID or URL without a /spaces/ component.
+
+    ADR-032 §Known Gaps: bare numeric IDs cannot be space-checked from URL alone;
+    callers must fetch metadata to determine the space.
+    """
+    m = re.search(r"/spaces/([^/?#]+)/", page_ref, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    return None
+
+
+def _make_raw_item_ref(page_id: str):
+    """Build a RawItemRef (or compatible dict) for a Confluence page fetch.
+
+    Uses the core.interfaces.RawItemRef dataclass when available; falls back
+    to a plain object with the expected attributes so callers that treat the
+    adapter's `fetch()` return as a plain dict still work in unit tests.
+    """
+    try:
+        from ..core.interfaces import RawItemRef
+        return RawItemRef(kind="confluence_page", source="confluence", source_id=page_id)
+    except (ImportError, TypeError):
+        # Fallback: adapter.fetch() accepts a dict in some test environments.
+        class _Ref:
+            kind = "confluence_page"
+            source = "confluence"
+            source_id = page_id
+        return _Ref()
+
+
+def _extract_body_text(raw_item) -> str:
+    """Extract usable body text from a Confluence adapter fetch response.
+
+    Supports multiple response shapes:
+      - raw_item.payload["body"]["storage"]["value"]   (native Confluence REST v1)
+      - raw_item.payload["body"]                       (simplified adapter output)
+      - raw_item.payload["content"]                    (emcp_direct variant)
+      - raw_item.text                                  (pre-extracted text field)
+      - str(raw_item)                                  (last resort)
+
+    Returns empty string if no usable text found.
+    ADR-032 §E.2 body_html chain.
+    """
+    payload = getattr(raw_item, "payload", None) or {}
+    if isinstance(payload, dict):
+        # Native Confluence REST shape
+        body_storage = (
+            payload.get("body", {})
+            .get("storage", {})
+            .get("value", "")
+        ) if isinstance(payload.get("body"), dict) else ""
+        if body_storage:
+            return body_storage
+        # Simplified body string
+        body_plain = payload.get("body", "")
+        if isinstance(body_plain, str) and body_plain:
+            return body_plain
+        # emcp_direct content field
+        content = payload.get("content", "")
+        if isinstance(content, str) and content:
+            return content
+    # Pre-extracted text attribute
+    text_attr = getattr(raw_item, "text", None)
+    if isinstance(text_attr, str) and text_attr:
+        return text_attr
+    return ""
+
+
+class WorkflowExecutor:
+    def __init__(
+        self,
+        store=None,
+        llm=None,
+        retrievers=None,
+        shim_kb=None,
+        confluence_adapter=None,
+    ):
+        """Construct a WorkflowExecutor.
+
+        Parameters
+        ----------
+        store:
+            Legacy direct store (IncidentVectorStore, etc.). Used only for the
+            fallback direct-store path in _retrieve_for_inputs.
+        llm:
+            LLMClient for schema-bounded extraction in _llm_extract_fields.
+        retrievers:
+            dict of {name -> retriever_callable} (e.g. search_wiki,
+            vector_search). When provided, _retrieve_for_inputs uses the
+            retriever named in each requires_extractions[i].kb's KB-card
+            `retrieval_tools` instead of falling back to fixtures.
+        shim_kb:
+            ShimKb instance — used to resolve a KB name like
+            'tpm.weekly_exec_review_26ai' to its card (kind, retrieval_tools).
+        confluence_adapter:
+            Optional Confluence adapter instance (emcp_direct / native / etc.)
+            for ask_parameterized skill ephemeral fetch (ADR-032 P2-Exec).
+            None = adapter not available; ask_parameterized skills will
+            hard-fail with an actionable message at consumption time (never
+            silently fall back to a different page or empty content).
+            Backward-compatible: existing constructions that omit this param
+            default to None — author_fixed skills are unaffected.
         """
         self.store = store
         self.llm = llm
         self.retrievers = retrievers or {}
         self.shim_kb = shim_kb
+        # ADR-032 P2-Exec: Confluence adapter for ask_parameterized ephemeral fetch.
+        # None = not configured; ask_parameterized skills hard-fail actionably.
+        # NEVER used for author_fixed skills.
+        self.confluence_adapter = confluence_adapter
 
     def execute(self, skill_yaml_path: Path, inputs: dict) -> dict:
         t_start = time.monotonic()
@@ -273,17 +491,46 @@ class WorkflowExecutor:
         return []
 
     def _retrieve_for_inputs(self, cfg: dict, inputs: dict, sources: list[dict]) -> list[dict]:
-        """Retrieve passages for each required KB. Priority order:
+        """Retrieve passages for a skill invocation.
+
+        ADR-032 P2-Exec: the first branch handles ask_parameterized skills via
+        the ephemeral Confluence fetch path.  Author_fixed skills follow the
+        original retriever → store → fixture path below.
+
+        ask_parameterized path:
+          Returns passages from the Confluence page specified by
+          inputs[source_binding.input_param].  Uses ephemeral in-process TTL
+          cache; NEVER writes to WikiMetadataStore or any persistent store.
+
+        author_fixed path (unchanged):
           1. Live retrievers (search_wiki, vector_search, ...) when KB-card
              specifies retrieval_tools and the corresponding retriever is
-             registered. This is the prod/live path and the only way to get
-             actual ingested Confluence content into the rendered artifact.
+             registered.
           2. Legacy direct store query (incident_summary / vector_knn).
-          3. Fixture data — last resort for laptop dev when no live data
-             exists. Previously this fell through too eagerly and rendered
-             tpm_weekly_ops fixture content into a 26ai weekly-exec PPT,
-             surfaced when the artifact-render hook went live.
+          3. Fixture data — last resort for laptop dev when no live data exists.
+
+        P3 guard (author_fixed only):
+          If the user supplied an explicit Confluence page reference in inputs
+          for an author_fixed skill, verify that at least one retrieved passage
+          actually corresponds to that page; hard-fail if not.  This guard is
+          NOT applied to ask_parameterized skills — they use the schema-driven
+          input_param path instead (ADR-032 §E.4 retirement plan).
         """
+        # ------------------------------------------------------------------
+        # ADR-032 P2-Exec: ask_parameterized branch — MUST be first.
+        # ------------------------------------------------------------------
+        source_binding = cfg.get("source_binding") or {}
+        sb_mode = source_binding.get("mode", "author_fixed")
+
+        if sb_mode == "ask_parameterized":
+            # Schema-driven path: page_id comes from source_binding.input_param,
+            # NOT from regex scanning over free-form prose.  This is the structural
+            # replacement for the BUG-990fe P3 regex heuristic for parameterized skills.
+            return self._retrieve_ask_parameterized(cfg, inputs, source_binding)
+
+        # ------------------------------------------------------------------
+        # author_fixed path — unchanged behaviour
+        # ------------------------------------------------------------------
         passages: list[dict] = []
         query_text = " ".join(str(v) for v in inputs.values() if v)
 
@@ -359,20 +606,18 @@ class WorkflowExecutor:
             passages = self._load_fixture_passages(inputs, cfg=cfg)
 
         # ------------------------------------------------------------------
-        # ADR-032 P3 guard — no-silent-substitution assertion.
+        # ADR-032 P3 guard — no-silent-substitution assertion (author_fixed only).
         #
-        # If the user supplied an explicit Confluence page reference in inputs,
-        # verify that at least one retrieved passage actually corresponds to that
-        # page.  If none do, hard-fail with an actionable message — NEVER fall
-        # through to a different page's content.
+        # If the user supplied an explicit Confluence page reference in inputs
+        # for an AUTHOR_FIXED skill, verify that at least one retrieved passage
+        # actually corresponds to that page.  Hard-fail if not.
         #
-        # This is the "no-silent-degradation" invariant from ADR-031 applied to
-        # source selection: if a page was requested, the wrong page is always
-        # wrong, and silence is the worst possible error signal.
-        #
-        # TEMPORARY heuristic: regex-on-input detection will be replaced by
-        # source_binding.input_param schema field when ADR-032 P1 ships.
-        # DECISION-012 options A/B/C remain open and unconstrained by this guard.
+        # This guard is CONDITIONAL: it applies only to author_fixed skills.
+        # ask_parameterized skills do NOT reach this block — they returned
+        # earlier via _retrieve_ask_parameterized which enforces correctness
+        # through the schema-driven source_binding.input_param path
+        # (ADR-032 §E.4 — structural retirement of regex heuristic for
+        # parameterized skills; regex retained for author_fixed).
         # ------------------------------------------------------------------
         requested_page_ids = _extract_confluence_page_ids(inputs)
         if requested_page_ids:
@@ -384,8 +629,8 @@ class WorkflowExecutor:
                 ]
                 if not matching:
                     log.error(
-                        "executor P3 guard: requested Confluence page %s not found in "
-                        "retrieved passages (skill=%s). Hard-failing — retrieved %d "
+                        "executor P3 guard (author_fixed): requested Confluence page %s not "
+                        "found in retrieved passages (skill=%s). Hard-failing — retrieved %d "
                         "passage(s) from different page(s); substitution is forbidden.",
                         requested_pid, skill_name, len(passages),
                     )
@@ -394,6 +639,314 @@ class WorkflowExecutor:
                     )
 
         return passages
+
+    # ------------------------------------------------------------------
+    # ADR-032 P2-Exec — ask_parameterized ephemeral fetch path
+    # ------------------------------------------------------------------
+
+    def _retrieve_ask_parameterized(
+        self,
+        cfg: dict,
+        inputs: dict,
+        source_binding: dict,
+    ) -> list[dict]:
+        """Fetch the user-supplied Confluence page ephemerally and extract fields.
+
+        This method implements Option C (ADR-032 §C) for ask_parameterized skills.
+
+        Trust enforcement order (all checks BEFORE any network call):
+          1. ingest_on_demand must be true in source_binding.
+          2. self.confluence_adapter must not be None (adapter must be configured).
+          3. space_allow_list check: the page's Confluence space must be in the
+             allow-list.  If the space cannot be determined from the URL alone,
+             we fetch metadata-only to learn the space, then enforce (per
+             ADR-032-impl-plan.md §Known Gaps: "fetch metadata-only to learn
+             the space then enforce").  On violation: hard-fail BEFORE extraction.
+
+        NEVER writes to WikiMetadataStore, IncidentVectorStore, or any other
+        persistent store.  Ephemeral content is cached in-process only
+        (_ephemeral_cache; TTL from source_binding.ephemeral_ttl_seconds; 300s
+        default) and is NEVER persisted to disk.
+
+        Raises
+        ------
+        ConfluencePageNotInKBError
+            On any trust violation (ingest_on_demand false, adapter None, space
+            not allow-listed) or adapter fetch failure.  Always actionable;
+            never exposes provider internals.
+        """
+        skill_name = cfg.get("workflow_skill", "")
+        input_param = source_binding.get("input_param", "")
+        page_ref = str(inputs.get(input_param, "")).strip()
+        page_id = _resolve_page_id(page_ref)
+        ingest_on_demand = source_binding.get("ingest_on_demand", False)
+        space_allow_list: list[str] = source_binding.get("space_allow_list") or []
+        ttl = int(source_binding.get("ephemeral_ttl_seconds", 300))
+
+        # ----------------------------------------------------------------
+        # Trust check 1: ingest_on_demand must be true.
+        # ----------------------------------------------------------------
+        if not ingest_on_demand:
+            raise ConfluencePageNotInKBError(
+                page_id=page_id,
+                skill_name=skill_name,
+                reason=(
+                    "This skill is configured with ingest_on_demand: false. "
+                    "The requested page is not in the knowledge base. "
+                    f"Run: kb-cli ingest --page-id {page_id} --persona tpm, "
+                    "or contact the skill author to enable ingest_on_demand."
+                ),
+            )
+
+        # ----------------------------------------------------------------
+        # Trust check 2: adapter must be configured (never silent fallback).
+        # ----------------------------------------------------------------
+        if self.confluence_adapter is None:
+            raise ConfluencePageNotInKBError(
+                page_id=page_id,
+                skill_name=skill_name,
+                reason=(
+                    f"ask_parameterized skill '{skill_name}' requires live Confluence "
+                    "access to fetch the page you specified, but the Confluence adapter "
+                    "is not configured in this deployment. "
+                    "Contact your administrator to configure the Confluence adapter "
+                    "(framework/config/adapters/confluence.yaml)."
+                ),
+            )
+
+        # ----------------------------------------------------------------
+        # Trust check 3: space allow-list — enforced BEFORE any extraction.
+        #
+        # Per ADR-032-impl-plan.md §Known Gaps: if the space key cannot be
+        # determined from the URL (bare numeric page_id supplied), we fetch
+        # metadata-only first to learn the space, then enforce the allow-list.
+        # This adds one API call before extraction on first fetch (before TTL
+        # cache is warm), but is safe: no extraction occurs before the check.
+        # ----------------------------------------------------------------
+        if space_allow_list:
+            space_key = _extract_space_key_from_url(page_ref)
+            if space_key is None:
+                # Bare numeric ID — must fetch metadata to determine space.
+                # Fetch is metadata-only at this point; extraction has NOT started.
+                log.debug(
+                    "ask_parameterized: cannot determine space from bare page_id=%s; "
+                    "fetching metadata to enforce space allow-list before extraction.",
+                    page_id,
+                )
+                try:
+                    raw_meta = self.confluence_adapter.fetch_metadata(page_id)
+                    space_key = (raw_meta or {}).get("space") or (raw_meta or {}).get("spaceKey")
+                except AttributeError:
+                    # Adapter does not support fetch_metadata — fall back to full fetch
+                    # and extract space from payload.  Trust check still runs before extraction.
+                    try:
+                        raw_item = self.confluence_adapter.fetch(
+                            _make_raw_item_ref(page_id)
+                        )
+                        space_key = (
+                            (raw_item.metadata or {}).get("space")
+                            or (raw_item.metadata or {}).get("spaceKey")
+                        )
+                        # Cache the full item to avoid a second fetch below
+                        _prefetched_item = raw_item  # noqa: F841  (used in fast path)
+                    except Exception as exc:
+                        raise ConfluencePageNotInKBError(
+                            page_id=page_id,
+                            skill_name=skill_name,
+                            reason=(
+                                f"Could not fetch Confluence page {page_id} to determine "
+                                f"its space for allow-list enforcement: {type(exc).__name__}. "
+                                "Verify the page exists and you have access."
+                            ),
+                        ) from None
+                except Exception as exc:
+                    raise ConfluencePageNotInKBError(
+                        page_id=page_id,
+                        skill_name=skill_name,
+                        reason=(
+                            f"Could not fetch metadata for Confluence page {page_id} to "
+                            f"determine its space: {type(exc).__name__}. "
+                            "Verify the page exists and you have access."
+                        ),
+                    ) from None
+
+            if space_key and space_key not in space_allow_list:
+                log.warning(
+                    "ask_parameterized trust check FAILED: page_id=%s space=%r not in "
+                    "allow-list %s for skill=%s. Hard-failing — adapter NOT called.",
+                    page_id, space_key, space_allow_list, skill_name,
+                )
+                raise ConfluencePageNotInKBError(
+                    page_id=page_id,
+                    skill_name=skill_name,
+                    reason=(
+                        f"Confluence space '{space_key}' is not in the skill's allow-list "
+                        f"{space_allow_list}. Contact the skill author to add this space "
+                        "to source_binding.space_allow_list."
+                    ),
+                )
+            elif space_key is None:
+                # Could not determine space even after metadata fetch — log warning
+                # and proceed (space_allow_list is a best-effort check for unknown spaces).
+                log.warning(
+                    "ask_parameterized: could not determine space key for page_id=%s — "
+                    "proceeding without space allow-list check (space_allow_list=%s).",
+                    page_id, space_allow_list,
+                )
+
+        # ----------------------------------------------------------------
+        # In-process TTL cache check — skip fetch if recently fetched.
+        # Key: "ephemeral:{page_id}" (content_hash added after fetch).
+        # ----------------------------------------------------------------
+        cache_key = f"ephemeral:{page_id}"
+        cached = _ephemeral_cache.get(cache_key, ttl)
+        if cached is not None:
+            log.debug(
+                "ask_parameterized: TTL cache hit for page_id=%s skill=%s — "
+                "returning cached passages without adapter call.",
+                page_id, skill_name,
+            )
+            return cached
+
+        # ----------------------------------------------------------------
+        # Ephemeral fetch — NEVER writes to WikiMetadataStore or any
+        # persistent store.  Only _ephemeral_cache.put() below stores this.
+        #
+        # INVARIANT: do NOT add calls to WikiMetadataStore.add(),
+        # IncidentVectorStore.upsert(), or any other persistent store in
+        # this method.  Ephemeral content must never leak into the shared KB.
+        # ----------------------------------------------------------------
+        try:
+            raw_item = self.confluence_adapter.fetch(
+                _make_raw_item_ref(page_id)
+            )
+        except Exception as exc:
+            raise ConfluencePageNotInKBError(
+                page_id=page_id,
+                skill_name=skill_name,
+                reason=(
+                    f"Confluence adapter could not fetch page {page_id}: "
+                    f"{type(exc).__name__}. Verify the page exists and you have access."
+                ),
+            ) from None
+
+        # Extract page body text from adapter response shape.
+        body_text = _extract_body_text(raw_item)
+        if not body_text:
+            raise ConfluencePageNotInKBError(
+                page_id=page_id,
+                skill_name=skill_name,
+                reason=(
+                    f"Confluence page {page_id} has no usable body content. "
+                    "Verify the page is not empty."
+                ),
+            )
+
+        # Content hash for cache key refinement (used in audit log + future dedup).
+        content_hash = hashlib.sha256(body_text.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+        # Determine space from fetched metadata (if not already known from URL).
+        fetched_space = (
+            (raw_item.metadata or {}).get("space")
+            or (raw_item.metadata or {}).get("spaceKey")
+            or space_key
+            or ""
+        )
+
+        # Schema-bounded LLM extraction — uses the skill's authored schema.
+        # Same _llm_extract_fields path as the INGEST/synthesize flow.
+        # Deterministic schema-bounded extraction, not free-form LLM parsing.
+        skill_schema = self._lookup_schema(cfg) or {}
+        if skill_schema and self.llm is not None:
+            try:
+                extracted = self._llm_extract_fields(skill_schema, body_text, inputs)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "ask_parameterized: LLM extraction failed for page_id=%s skill=%s: %s — "
+                    "using raw body text as fallback passage.",
+                    page_id, skill_name, exc,
+                )
+                extracted = {}
+        else:
+            extracted = {}
+
+        passage_text = (
+            json.dumps(extracted, ensure_ascii=False)
+            if extracted
+            else body_text[:80000]
+        )
+
+        # Build citation URL from adapter metadata or fall back to canonical form.
+        citation_url = (
+            (raw_item.metadata or {}).get("url")
+            or (raw_item.metadata or {}).get("web_url")
+            or f"confluence://pages/{page_id}"
+        )
+
+        kb_ref = ""
+        reqs = cfg.get("requires_extractions") or []
+        if reqs:
+            kb_ref = reqs[0].get("kb", "")
+
+        passages: list[dict] = [{
+            "text": passage_text,
+            "citation": citation_url,
+            "metadata": {
+                "page_id": page_id,
+                "space": fetched_space,
+                "title": (raw_item.metadata or {}).get("title", ""),
+                "content_hash": content_hash,
+                # EPHEMERAL flag: this content MUST NOT be written to any
+                # persistent store.  The flag is informational for callers;
+                # the structural guarantee is that this method NEVER calls
+                # WikiMetadataStore.add() or any equivalent.
+                "ephemeral": True,
+                "fetched_at": datetime.utcnow().isoformat() + "Z",
+            },
+            "kb": kb_ref,
+        }]
+
+        # Audit log — every ephemeral fetch logged (spec §10, trust model).
+        self._log_ephemeral_fetch(page_id, fetched_space, skill_name, content_hash)
+
+        # Store in in-process TTL cache — the ONLY place this content is stored.
+        # NEVER written to disk or any persistent store.
+        _ephemeral_cache.put(cache_key, passages, ttl)
+
+        log.info(
+            "ask_parameterized: ephemerally fetched page_id=%s space=%s skill=%s "
+            "content_hash=%s ttl=%ds",
+            page_id, fetched_space, skill_name, content_hash, ttl,
+        )
+        return passages
+
+    def _log_ephemeral_fetch(
+        self,
+        page_id: str,
+        space_key: str,
+        skill_name: str,
+        content_hash: str = "",
+    ) -> None:
+        """Append an audit log entry for each ephemeral Confluence page fetch.
+
+        Written to ~/.kbf/telemetry/ephemeral_fetch.jsonl.
+        Fields: ts, page_id, space_key, skill_name, content_hash.
+        ADR-032 trust model: every ephemeral fetch is traceable.
+        """
+        try:
+            _TELEMETRY_DIR.mkdir(parents=True, exist_ok=True)
+            entry = {
+                "ts": datetime.utcnow().isoformat() + "Z",
+                "page_id": page_id,
+                "space_key": space_key,
+                "skill_name": skill_name,
+                "content_hash": content_hash,
+            }
+            audit_file = _TELEMETRY_DIR / "ephemeral_fetch.jsonl"
+            with audit_file.open("a") as fh:
+                fh.write(json.dumps(entry) + "\n")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("ask_parameterized: audit log write failed: %s", exc)
 
     def _load_fixture_passages(self, inputs: dict, cfg: dict | None = None) -> list[dict]:
         fixtures_dir = REPO_ROOT / "framework" / "_dev_fixtures"

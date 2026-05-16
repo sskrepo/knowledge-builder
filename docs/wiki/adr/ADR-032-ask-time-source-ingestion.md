@@ -20,6 +20,26 @@ ingestion) chosen by user. Implementation blueprint at ADR-032-impl-plan.md.
 P3 (silent wrong-page substitution guard) shipped standalone in commit 8c947dc,
 ahead of the P1/P2 build.
 
+**P2-Exec implemented — 2026-05-16.**
+- `WorkflowExecutor.__init__` now accepts `confluence_adapter=None` (backward-compat).
+- `framework/deploy/mcp_server.py` passes `confluence_adapter=app.state.confluence_adapter`
+  to `WorkflowExecutor(...)` — the P2-Infra adapter is now live, not dead code.
+- `_retrieve_for_inputs` branches on `source_binding.mode`:
+  - `ask_parameterized` → `_retrieve_ask_parameterized()` (ephemeral path).
+  - `author_fixed` (default) → unchanged retriever/store/fixture path.
+- P3 regex heuristic guard is now CONDITIONAL: applied only for `author_fixed` skills.
+  `ask_parameterized` skills use schema-driven `source_binding.input_param` resolution
+  (ADR-032 §E.4 retirement plan executed).
+- In-process TTL cache (`_EphemeralCache`, thread-safe, 50-entry LRU cap, never persisted).
+- Trust enforcement order: ingest_on_demand check → adapter-None check → space allow-list
+  check (all BEFORE any network call for URL-form refs; metadata fetch used for bare
+  numeric IDs, then space check, then extraction).
+- Ephemeral content NEVER written to WikiMetadataStore, IncidentVectorStore, or any
+  persistent store. Structural boundary enforced by code comment + test assertion.
+- Audit log: every fetch written to `~/.kbf/telemetry/ephemeral_fetch.jsonl`.
+- Tests: 40 new tests in `test_executor_ephemeral.py`; 4 new tests in
+  `test_executor_source_guard.py` (conditional guard realignment, 28 total).
+
 ---
 
 ## A. The Observed Failure

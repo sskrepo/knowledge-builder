@@ -309,11 +309,18 @@ def _load_app():
         # Without this, on-request artifact_url skills got rendered with
         # the FIRST matching fixture file's content (weekly_exec_review_26ai
         # ended up filled with tpm_weekly_ops fixture data).
+        #
+        # ADR-032 P2-Exec (RECONCILIATION): confluence_adapter is passed so
+        # ask_parameterized skills can fetch the consumer-supplied page ephemerally.
+        # None = adapter not configured; ask_parameterized skills hard-fail
+        # actionably (never silently fall back to wrong content).
+        # Backward-compatible: author_fixed skills are unaffected by this param.
         state["workflow_executor"] = WorkflowExecutor(
             store=None,
             llm=state["llm"],
             retrievers=retrievers,
             shim_kb=state["shim_kb"],
+            confluence_adapter=confluence_adapter,  # ADR-032 P2-Exec — may be None
         )
         # Expose on app.state so the ask route + MCP handler can call it from
         # within a request (see _maybe_render_artifact in routes/ask.py).

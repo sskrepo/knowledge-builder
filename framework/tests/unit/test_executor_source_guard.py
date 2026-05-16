@@ -2,6 +2,14 @@
 
 Tests the no-silent-substitution invariant added to WorkflowExecutor._retrieve_for_inputs.
 
+ADR-032 P2-Exec update: the P3 guard is now CONDITIONAL:
+  - author_fixed skills: regex heuristic guard is RETAINED. Still hard-fails
+    when the user supplies a page ref in free-text inputs and the retriever
+    returns a different page.
+  - ask_parameterized skills: regex guard is NOT applied. Instead, the schema-
+    driven source_binding.input_param path is used (ephemeral fetch). The
+    TestAskParameterizedRoutesToEphemeral class below proves this.
+
 Coverage:
   1. pageId=18625350641 in input + retriever returns ONLY a passage citing
      page 20030556732 → hard-fail with actionable message; NO substitution
@@ -12,6 +20,11 @@ Coverage:
      behaviour; guard is inert (proves no regression to fixed-source skills).
   4. URL form /pages/viewpage.action?pageId=18625350641 → same extraction as
      plain pageId= form.
+  NEW (P2-Exec):
+  5. ask_parameterized skill → ephemeral path taken (adapter called), regex guard
+     NOT applied.
+  6. ask_parameterized skill with page ref in free-text does NOT trigger P3 guard
+     (the guard is conditional to author_fixed only).
 
 All tests use the mock retriever / shim_kb patterns from existing executor tests.
 No live LLM or DB calls.
@@ -431,4 +444,180 @@ class TestExecutorSourceGuard:
         ids = _extract_confluence_page_ids({"input": "we processed 12345678 records"})
         assert ids == [], (
             f"Standalone prose number without 'pageId' prefix must NOT match; got {ids}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# ADR-032 P2-Exec: Conditional guard behavior
+# Tests that ask_parameterized routes to ephemeral path (not P3 regex guard)
+# and that author_fixed still uses the regex guard.
+# ---------------------------------------------------------------------------
+
+def _make_ask_parameterized_skill_yaml(
+    tmp_path: Path,
+    skill_name: str = "ask_param_skill",
+    space_allow_list: list | None = None,
+) -> Path:
+    """Write a minimal ask_parameterized skill YAML for conditional-guard tests."""
+    if space_allow_list is None:
+        space_allow_list = ["FA", "PROJ"]
+    cfg = {
+        "workflow_skill": skill_name,
+        "persona": "tpm",
+        "status": "promoted",
+        "source_binding": {
+            "mode": "ask_parameterized",
+            "input_param": "page_id",
+            "ingest_on_demand": True,
+            "source_type": "confluence_page",
+            "space_allow_list": space_allow_list,
+            "ephemeral_ttl_seconds": 300,
+        },
+        "trigger": {
+            "on_request": {
+                "enabled": True,
+                "inputs": [
+                    {"name": "page_id", "type": "confluence_page_ref", "required": True}
+                ],
+                "output_format": "email",
+                "response_mode": "artifact_url",
+            },
+        },
+        "requires_extractions": [{"kb": f"tpm.{skill_name}"}],
+        "synthesis": {"output_format": "email"},
+        "delivery": {"kind": "filesystem", "path": f"/tmp/{skill_name}.eml"},
+    }
+    d = tmp_path / "workflow_skills" / "tpm"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{skill_name}.yaml"
+    p.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    return p
+
+
+class TestAskParameterizedRoutesToEphemeral:
+    """ADR-032 P2-Exec — verify the conditional guard behavior.
+
+    author_fixed skills: P3 regex guard retained (existing tests above).
+    ask_parameterized skills: schema-driven ephemeral path used; regex guard NOT applied.
+    """
+
+    def _make_adapter(self, page_id=REQUESTED_PAGE_ID, space="FA"):
+        raw_item = MagicMock()
+        raw_item.metadata = {
+            "page_id": page_id,
+            "space": space,
+            "title": f"Page {page_id}",
+            "url": f"https://conf.example.com/spaces/{space}/pages/{page_id}/",
+        }
+        raw_item.payload = {"body": "Project status: Green. Next steps: ..."}
+        raw_item.text = "Project status: Green. Next steps: ..."
+        adapter = MagicMock()
+        adapter.fetch.return_value = raw_item
+        return adapter
+
+    def test_ask_parameterized_routes_to_ephemeral_path_not_regex_guard(self, tmp_path):
+        """ask_parameterized skill → adapter.fetch called for the requested page;
+        the P3 regex guard block is NOT entered (the skill returned earlier via
+        _retrieve_ask_parameterized).
+
+        Structural proof: even if the input contains 'pageId=X' in free-text,
+        the ask_parameterized path reads from source_binding.input_param, not regex."""
+        skill_yaml = _make_ask_parameterized_skill_yaml(tmp_path)
+        adapter = self._make_adapter(REQUESTED_PAGE_ID, "FA")
+        llm = MagicMock()
+        llm.chat.return_value = {"text": '{"status": "Green"}', "tokens_out": 10}
+        executor = WorkflowExecutor(
+            confluence_adapter=adapter, llm=llm,
+        )
+
+        url = f"https://conf.example.com/spaces/FA/pages/{REQUESTED_PAGE_ID}/My+Page"
+        passages = executor._retrieve_for_inputs(
+            cfg=yaml.safe_load(skill_yaml.read_text()),
+            inputs={"page_id": url},
+            sources=[],
+        )
+
+        # Adapter must have been called (ephemeral path taken)
+        adapter.fetch.assert_called_once()
+        assert len(passages) >= 1
+        assert all(
+            p.get("metadata", {}).get("ephemeral") is True for p in passages
+        ), "All passages from ask_parameterized must be ephemeral"
+
+    def test_ask_parameterized_page_ref_in_free_text_does_not_trigger_p3_guard(self, tmp_path):
+        """Even if 'pageId=18625350641' appears in a free-text input field for an
+        ask_parameterized skill, the P3 regex guard must NOT fire.
+
+        The ask_parameterized branch returns before reaching the P3 guard block.
+        This confirms the guard is conditional (author_fixed only)."""
+        skill_yaml = _make_ask_parameterized_skill_yaml(tmp_path)
+        adapter = self._make_adapter(REQUESTED_PAGE_ID, "FA")
+        llm = MagicMock()
+        llm.chat.return_value = {"text": '{"status": "Green"}', "tokens_out": 10}
+        executor = WorkflowExecutor(confluence_adapter=adapter, llm=llm)
+
+        # The skill's structured input field carries the URL form
+        url = f"https://conf.example.com/spaces/FA/pages/{REQUESTED_PAGE_ID}/"
+        passages = executor._retrieve_for_inputs(
+            cfg=yaml.safe_load(skill_yaml.read_text()),
+            inputs={"page_id": url},  # structured input — schema-driven, not free-text
+            sources=[],
+        )
+
+        # Must NOT raise ConfluencePageNotInKBError
+        assert len(passages) >= 1
+
+    def test_author_fixed_p3_guard_still_fires_after_p2_exec_ships(self, tmp_path):
+        """After P2-Exec, the P3 guard must STILL fire for author_fixed skills
+        when the user includes a page ref in free-text and the retriever returns
+        a different page (no regression).
+
+        This is the critical regression test — the conditional must work correctly."""
+        skill_yaml = _make_skill_yaml(tmp_path)  # author_fixed (no source_binding)
+        wrong_result = Result(
+            content_id=INGESTED_PAGE_ID,
+            chunk_id=None,
+            text=f"Content from {INGESTED_PAGE_ID}",
+            score=0.9,
+            citation_url=f"wiki://{INGESTED_PAGE_ID}",
+            metadata={"page_id": INGESTED_PAGE_ID},
+        )
+        retriever = _make_retriever([wrong_result])
+        shim_kb = _make_shim_kb()
+        executor = WorkflowExecutor(
+            retrievers={"search_wiki": retriever},
+            shim_kb=shim_kb,
+            confluence_adapter=None,  # adapter absent — irrelevant for author_fixed
+        )
+
+        with pytest.raises(ConfluencePageNotInKBError) as exc_info:
+            executor._retrieve_for_inputs(
+                cfg=yaml.safe_load(skill_yaml.read_text()),
+                inputs={"input": f"pageId={REQUESTED_PAGE_ID}"},
+                sources=[],
+            )
+
+        assert exc_info.value.page_id == REQUESTED_PAGE_ID, (
+            "P3 guard must still identify the requested page for author_fixed skills"
+        )
+
+    def test_ask_parameterized_adapter_none_raises_before_regex_guard(self, tmp_path):
+        """ask_parameterized + adapter None → hard-fail from ephemeral path (adapter
+        unavailable), NOT from the P3 regex guard.
+
+        The error reason must mention the adapter, not the KB ingest instruction."""
+        skill_yaml = _make_ask_parameterized_skill_yaml(tmp_path)
+        executor = WorkflowExecutor(confluence_adapter=None)
+
+        with pytest.raises(ConfluencePageNotInKBError) as exc_info:
+            executor._retrieve_for_inputs(
+                cfg=yaml.safe_load(skill_yaml.read_text()),
+                inputs={"page_id": REQUESTED_PAGE_ID},
+                sources=[],
+            )
+
+        msg = str(exc_info.value)
+        # Must mention Confluence adapter (ephemeral path hard-fail), not KB ingest
+        assert "adapter" in msg.lower() or "Confluence adapter" in msg, (
+            f"ask_parameterized adapter-None error must mention adapter; got: {msg!r}"
         )

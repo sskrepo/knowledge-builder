@@ -4,6 +4,58 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] backend-dev | ADR-032 P2-Exec — ask_parameterized ephemeral fetch path + WorkflowExecutor wiring
+
+**P2-Exec complete.**
+
+- `framework/workflow_runtime/executor.py`:
+  - `WorkflowExecutor.__init__` now accepts `confluence_adapter=None` (backward-compat;
+    all existing constructions default to None; author_fixed skills unaffected).
+  - `_retrieve_for_inputs` branches on `source_binding.mode`: `ask_parameterized` →
+    `_retrieve_ask_parameterized()` (new ephemeral path); `author_fixed` (default) →
+    existing retriever/store/fixture path unchanged.
+  - `_retrieve_ask_parameterized()`: trust enforcement order: (1) ingest_on_demand check,
+    (2) adapter-None check, (3) space allow-list check (from URL or metadata fetch for
+    bare numeric IDs — per impl-plan §Known Gaps) — ALL before any extraction. Ephemeral
+    fetch via `self.confluence_adapter.fetch()`. Schema-bounded extraction via existing
+    `_llm_extract_fields`. In-process TTL cache only (never persisted). Audit log.
+  - `_EphemeralCache`: module-level, thread-safe (threading.Lock), 50-entry LRU cap,
+    TTL eviction on get, never written to disk.
+  - P3 regex guard now CONDITIONAL: `_retrieve_for_inputs` applies it ONLY after
+    `author_fixed` path (ask_parameterized returns before reaching the guard block).
+  - `ConfluencePageNotInKBError` extended with optional `reason` param for actionable
+    consumer-safe messages (existing default message preserved; no regression).
+  - `_resolve_page_id`, `_extract_space_key_from_url`, `_make_raw_item_ref`,
+    `_extract_body_text` helpers added.
+  - EVAL handling per ADR-032 §F: `_record_eval_entry` records ask_parameterized
+    executions as gold-set candidates (same as author_fixed); eval harness will inject
+    gold page IDs via input_param when exercising parameterized skills.
+
+- `framework/deploy/mcp_server.py`:
+  - RECONCILIATION: `WorkflowExecutor(...)` construction now passes
+    `confluence_adapter=confluence_adapter` — the P2-Infra adapter is no longer dead
+    code; it is live and passed into the executor at lifespan startup.
+
+- `framework/tests/unit/test_executor_ephemeral.py` — NEW: 40 tests covering all
+  ephemeral path branches: happy path, no-persist assertion, TTL cache hit/miss/eviction,
+  adapter None, space not allow-listed (before fetch), ingest_on_demand false,
+  author_fixed unchanged, adapter fetch failure, empty body, thread-safety,
+  LRU eviction, _resolve_page_id, _extract_space_key_from_url, audit log, constructor.
+
+- `framework/tests/unit/test_executor_source_guard.py` — realigned: 4 new tests for
+  conditional guard behavior (ask_parameterized routes to ephemeral, author_fixed P3
+  guard still fires). Total: 28 tests (24 pre-existing + 4 new), all pass.
+
+- `docs/wiki/adr/ADR-032-ask-time-source-ingestion.md` — P2-Exec marked implemented;
+  regex guard retirement for ask_parameterized documented.
+
+Full test suite: 8 pre-existing failures (smoke_validate×7 + code_wiki×1) — 0 new
+regressions. Specified suite (test_executor_ephemeral + test_executor_source_guard +
+test_skill_builder_conversation + test_prompt_registry + test_failure_classifier_gate):
+298 passed, 0 failures.
+
+---
+
 ## [2026-05-16] backend-dev | ADR-032 P2-Infra — Confluence adapter factory relocated + lifespan optional dependency wired
 
 **P2-Infra complete.** Commit 91ecff6.
