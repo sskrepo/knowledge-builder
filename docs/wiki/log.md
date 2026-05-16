@@ -4,6 +4,23 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-15] backend-dev | fix S5 stale tests + gold-set write None guard (commit 4167ce7)
+
+**Task 1 — 3 stale tests updated to ADR-029 / Folded Fix 2 contract**
+- `test_promote_yes_calls_skill_store_promote`: now provides delta + mocks ShimKb(0 cards = test env) → asserts promote+upsert called, DONE
+- `test_promote_calls_upsert_persona_builder_kb_when_delta_exists`: now mocks ShimKb + asserts all_cards()+find_kb() invoked for resolvability check + DONE
+- Added `test_promote_yes_hard_fails_when_delta_absent` encoding the hard-fail invariant
+- `test_eval_gates_on_recall_and_faithfulness` → renamed `test_eval_user_accept_is_terminal_gate`: asserts ADR-029 S5 options set, must_show_human=True, awaiting_user=True, diagnostic _note on exit_criteria
+
+**Task 2 — latent NoneType+str bug fixed in `conversation.py::_run_eval`**
+- Root cause: (a) `persona`/`skill_name` lacked `or "unknown"` guard before path construction; (b) `wf_path.parent.mkdir()` was missing (only `ext_path.parent.mkdir()` was called)
+- Fix: add `_safe_persona`/`_safe_skill` guards; add explicit `wf_path.parent.mkdir()` before `wf_path.write_text()`
+- Regression tests in `TestRunEvalGoldSetWrite` (test_adr029_s5.py): None-valued wf fields + real tmp_path JSONL write verified
+
+**Result: 248 passed, 0 failures across all three suites**
+
+---
+
 ## [2026-05-15] backend-dev | ADR-029 Phase 1 S5 implemented: artifact retention, image hard-reject, comparator at EVAL, user-accept gate; Folded Fix 1 + Folded Fix 2
 
 **S5 — ADR-029 Phase 1 (conversation.py)**
