@@ -48,6 +48,13 @@ _CONFLUENCE_PAGE_REF_PATTERNS = [
     # bare all-digit token presented as an explicit pageId= key-value pair
     # in the raw input string (e.g. "pageId=18625350641" without leading ?)
     re.compile(r"\bpageId=(\d+)\b", re.IGNORECASE),
+    # A1 (BUG-queue-990fe): space-separated / natural-language form, e.g.
+    # "for Confluence pageId 18625350641" or "page id: 18625350641".
+    # The LENGTH CONSTRAINT (≥8 digits) avoids false-positives on short prose
+    # numbers; Confluence pageIds in this env are ~11 digits (e.g. 18625350641).
+    # RETIRED when ADR-032 P2-Exec ships (P1 source_binding.input_param
+    # replaces all regex heuristics — see ADR-032 §E.4).
+    re.compile(r"(?i)\bpage[\s_-]?id\b[\s:]+(\d{8,})"),
 ]
 
 

@@ -101,7 +101,7 @@ There is no ingest-on-demand step anywhere in this chain. The `ConfluenceWikiIng
 and Confluence adapters exist in the ingestion pipeline but are not imported or
 reachable from `WorkflowExecutor._retrieve_for_inputs`.
 
-### P3 — Silent Wrong-Page Substitution (shipped — commit 8c947dc)
+### P3 — Silent Wrong-Page Substitution (shipped — commit 8c947dc; space-form gap closed — BUG-queue-990fe Option-A)
 
 When path 1 of `_retrieve_for_inputs` runs with a user-supplied pageId that is not
 in the KB, the retriever runs a semantic similarity search over *all* ingested pages
@@ -113,8 +113,41 @@ heuristic, verifies at least one retrieved passage cites the requested page_id, 
 hard-fails with an actionable message on mismatch. This guard is inert for fixed-source
 skills.
 
-The regex heuristic is **temporary**. It will be replaced by the schema-driven check
-against `source_binding.input_param` when P1 ships. See implementation blueprint.
+**BUG-queue-990fe RC2 (Option-A, A1) — space-form gap closed.** The original pattern
+list only matched URL forms and `pageId=<digits>` (with `=`). The natural-language form
+`"pageId 18625350641"` (space-separated) was not matched, so the P3 guard silently
+failed to fire — producing the highest-severity outcome (wrong-page email drafted with
+no signal). A fifth pattern has been added to `_CONFLUENCE_PAGE_REF_PATTERNS`:
+
+```python
+re.compile(r"(?i)\bpage[\s_-]?id\b[\s:]+(\d{8,})")
+```
+
+Length constraint `{8,}` prevents false-positives on short prose numbers; Confluence
+pageIds in this environment are ~11 digits. The guard now fires on:
+`"for Confluence pageId 18625350641"` and `"pageId: 18625350641"` — and hard-fails
+(ConfluencePageNotInKBError) identically to the URL/`=` forms.
+
+**BUG-queue-990fe RC1 (Option-A, A2/A3) — persona=null root cause closed.** Raw
+Confluence items carry no `persona` field. Previously `_raw.get("persona")` stored
+`null` in wiki_metadata, causing `SearchWikiRetriever`'s persona filter to exclude
+the ingested page at retrieval time. Fixed by:
+- `ConfluenceWikiIngestor.__init__` gains `persona: str | None = None` param.
+- `ingest_page` uses `effective_persona = _raw.get("persona") or self._persona`
+  (raw wins; ingestor-level param is the fallback — never overwrites raw).
+- All callers updated: `conversation.py` passes `self._data.persona`;
+  `ingestion_worker.py` builds a per-entry ingestor with `persona=entry["persona"]`;
+  `kb-cli ingest` gains `--persona` flag (required when config YAML has no `persona:`).
+
+**A4 — idempotent backfill command.** `kb-cli wiki-meta backfill-persona --persona <p>
+[--page-id N]` sets persona on null-persona wiki_metadata records. Non-null records
+are never overwritten. Re-running is a no-op. Executed for page 18625350641:
+before `persona: null`, after `persona: "tpm"`.
+
+The regex heuristic is **temporary** for all five patterns. It will be replaced in
+its entirety by the schema-driven check against `source_binding.input_param` when
+ADR-032 P2-Exec (Phase 2) ships. See §E.4 for the retirement plan. Once P2-Exec
+lands, the regex block and the P3 guard block in `_retrieve_for_inputs` are removed.
 
 ---
 

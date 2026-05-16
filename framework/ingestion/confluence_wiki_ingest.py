@@ -44,6 +44,10 @@ class ConfluenceWikiIngestor:
         wiki_root: str | Path | None = None,
         adapter=None,             # ConfluenceNativeAdapter; None → filestore fixture mode
         wiki_store: WikiMetadataStore | None = None,
+        persona: str | None = None,  # A2 (BUG-queue-990fe RC1): owning persona for this
+                                     # ingestor instance. Used as fallback when the raw
+                                     # Confluence item has no persona field. Raw wins if
+                                     # the item carries its own persona value.
     ):
         if wiki_root is None:
             wiki_root = Path.home() / ".kbf" / "wiki"
@@ -51,6 +55,7 @@ class ConfluenceWikiIngestor:
         self._wiki_root.mkdir(parents=True, exist_ok=True)
         self._log_file = self._wiki_root / "ingest.log.jsonl"
         self._adapter = adapter
+        self._persona = persona  # fallback persona for wiki_metadata upserts
         self._wiki_store = wiki_store if wiki_store is not None else WikiMetadataStore()
         self._hash_index = self._load_hash_index()
 
@@ -194,13 +199,20 @@ class ConfluenceWikiIngestor:
         self._hash_index[page_id] = content_hash
         self._append_log_entry(page_id, content_hash, status, str(md_path))
 
-        # Update wiki metadata index so search_wiki retriever can find this page
+        # Update wiki metadata index so search_wiki retriever can find this page.
+        # A2 (BUG-queue-990fe RC1): raw item persona wins; fall back to the
+        # ingestor-level persona so pages ingested without an explicit persona
+        # field still carry the owning persona in the metadata record.
+        # This prevents SearchWikiRetriever's persona filter from excluding
+        # pages ingested via ConfluenceWikiIngestor(persona="tpm") when the
+        # raw Confluence item has no persona field.
+        effective_persona = _raw.get("persona") or self._persona
         if self._wiki_store is not None:
             self._wiki_store.upsert_page({
                 "page_id":            page_id,
                 "title":              title,
                 "path":               str(md_path),
-                "persona":            _raw.get("persona"),
+                "persona":            effective_persona,
                 "tags":               _raw.get("labels", []),
                 "last_modified":      _raw.get("updated_at"),
                 "content_hash":       content_hash,

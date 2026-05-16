@@ -265,7 +265,6 @@ def main(persona_builder: str | None = None, skill_store=None):
 
     # ── Ingest each KB entry ───────────────────────────────────────────────
     confluence_adapter = _build_confluence_adapter(cfg, kbf_env)
-    ingestor = ConfluenceWikiIngestor(adapter=confluence_adapter)
     log.info(
         "ingestion_worker: Confluence adapter mode=%s",
         "live" if confluence_adapter is not None else "fixture",
@@ -277,6 +276,12 @@ def main(persona_builder: str | None = None, skill_store=None):
         persona  = entry["persona"]
         kb_name  = entry["kb_name"]
         kb       = entry["kb"]
+
+        # A3 (BUG-queue-990fe): build a per-entry ingestor carrying the entry's
+        # persona so pages with no raw persona field still land with the correct
+        # persona in wiki_metadata (RC1 fix — raw item persona wins over this
+        # fallback when present).
+        ingestor = ConfluenceWikiIngestor(adapter=confluence_adapter, persona=persona)
 
         for src in kb.get("sources", []):
             kind = src.get("kind")

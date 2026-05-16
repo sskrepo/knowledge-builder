@@ -3313,7 +3313,14 @@ class SkillBuilderConversation:
         # search_wiki retriever instance in the MCP server's lifespan.
         from ..stores.wiki_metadata_store import WikiMetadataStore
         wiki_store = WikiMetadataStore()
-        ingestor = ConfluenceWikiIngestor(adapter=confluence_adapter, wiki_store=wiki_store)
+        # A3 (BUG-queue-990fe): pass the session persona so pages ingested here
+        # carry the correct persona in wiki_metadata (RC1 fix — raw wins, this
+        # is the fallback for pages with no raw persona field).
+        ingestor = ConfluenceWikiIngestor(
+            adapter=confluence_adapter,
+            wiki_store=wiki_store,
+            persona=self._data.persona or None,
+        )
 
         total_new = 0
         total_updated = 0

@@ -355,3 +355,80 @@ class TestExecutorSourceGuard:
                 inputs={"input": f"pageId={REQUESTED_PAGE_ID}"},
                 sources=[],
             )
+
+    # -------------------------------------------------------------------------
+    # A1 (BUG-queue-990fe): space-form "pageId 18625350641" fires the guard
+    # -------------------------------------------------------------------------
+
+    def test_space_form_page_ref_fires_guard(self, tmp_path: Path):
+        """A1: Input is 'for Confluence pageId 18625350641' (space, no '=').
+        The P3 guard MUST detect this as a Confluence page reference and
+        hard-fail when the retriever returns a different page — NO silent
+        substitution (was RC2 bug).
+        """
+        skill_yaml = _make_skill_yaml(tmp_path)
+        wrong_result = _make_result(INGESTED_PAGE_ID)  # 20030556732
+
+        executor, _ = self._make_executor([wrong_result])
+        executor._load_fixture_passages = lambda *a, **kw: []
+
+        with pytest.raises(ConfluencePageNotInKBError) as exc_info:
+            executor._retrieve_for_inputs(
+                cfg=yaml.safe_load(skill_yaml.read_text()),
+                inputs={"input": f"for Confluence pageId {REQUESTED_PAGE_ID}"},
+                sources=[],
+            )
+
+        err = exc_info.value
+        assert err.page_id == REQUESTED_PAGE_ID, (
+            f"Error must name the requested page id {REQUESTED_PAGE_ID}, got {err.page_id!r}"
+        )
+        assert "not in the knowledge base" in str(err)
+        assert "ingest" in str(err).lower()
+
+    def test_space_form_with_colon_fires_guard(self, tmp_path: Path):
+        """A1 variant: 'pageId: 18625350641' (colon + space) must also fire."""
+        skill_yaml = _make_skill_yaml(tmp_path)
+        executor, _ = self._make_executor([_make_result(INGESTED_PAGE_ID)])
+        executor._load_fixture_passages = lambda *a, **kw: []
+
+        with pytest.raises(ConfluencePageNotInKBError) as exc_info:
+            executor._retrieve_for_inputs(
+                cfg=yaml.safe_load(skill_yaml.read_text()),
+                inputs={"input": f"pageId: {REQUESTED_PAGE_ID}"},
+                sources=[],
+            )
+        assert exc_info.value.page_id == REQUESTED_PAGE_ID
+
+    def test_space_form_short_number_no_false_positive(self, tmp_path: Path):
+        """A1: short numbers (< 8 digits) embedded in prose must NOT fire the guard.
+        'discussed 12345678 items' has exactly 8 digits — boundary test.
+        'discussed 1234567 items' has 7 digits — must be inert.
+        Only ≥8-digit tokens following 'pageId' (with space/colon) are detected.
+        """
+        skill_yaml = _make_skill_yaml(tmp_path)
+        some_result = _make_result(INGESTED_PAGE_ID)
+        executor, _ = self._make_executor([some_result])
+
+        # 7-digit number in prose — guard must be inert
+        passages = executor._retrieve_for_inputs(
+            cfg=yaml.safe_load(skill_yaml.read_text()),
+            inputs={"input": "discussed 1234567 items in the meeting"},
+            sources=[],
+        )
+        assert len(passages) >= 1, "Guard must be inert for short prose numbers (7 digits)"
+
+    def test_space_form_unit_extraction(self):
+        """Unit test: _extract_confluence_page_ids detects the space form."""
+        ids = _extract_confluence_page_ids({"input": f"for Confluence pageId {REQUESTED_PAGE_ID}"})
+        assert REQUESTED_PAGE_ID in ids, (
+            f"Space-form 'pageId {REQUESTED_PAGE_ID}' must be extracted; got {ids}"
+        )
+
+    def test_space_form_does_not_fire_on_short_prose_numbers(self):
+        """Unit test: short standalone prose numbers do not match the space-form pattern."""
+        # The pattern only fires when 'pageId' (or page id / page-id) precedes the number
+        ids = _extract_confluence_page_ids({"input": "we processed 12345678 records"})
+        assert ids == [], (
+            f"Standalone prose number without 'pageId' prefix must NOT match; got {ids}"
+        )

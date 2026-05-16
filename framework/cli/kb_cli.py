@@ -114,14 +114,182 @@ def cmd_validate(args):
 
 
 def cmd_ingest(args):
-    print(f"▶ ingest {args.config} (dry-run={args.dry_run}, sample={args.sample})")
-    print("  [Phase 1: needs real adapter auth + ADB pool to actually run]")
+    """Run Confluence ingestion for a persona-builder config.
+
+    A3 (BUG-queue-990fe): --persona is forwarded to ConfluenceWikiIngestor so
+    pages with no raw persona field are stored with the correct persona in
+    wiki_metadata (RC1 fix).  If --persona is omitted the persona is read from
+    the config YAML.  If neither is determinable, ingest fails loudly (never
+    silently stores null persona when the persona IS known from the config).
+    """
+    import yaml as _yaml
+    from pathlib import Path as _Path
+    from ..ingestion.confluence_wiki_ingest import ConfluenceWikiIngestor
+
+    cfg_path = _Path(args.config)
+    if not cfg_path.exists():
+        print(f"ERROR: config not found: {cfg_path}", file=sys.stderr)
+        return 1
+
+    with open(cfg_path) as f:
+        pb_cfg = _yaml.safe_load(f) or {}
+
+    # Resolve persona: CLI flag wins, then config file, then fail loudly.
+    persona = getattr(args, "persona", None) or pb_cfg.get("persona") or None
+    if not persona:
+        print(
+            "ERROR: persona could not be determined. Pass --persona <persona> or "
+            "set 'persona:' in the config YAML. Refusing to ingest with null persona "
+            "(BUG-queue-990fe RC1 — null persona pages are filtered out at retrieval).",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.dry_run:
+        print(f"▶ ingest {cfg_path} --persona {persona} (dry-run — no writes)")
+        sources = pb_cfg.get("sources", [])
+        confluence_sources = [s for s in sources if s.get("kind") == "confluence"]
+        print(f"  Confluence sources: {len(confluence_sources)}")
+        for src in confluence_sources:
+            print(f"  space={src.get('space', '?')} labels={src.get('include_labels') or src.get('labels') or '(none)'}")
+        return 0
+
+    print(f"▶ ingest {cfg_path} --persona {persona}")
+
+    kbf_env = os.environ.get("KBF_ENV", "laptop")
+    config_env_path = REPO_ROOT / "framework" / "config" / f"{kbf_env}.yaml"
+    env_cfg: dict = {}
+    if config_env_path.exists():
+        try:
+            import yaml as _yaml2
+            env_cfg = _yaml2.safe_load(config_env_path.read_text()) or {}
+        except Exception:
+            pass
+
+    from ..deploy.ingestion_worker import _build_confluence_adapter
+    from ..stores.wiki_metadata_store import WikiMetadataStore
+
+    confluence_adapter = _build_confluence_adapter(env_cfg, kbf_env)
+    wiki_store = WikiMetadataStore()
+    ingestor = ConfluenceWikiIngestor(
+        adapter=confluence_adapter,
+        wiki_store=wiki_store,
+        persona=persona,
+    )
+
+    sources = pb_cfg.get("sources", [])
+    total = {"pages_new": 0, "pages_updated": 0, "pages_unchanged": 0}
+    for src in sources:
+        if src.get("kind") != "confluence":
+            continue
+        space = src.get("space", "")
+        labels = src.get("include_labels") or src.get("labels") or []
+        pages = src.get("pages") or []
+        if pages:
+            stats = ingestor.ingest_pages(pages)
+        else:
+            stats = ingestor.ingest_space(space, labels or None)
+        for k in ("pages_new", "pages_updated", "pages_unchanged"):
+            total[k] += stats.get(k, 0)
+        print(f"  space={space}: new={stats.get('pages_new',0)} "
+              f"updated={stats.get('pages_updated',0)} "
+              f"unchanged={stats.get('pages_unchanged',0)}")
+
+    print(f"Done. total new={total['pages_new']} updated={total['pages_updated']} "
+          f"unchanged={total['pages_unchanged']}")
     return 0
 
 
 def cmd_eval(args):
     print(f"▶ eval {args.config}")
     print("  [needs real ADB/OpenAI to run; laptop-mode eval against fixtures coming Phase 2]")
+    return 0
+
+
+def cmd_wiki_meta_backfill_persona(args):
+    """A4 (BUG-queue-990fe): Idempotent backfill of persona on null-persona
+    wiki_metadata records.
+
+    Rules (strict):
+    - ONLY overwrites records whose stored persona IS NULL / empty.
+    - NEVER overwrites a record that already has a non-null persona.
+    - When --page-id is given, targets exactly that record (or reports not found).
+    - Without --page-id, targets ALL null-persona records in the store root.
+    - Re-running is a no-op (idempotent).
+    - When persona cannot be determined for a record, reports it and skips
+      (never guesses).
+
+    Returns 0 on success, 1 on error.
+    """
+    import json as _json
+    import re as _re
+    from pathlib import Path as _Path
+
+    store_root_env = os.environ.get("KBF_STORE_ROOT")
+    if store_root_env:
+        store_root = _Path(store_root_env) / "wiki_metadata"
+    else:
+        store_root = _Path.home() / ".kbf" / "store" / "wiki_metadata"
+
+    persona = args.persona
+    page_id = getattr(args, "page_id", None)
+    dry_run = getattr(args, "dry_run", False)
+
+    if not persona:
+        print("ERROR: --persona is required for backfill-persona", file=sys.stderr)
+        return 1
+
+    if not store_root.exists():
+        print(f"ERROR: wiki_metadata store not found: {store_root}", file=sys.stderr)
+        return 1
+
+    # Collect candidate JSON files
+    if page_id:
+        safe_stem = _re.sub(r"[^\w.-]", "_", page_id) or "_unnamed"
+        candidates = [store_root / f"{safe_stem}.json"]
+        if not candidates[0].exists():
+            print(f"ERROR: wiki_metadata record for page_id={page_id} not found at {candidates[0]}", file=sys.stderr)
+            return 1
+    else:
+        candidates = sorted(store_root.glob("*.json"))
+
+    updated = 0
+    skipped_nonnull = 0
+    not_found = 0
+    noop = 0
+
+    for record_path in candidates:
+        try:
+            record = _json.loads(record_path.read_text())
+        except Exception as exc:
+            print(f"  WARN: could not read {record_path.name}: {exc}", file=sys.stderr)
+            continue
+
+        current_persona = record.get("persona")
+        rec_page_id = record.get("page_id", record_path.stem)
+
+        if current_persona:
+            # Non-null persona — do NOT overwrite
+            skipped_nonnull += 1
+            continue
+
+        # Null persona — eligible for backfill
+        if dry_run:
+            print(f"  [dry-run] would set persona={persona!r} on page_id={rec_page_id}")
+            updated += 1
+            continue
+
+        record["persona"] = persona
+        record_path.write_text(_json.dumps(record, indent=2, default=str))
+        print(f"  backfilled: page_id={rec_page_id} persona=null → {persona!r}")
+        updated += 1
+
+    action = "would update" if dry_run else "updated"
+    print(
+        f"\nBackfill complete: {action} {updated} record(s); "
+        f"skipped {skipped_nonnull} already-set record(s). "
+        f"(dry_run={dry_run})"
+    )
     return 0
 
 
@@ -1608,9 +1776,19 @@ def main():
 
     pv = sub.add_parser("validate"); pv.add_argument("config"); pv.set_defaults(fn=cmd_validate)
 
-    pi = sub.add_parser("ingest")
-    pi.add_argument("config"); pi.add_argument("--dry-run", action="store_true")
-    pi.add_argument("--sample", type=int, default=5); pi.set_defaults(fn=cmd_ingest)
+    pi = sub.add_parser("ingest", help="ingest Confluence pages from a persona-builder config")
+    pi.add_argument("config")
+    pi.add_argument("--dry-run", action="store_true")
+    pi.add_argument("--sample", type=int, default=5)
+    # A3 (BUG-queue-990fe): --persona forwards persona to ConfluenceWikiIngestor
+    # so wiki_metadata records never store null persona when persona is known.
+    pi.add_argument(
+        "--persona",
+        default=None,
+        help="owning persona (e.g. tpm). Overrides config YAML. Required if 'persona:' "
+             "is absent from the config. Never silently stores null.",
+    )
+    pi.set_defaults(fn=cmd_ingest)
 
     pe = sub.add_parser("eval"); pe.add_argument("config"); pe.set_defaults(fn=cmd_eval)
     pp = sub.add_parser("promote"); pp.add_argument("config")
@@ -1734,6 +1912,36 @@ def main():
     )
     p_recover.set_defaults(fn=cmd_session_recover)
     p_session.set_defaults(fn=lambda a: (session_sub.print_help() or 1))
+
+    # ── wiki-meta subcommand group (A4 BUG-queue-990fe) ──────────────────
+    p_wm = sub.add_parser(
+        "wiki-meta",
+        help="operator tools for wiki_metadata store (BUG-queue-990fe)",
+    )
+    wm_sub = p_wm.add_subparsers(dest="wiki_meta_cmd", required=True)
+
+    p_bp = wm_sub.add_parser(
+        "backfill-persona",
+        help="set persona on null-persona wiki_metadata records (idempotent, A4)",
+    )
+    p_bp.add_argument(
+        "--persona",
+        required=True,
+        help="persona to assign to null-persona records (e.g. tpm)",
+    )
+    p_bp.add_argument(
+        "--page-id",
+        default=None,
+        dest="page_id",
+        help="target a single page by page_id; omit to target all null-persona records",
+    )
+    p_bp.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print what would be changed without writing",
+    )
+    p_bp.set_defaults(fn=cmd_wiki_meta_backfill_persona)
+    p_wm.set_defaults(fn=lambda a: (wm_sub.print_help() or 1))
 
     args = p.parse_args()
     return args.fn(args)

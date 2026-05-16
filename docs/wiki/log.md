@@ -19,6 +19,32 @@ P2-Exec can now consume `app.state.confluence_adapter` (None check required; nev
 
 ---
 
+## [2026-05-16] backend-dev | BUG-queue-990fe Option-A — space-form page-ref guard (A1) + persona propagation on ingest (A2/A3) + backfill (A4)
+
+**BUG-queue-990fe Option-A complete.** HIGH-severity silent-wrong-output fixed across both root causes.
+
+**A1 (RC2 — executor regex space-form gap):**
+- `framework/workflow_runtime/executor.py` — added fifth pattern to `_CONFLUENCE_PAGE_REF_PATTERNS`: `re.compile(r"(?i)\bpage[\s_-]?id\b[\s:]+(\d{8,})")`. Length constraint `{8,}` prevents false-positives on short prose numbers. Guard now fires on `"for Confluence pageId 18625350641"` and `"pageId: 18625350641"` and hard-fails with `ConfluencePageNotInKBError`. Existing patterns untouched.
+- `framework/tests/unit/test_executor_source_guard.py` — 6 new tests: space-form fires guard, colon-form fires guard, 7-digit prose no false-positive, 8-digit standalone prose no false-positive, unit extraction test, unit no-false-positive test. All 19 prior tests still green.
+
+**A2 (RC1 — persona=null ingest gap):**
+- `framework/ingestion/confluence_wiki_ingest.py` — `ConfluenceWikiIngestor.__init__` gains `persona: str | None = None` param. `ingest_page` uses `effective_persona = _raw.get("persona") or self._persona` (raw wins; fallback prevents null-persona storage when persona is determinable).
+
+**A3 (callers updated — none missed):**
+- `framework/skill_builder/conversation.py` — `_run_ingest` passes `persona=self._data.persona or None`.
+- `framework/deploy/ingestion_worker.py` — moved ingestor construction inside the per-entry loop; each entry builds `ConfluenceWikiIngestor(adapter=..., persona=entry["persona"])`.
+- `framework/cli/kb_cli.py` — `cmd_ingest` fully implemented (was stub); `--persona` flag added (reads from config YAML if omitted, fails loudly if neither source yields a persona — never silently stores null). `ingest` subparser updated.
+
+**A4 (idempotent backfill):**
+- `framework/cli/kb_cli.py` — `cmd_wiki_meta_backfill_persona` added; `wiki-meta backfill-persona --persona <p> [--page-id N] [--dry-run]` subcommand registered. Never overwrites non-null persona. Idempotent.
+- Executed: `kb-cli wiki-meta backfill-persona --persona tpm --page-id 18625350641`. Before: `persona: null`. After: `persona: "tpm"`. Re-run: no-op (skipped 1 already-set record).
+
+**Tests:** `framework/tests/unit/test_confluence_wiki_ingest.py` — 10 new tests (3 persona-propagation + 3 backfill). `framework/tests/unit/test_executor_source_guard.py` — 6 new tests (space-form A1). All 266 tests in the specified suite pass; 8 pre-existing failures unchanged (smoke_validate ×7 + code_wiki ×1).
+
+**ADR-032 updated:** P3-guard section documents A1 gap closure + A2/A3 RC1 root cause + A4 backfill. Regex retirement timeline reiterated (P2-Exec / Phase 2).
+
+---
+
 ## [2026-05-16] backend-dev | ADR-032 P1-E — 4 TPM email skills promoted to ask_parameterized with typed page_id input + space allow-list
 
 **P1-E complete.**
