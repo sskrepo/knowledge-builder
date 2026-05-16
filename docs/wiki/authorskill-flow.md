@@ -2,8 +2,8 @@
 title: authorSkill conversation flow — state-by-state map (post-ADR-029 S6)
 owner: architect
 created: 2026-05-14
-updated: 2026-05-15
-related: [ADR-015, ADR-026, ADR-027, ADR-028, ADR-029, ADR-016, ADR-017]
+updated: 2026-05-16
+related: [ADR-015, ADR-016, ADR-017, ADR-026, ADR-027, ADR-028, ADR-029, ADR-032]
 supersedes: authorskill-flow-pre-adr-027.md
 ---
 
@@ -189,6 +189,19 @@ state and emits a conversational question (one per turn, prose not JSON).
 When all blocking questions are resolved, `_clarify_advance()` transitions to `next_state`
 (CONFIGURE_SOURCES from CAPTURE_INTENT path, or REVIEW_DESIGN from DESIGN_SKILL path).
 
+**ADR-032 P1-C: source-binding blocking question.** When `capture_intent` (v1.1 prompt)
+emits `source_binding_mode: "ask_parameterized"` or `"ambiguous"`, it automatically
+adds a blocking question to `blocking_ambiguities`: "Is the source page fixed at authoring
+time or supplied by the consumer at query time?" This question is annotated with
+`context: "source_binding_mode"` so the CLARIFY handler resolves it deterministically:
+- "A" / "fixed" / "same page" / "always" → `author_fixed`
+- "B" / "dynamic" / "consumer" / "query time" / "different page" → `ask_parameterized`
+- `skip` → defaults to `author_fixed` (safer; user acknowledged quality risk)
+
+The resolved mode is persisted on `_data.source_binding_mode`. CLARIFY blocks
+(does not auto-advance) until the user provides a substantive answer. The question
+is never added twice — the v1.1 prompt already emits it; we only annotate it.
+
 **LLM involvement.** None. CLARIFY is fully deterministic.
 
 **must_show_human.** Always `True` — MCP clients must display the question to the human
@@ -196,8 +209,10 @@ and wait for a typed response.
 
 **_SessionData changes.**
 - `clarification_log: list[dict]` — audit trail of resolved questions (serialized in to_dict)
-- `_clarify_questions: list[dict]` — in-flight question list with `{question, resolved, answer}`
+- `_clarify_questions: list[dict]` — in-flight question list with `{question, resolved, answer, context?, options?}`
 - `_clarify_next_state: str` — state to advance to when all questions resolved
+- `source_binding_mode: str` — "author_fixed" | "ask_parameterized" | "ambiguous" (ADR-032 P1-C)
+- `source_binding_signal: str` — one-line evidence text from the intent (ADR-032 P1-C)
 
 ---
 
@@ -459,10 +474,44 @@ workflow YAML, persona_builder_delta YAML, eval gold JSONL stubs). Then calls
 
 ## VALIDATE
 
-Unchanged from pre-ADR-027. See `authorskill-flow-pre-adr-027.md` for full detail.
-
-Graph traversal: `required_fields ⊆ provides_fields` (ADR-017 link check).
+**What runs.** `_run_validate` calls `validate_workflow_links` (ADR-017 link check) on the
+committed workflow YAML: `required_fields ⊆ provides_fields` (graph traversal, deterministic).
 No LLM.
+
+**ADR-032 P1-D: source_binding contract check.** After the link check, `_run_validate` calls
+`_validate_source_binding_contract(synthesized_yaml, session_binding_mode)` — a pure,
+module-level predicate. It hard-fails VALIDATE (appends to `result["errors"]`, sets
+`result["passed"] = False`) if any of the following are violated:
+
+For `session_binding_mode == "ask_parameterized"`:
+1. `source_binding` block must be present in the workflow YAML.
+2. `source_binding.mode` must equal `"ask_parameterized"`.
+3. `source_binding.input_param` must be non-empty AND must match a name declared in
+   `trigger.on_request.inputs` (referential integrity check — no dangling param references).
+4. `source_binding.ingest_on_demand` must be `True`.
+5. `source_binding.source_type` must be `"confluence_page"`.
+6. `source_binding.space_allow_list` must be a non-empty list.
+7. `source_binding.ephemeral_ttl_seconds` must be a positive integer.
+
+For `session_binding_mode == "author_fixed"`:
+8. If `source_binding` is present, its `mode` must NOT be `"ask_parameterized"`.
+
+**Adapter availability check (ask_parameterized + ingest_on_demand).** After the contract check
+passes for `ask_parameterized` sessions with `ingest_on_demand=True`,
+`_check_confluence_adapter_available(env, repo_root)` reads the base and env-specific config
+YAMLs and confirms the Confluence adapter's mode is set. If the adapter is not configured,
+VALIDATE fails with: "This skill requires live Confluence access at query time, but the
+Confluence adapter is not configured for environment '{env}'. Set adapter mode in
+framework/config/{env}.yaml." No HTTP calls are made — config-only check.
+
+**Hard-fail discipline.** VALIDATE never silently passes or downgrades a contract violation.
+Failure messages are actionable (include field name, expected value, actual value). Consistent
+with ADR-017 link check behavior.
+
+**LLM involvement.** None.
+
+**Output / next state.** `_data.validation_result` set. `yes` on success → INGEST; failure
+stays at VALIDATE with `must_show_human=True` error listing.
 
 ---
 
@@ -645,6 +694,18 @@ Terminal. Unchanged.
   Persisted in `to_dict()` / `from_dict()`. Backward-compat default None.
 - `_eval_pending_route: str = "REVIEW_DESIGN"` — transient (not persisted). Target state
   waiting for user confirmation in EVAL_ROUTE_PENDING. Set by `_classify_and_route`.
+
+**New fields (ADR-032 P1-C):**
+- `source_binding_mode: str = "author_fixed"` — resolved binding mode. Set from
+  `capture_intent` v1.1 JSON output (`source_binding_mode` key). If `ask_parameterized`
+  or `ambiguous`, CLARIFY fires before CONFIGURE_SOURCES and resolves to either
+  `"author_fixed"` or `"ask_parameterized"` (never `"ambiguous"` after CLARIFY resolves).
+  Persisted in `to_dict()` / `from_dict()`. Backward-compat default `"author_fixed"` —
+  pre-ADR-032 sessions (missing key) load as `author_fixed`, which is always safe.
+- `source_binding_signal: str = ""` — one-line evidence text from the intent that led to the
+  binding mode classification (< 80 chars). Set from `capture_intent` v1.1 JSON output
+  (`source_binding_signal` key). Logged at `INFO` level for traceability. Not user-visible.
+  Persisted in `to_dict()` / `from_dict()`. Backward-compat default `""`.
 
 **Removed fields:**
 - `llm_suggested_specs` — folded into `design["schema"]`

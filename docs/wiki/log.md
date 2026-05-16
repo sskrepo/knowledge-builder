@@ -4,6 +4,30 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] backend-dev | ADR-032 Phase-2a P1-C + P1-D — source_binding_mode consumed in CLARIFY; VALIDATE enforces source_binding contract
+
+**Phase-2a complete.** Two commits to origin/main (P1-C: 34269ee, P1-D: 7aec84a).
+
+**P1-C (`feat(conversation): ADR-032 P1-C`, commit 34269ee):**
+- `framework/skill_builder/conversation.py` — `_SessionData` gains two new fields:
+  - `source_binding_mode: str = "author_fixed"` — resolved binding mode (persisted in to_dict/from_dict; backward-compat default "author_fixed" for pre-ADR-032 sessions)
+  - `source_binding_signal: str = ""` — one-line evidence text from capture_intent (persisted; default "")
+- `_advance_to_capture_intent`: reads `source_binding_mode` + `source_binding_signal` from LLM JSON output; annotates the source-binding question in `blocking_ambiguities` with `context: "source_binding_mode"` (fragment match: "source page fixed at authoring time or supplied"); never double-adds the question (v1.1 prompt already emits it).
+- `_handle_clarify_response`: when question has `context == "source_binding_mode"`, resolves deterministically: "A"/fixed/same page/always → `author_fixed`; "B"/parameterized/dynamic/consumer/query time → `ask_parameterized`; skip → `author_fixed` (safer default); ambiguous phrasing → `ask_parameterized`. Resolution persisted on `_data.source_binding_mode`.
+- CLARIFY blocks (does not auto-advance) until a substantive answer is given — source-binding question is a BLOCKING ambiguity.
+
+**P1-D (`feat(conversation): ADR-032 P1-D`, commit 7aec84a):**
+- `framework/skill_builder/conversation.py` — two module-level pure functions added:
+  - `_check_confluence_adapter_available(env, repo_root) -> bool` — config-only check (no HTTP); merges base + env YAML, returns bool(mode).
+  - `_validate_source_binding_contract(synthesized_yaml, session_binding_mode) -> list[str]` — for ask_parameterized: validates mode/input_param(referential)/ingest_on_demand/source_type/space_allow_list/ephemeral_ttl_seconds; for author_fixed: validates no ask_parameterized source_binding present.
+- `_run_validate`: calls both functions after link check. Any errors appended to `result["errors"]`; `result["passed"] = False`. Hard-fail, never silent downgrade.
+
+**Tests:** `framework/tests/unit/test_adr032_p1cd.py` — NEW: 47 tests. Full suite: 277 passed, 8 pre-existing failures (smoke_validate ×7 + code_wiki ×1) — 0 new regressions.
+
+**Wiki:** `docs/wiki/authorskill-flow.md` — CLARIFY section updated (source-binding blocking question behavior, resolution rules, new _SessionData fields); VALIDATE section updated (source_binding contract check, adapter availability check, hard-fail discipline).
+
+---
+
 ## [2026-05-16] backend-dev | ADR-032 P2-Exec — ask_parameterized ephemeral fetch path + WorkflowExecutor wiring
 
 **P2-Exec complete.**
