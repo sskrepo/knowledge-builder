@@ -3966,8 +3966,12 @@ Rules:
         workflow_gold_rows.append(wf_gold_row)
 
         # Step 7: write gold sets to filesystem + ADB
-        extraction_gold_path = f"eval/gold_sets/{persona}-{skill_name}-extraction.jsonl"
-        workflow_gold_path = f"eval/gold_sets/{persona}-{skill_name}-workflow.jsonl"
+        # Guard: persona/skill_name must be non-None strings for safe path construction.
+        # _data defaults to "" so this is defensive against out-of-band None assignment.
+        _safe_persona = persona or "unknown"
+        _safe_skill = skill_name or "unknown"
+        extraction_gold_path = f"eval/gold_sets/{_safe_persona}-{_safe_skill}-extraction.jsonl"
+        workflow_gold_path = f"eval/gold_sets/{_safe_persona}-{_safe_skill}-workflow.jsonl"
 
         try:
             ext_path = REPO_ROOT / extraction_gold_path
@@ -3976,6 +3980,10 @@ Rules:
                 "\n".join(json.dumps(row) for row in extraction_gold_rows) + "\n"
             )
             wf_path = REPO_ROOT / workflow_gold_path
+            # mkdir must be called on wf_path.parent too — ext_path.parent.mkdir() only
+            # covers the first path; in mocked / unusual environments the two path
+            # objects may differ even if the parent dir is the same on a real filesystem.
+            wf_path.parent.mkdir(parents=True, exist_ok=True)
             wf_path.write_text(
                 "\n".join(json.dumps(row) for row in workflow_gold_rows) + "\n"
             )

@@ -857,3 +857,110 @@ class TestPromoteKbResolvabilityGate:
         assert turn.state == "DONE"
         assert turn.done is True
         conv._skill_store.promote.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Task 2 regression — _run_eval gold-set write with None-valued fields
+# ---------------------------------------------------------------------------
+
+
+class TestRunEvalGoldSetWrite:
+    """Regression: _run_eval gold-set filesystem write must not raise when
+    workflow metrics (wf_tier, ask_latency_ms, wf_artifact_url) are None
+    — the normal case when /api/v1/ask is unreachable.
+
+    Root cause (BUG-queue-e685d-adjacent): _run_eval constructed the gold-set
+    path using persona/skill_name that could be None (out-of-band assignment),
+    and the workflow-path write was missing wf_path.parent.mkdir(), causing
+    mock-incompatible and production-defensive issues.
+
+    Fix: guard with `_safe_persona = persona or "unknown"` and call
+    `wf_path.parent.mkdir()` before `wf_path.write_text()`.
+    """
+
+    def _make_eval_ready_conv(self, persona: str = "tpm", skill_name: str = "weekly_report"):
+        """Build a session ready to call _run_eval with pre-cached samples."""
+        llm = MagicMock()
+        # Extraction returns empty → recall=0 (no fields hit)
+        llm.chat.return_value = {"text": "{}", "tokens_in": 5, "tokens_out": 50}
+
+        conv = SkillBuilderConversation(persona=persona, llm=llm, skill_store=MagicMock())
+        conv._data.persona = persona
+        conv._data.skill_name = skill_name
+        conv._data.synth_id = "synth-goldset-test"
+        conv._data.fields = ["rag_status", "blockers"]
+        conv._data.field_specs = {
+            "rag_status": {"type": "string", "description": "RAG status"},
+            "blockers": {"type": "array", "description": "Blockers"},
+        }
+        conv._data.normalised_intent = {"scope_domains": ["test"]}
+        conv._data.ingest_result = {"status": "completed", "items_processed": 1}
+        conv._data.source_samples = {
+            "confluence:1": [
+                {"content": "Status: Green. No blockers.", "source_citation": "page-1"}
+            ]
+        }
+        conv._skill_store.read_artifact.return_value = None
+        return conv
+
+    def test_gold_set_write_does_not_raise_when_wf_fields_are_none(self):
+        """When /api/v1/ask fails, wf_tier/wf_artifact_url/ask_latency_ms are all None.
+        The gold-set write must NOT raise — either writes a sanitised row or skips
+        with a logged WARNING. In either case _run_eval returns a valid EVAL turn."""
+        conv = self._make_eval_ready_conv()
+
+        # Use Path.write_text patch (not MagicMock __truediv__) — avoids the
+        # mock-internal _mock_name=None bug that caused the original TypeError.
+        with patch.object(Path, "mkdir", return_value=None):
+            with patch.object(Path, "write_text", return_value=None) as mock_wt:
+                with patch("urllib.request.urlopen", side_effect=Exception("no server")):
+                    turn = conv._run_eval()
+
+        # _run_eval must return a valid EVAL turn (not raise)
+        assert turn is not None
+        assert turn.state == "EVAL"
+        # write_text was called (gold sets were attempted)
+        assert mock_wt.call_count >= 1, (
+            "write_text must have been called for the gold-set paths"
+        )
+        # The workflow gold row must contain None-valued fields serialised safely
+        eval_result = conv._data.eval_result
+        assert eval_result is not None
+        wf_score = eval_result.get("workflow_score", {})
+        # These are None when /api/v1/ask fails — must be stored, not raised
+        assert wf_score.get("tier_used") is None
+        assert wf_score.get("artifact_url") is None
+
+    def test_gold_set_write_safe_persona_guard_prevents_none_path(self, tmp_path):
+        """When persona/skill_name are non-empty, paths must be correctly formed.
+        Regression: path was constructed before the `or 'unknown'` guard was added,
+        so a None persona would produce a misleading path. Now guarded."""
+        conv = self._make_eval_ready_conv(persona="tpm", skill_name="weekly_report")
+
+        with patch("framework.skill_builder.conversation.REPO_ROOT", tmp_path):
+            with patch("urllib.request.urlopen", side_effect=Exception("no server")):
+                turn = conv._run_eval()
+
+        # Extraction gold set file must have been written
+        ext_path = tmp_path / "eval" / "gold_sets" / "tpm-weekly_report-extraction.jsonl"
+        wf_path = tmp_path / "eval" / "gold_sets" / "tpm-weekly_report-workflow.jsonl"
+
+        assert ext_path.exists(), f"Extraction gold set not written at {ext_path}"
+        assert wf_path.exists(), f"Workflow gold set not written at {wf_path}"
+
+        # Each file must be valid JSONL with at least one row
+        ext_rows = [json.loads(line) for line in ext_path.read_text().splitlines() if line.strip()]
+        wf_rows = [json.loads(line) for line in wf_path.read_text().splitlines() if line.strip()]
+
+        assert ext_rows, "Extraction gold set must contain at least one row"
+        assert wf_rows, "Workflow gold set must contain at least one row"
+
+        # Extraction rows must carry kind=auto_generated
+        assert ext_rows[0].get("kind") == "auto_generated"
+        # Workflow rows must also carry kind=auto_generated and the None fields safely
+        assert wf_rows[0].get("kind") == "auto_generated"
+        # None-valued fields must serialize to JSON null, not raise
+        assert "actual_tier_used" in wf_rows[0]  # present (JSON null for None is valid)
+        assert "ask_latency_ms" in wf_rows[0]
+
+        assert turn.state == "EVAL"

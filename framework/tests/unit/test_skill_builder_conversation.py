@@ -200,16 +200,60 @@ class TestConstructorWiring:
 
 class TestHandlePromoteResponse:
     def test_promote_yes_calls_skill_store_promote(self):
+        """ADR-029 Folded Fix 2 contract: PROMOTE succeeds when delta present + ShimKb 0-card
+        (test-env path). read_artifact must return a delta; ShimKb returning [] cards causes
+        the warning-and-proceed branch, not a hard-fail. Assert promote() + upsert called."""
+        delta_yaml = "name: weekly_report\nkind: vector\n"
         mock_store = MagicMock()
-        mock_store.read_artifact.return_value = None  # no delta
+        mock_store.read_artifact.return_value = delta_yaml  # delta present — required
+        conv = SkillBuilderConversation(persona="tpm", skill_store=mock_store)
+        conv._data.persona = "tpm"
+        conv._data.skill_name = "weekly_report"
+        conv._data.synth_id = "synth-x"
+        conv._data.ingest_result = {"status": "completed", "items_processed": 0}
+
+        # ShimKb in test env returns 0 cards — warning path, not hard-fail.
+        mock_shim_instance = MagicMock()
+        mock_shim_instance.all_cards.return_value = []   # empty store / test env
+        mock_shim_instance.find_kb.return_value = None
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "framework.orchestrator.shim_kb": MagicMock(
+                    ShimKb=lambda *a, **kw: mock_shim_instance
+                )
+            },
+        ):
+            turn = conv._handle_promote_response("yes, promote")
+
+        # promote() must have been called
+        mock_store.promote.assert_called_once_with("tpm", "weekly_report")
+        # upsert_persona_builder_kb must have been called with the delta
+        mock_store.upsert_persona_builder_kb.assert_called_once()
+        # Session advances to DONE (0-card ShimKb = test env warning path)
+        assert turn.done is True
+        assert turn.state == "DONE"
+
+    def test_promote_yes_hard_fails_when_delta_absent(self):
+        """ADR-029 Folded Fix 2: PROMOTE must hard-fail when persona_builder_delta is missing.
+        Without the delta, shim_kb cannot register the skill — all-placeholder output results
+        (BUG-queue-e685d). Session stays at PROMOTE with must_show_human=True."""
+        mock_store = MagicMock()
+        mock_store.read_artifact.return_value = None  # no delta — hard-fail path
         conv = SkillBuilderConversation(persona="tpm", skill_store=mock_store)
         conv._data.persona = "tpm"
         conv._data.skill_name = "weekly_report"
         conv._data.synth_id = "synth-x"
 
         turn = conv._handle_promote_response("yes, promote")
-        mock_store.promote.assert_called_once_with("tpm", "weekly_report")
-        assert turn.done is True
+
+        # Must NOT advance to DONE — stays at PROMOTE so user can fix root cause
+        assert turn.state == "PROMOTE"
+        assert turn.done is not True
+        assert turn.must_show_human is True
+        # Error message must name the missing delta so the user knows what to fix
+        assert "persona_builder_delta" in turn.message or "KB" in turn.message
 
     def test_promote_no_skips_skill_store(self):
         mock_store = MagicMock()
@@ -244,28 +288,58 @@ class TestHandlePromoteResponse:
     # is no longer valid (see TestSkillStoreRequired above).
 
     def test_promote_calls_upsert_persona_builder_kb_when_delta_exists(self, tmp_path):
-        """Option B: PROMOTE must write the delta to KBF_PERSONA_BUILDERS."""
+        """ADR-029 Folded Fix 2: PROMOTE must write the delta to KBF_PERSONA_BUILDERS via
+        upsert_persona_builder_kb, then verify KB resolvability via a fresh ShimKb load.
+        When ShimKb returns 0 cards (empty store / test env), it warns and proceeds to DONE.
+
+        Contract invariants asserted:
+          (a) read_artifact called for 'persona_builder_delta'
+          (b) upsert_persona_builder_kb called with correct args
+          (c) ShimKb instantiated and all_cards() + find_kb() invoked for resolvability check
+          (d) session advances to DONE (0-card warning path = test env)
+        """
         delta_yaml = "name: weekly_report\nkind: vector\n"
         mock_store = MagicMock()
         mock_store.read_artifact.return_value = delta_yaml
-
         conv = SkillBuilderConversation(persona="tpm", skill_store=mock_store)
         conv._data.persona = "tpm"
         conv._data.skill_name = "weekly_report"
         conv._data.synth_id = "synth-x"
+        conv._data.ingest_result = {"status": "completed", "items_processed": 0}
 
-        turn = conv._handle_promote_response("yes, promote")
+        # ShimKb in test env: 0 cards from store — warning path, not hard-fail.
+        mock_shim_instance = MagicMock()
+        mock_shim_instance.all_cards.return_value = []   # empty store / test env
+        mock_shim_instance.find_kb.return_value = None
 
-        assert turn.done is True
+        with patch.dict(
+            "sys.modules",
+            {
+                "framework.orchestrator.shim_kb": MagicMock(
+                    ShimKb=lambda *a, **kw: mock_shim_instance
+                )
+            },
+        ):
+            turn = conv._handle_promote_response("yes, promote")
+
+        # (a) delta must have been read by name
         mock_store.read_artifact.assert_called_once_with(
             "tpm", "weekly_report", "persona_builder_delta"
         )
+        # (b) upsert must have been called with the correct args
         mock_store.upsert_persona_builder_kb.assert_called_once_with(
             persona="tpm",
             kb_name="weekly_report",
             content_yaml=delta_yaml,
             status="production",
         )
+        # (c) ShimKb resolvability check must have been invoked
+        mock_shim_instance.all_cards.assert_called_once()
+        # find_kb MUST be called for the resolvability check
+        mock_shim_instance.find_kb.assert_called_once_with("tpm.weekly_report")
+        # (d) Session advances — 0-card ShimKb is the test-env warning path
+        assert turn.done is True
+        assert turn.state == "DONE"
 
     def test_promote_skips_upsert_when_no_delta(self, tmp_path):
         """PROMOTE with no persona_builder_delta must not call upsert."""
@@ -2364,10 +2438,19 @@ class TestEvalOptionA:
         row = json.loads(first_line)
         assert row.get("kind") == "auto_generated"
 
-    def test_eval_gates_on_recall_and_faithfulness(self):
-        """If metrics fail thresholds, options include 'force promote' not 'yes, promote'."""
+    def test_eval_user_accept_is_terminal_gate(self):
+        """ADR-029 Phase 1: EVAL no longer gates PROMOTE on recall/faithfulness thresholds.
+        The terminal gate is EXPLICIT USER ACCEPTANCE ('accept'). Even when recall=0 and
+        faithfulness=0 (metrics fail), EVAL must:
+          - surface options ['accept', 'ship as draft', 'review design', 'configure sources',
+            'stop here'] — 'accept' is always present regardless of numeric scores
+          - set must_show_human=True and awaiting_user=True (human MUST read the gap report)
+          - report metrics as diagnostic-only: exit_criteria carries '_note' field + passed=False
+            is recorded but does NOT block the 'accept' option
+        Recall and faithfulness are computed for audit trail, NOT as a gate.
+        """
         responses = [
-            json.dumps({}),  # extraction returns nothing → recall=0
+            json.dumps({}),  # extraction returns nothing → recall=0, faithfulness=0
             json.dumps({"faithful": False, "confidence": "low", "reason": "nope"}),
         ]
         call_idx = [0]
@@ -2382,18 +2465,37 @@ class TestEvalOptionA:
 
         conv = self._make_conv_post_ingest(llm)
 
-        with patch("framework.skill_builder.conversation.REPO_ROOT", MagicMock(
-            __truediv__=lambda self, key: MagicMock(
-                parent=MagicMock(mkdir=MagicMock()),
-                write_text=MagicMock(),
-            )
-        )):
-            with patch("urllib.request.urlopen", side_effect=Exception("no server")):
-                turn = conv._run_eval()
+        with patch.object(Path, "mkdir", return_value=None):
+            with patch.object(Path, "write_text", return_value=None):
+                with patch("urllib.request.urlopen", side_effect=Exception("no server")):
+                    turn = conv._run_eval()
 
-        # recall@k = 0 → below threshold → force promote offered
-        assert "force promote" in (turn.options or [])
-        assert conv._data.eval_result["exit_criteria"]["passed"] is False
+        # ADR-029 gate: 'accept' MUST be offered even when metrics fail thresholds.
+        assert "accept" in (turn.options or []), (
+            "ADR-029 S5: 'accept' must be in EVAL options regardless of recall/faithfulness. "
+            f"Got options: {turn.options!r}"
+        )
+        # 'force promote' is NOT the primary option anymore — 'accept' replaces it.
+        # The full option set is the canonical ADR-029 S5 set:
+        expected_options = ["accept", "ship as draft", "review design", "configure sources", "stop here"]
+        assert turn.options == expected_options, (
+            f"ADR-029 S5 EVAL options mismatch.\nExpected: {expected_options}\nGot: {turn.options!r}"
+        )
+        # must_show_human=True: human MUST read the gap report before responding
+        assert turn.must_show_human is True, "EVAL turn must have must_show_human=True (ADR-029 S5)"
+        # awaiting_user=True: the turn is waiting for explicit human response
+        assert turn.awaiting_user is True, "EVAL turn must have awaiting_user=True (ADR-029 S5)"
+        # exit_criteria.passed is recorded (diagnostic) but carries the ADR-029 note
+        ec = conv._data.eval_result["exit_criteria"]
+        assert ec["passed"] is False, "Diagnostic passed=False must still be recorded when metrics fail"
+        assert "diagnostic" in ec.get("_note", "").lower(), (
+            "exit_criteria must carry '_note' naming it as diagnostic-only (ADR-029 S5). "
+            f"Got: {ec.get('_note')!r}"
+        )
+        # Metrics are still computed and stored (for audit trail), just not the gate
+        metrics = conv._data.eval_result.get("metrics", {})
+        assert "recall_at_k" in metrics, "recall_at_k must still be computed and stored"
+        assert "faithfulness" in metrics, "faithfulness must still be computed and stored"
 
     def test_eval_no_llm_raises(self):
         conv = SkillBuilderConversation(persona="tpm", llm=None, skill_store=MagicMock())
