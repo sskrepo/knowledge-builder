@@ -1,0 +1,64 @@
+{
+  "fixture_id": "design_skill_v1_1_author_fixed",
+  "prompt_id": "design_skill",
+  "description": "ADR-032 P1-B fixture — design_skill v1.1: capability inventory with specific fixed page IDs from INSPECT_SOURCES. Output must have source_binding_mode=author_fixed and page IDs present in source_bindings.",
+  "persona": "tpm",
+  "vars": {
+    "normalised_intent": {
+      "output_kind": "email",
+      "audience": "team",
+      "cadence": "weekly",
+      "scope_domains": ["FA DB Upgrade", "26ai"],
+      "success_criteria": ["accurate status summary", "real data from source page"],
+      "source_binding_mode": "author_fixed",
+      "source_binding_signal": ""
+    },
+    "source_capability": [
+      {
+        "source_id": "confluence:20030556732",
+        "available_fields": [
+          {
+            "field": "project_name",
+            "type": "string",
+            "confidence": "high",
+            "evidence": "Project Name: FA DB Upgrade from 19c to 26ai (Section 1 metadata table)"
+          },
+          {
+            "field": "overall_status",
+            "type": "string",
+            "confidence": "high",
+            "evidence": "Overall Status: PLANNED (Section 1 metadata table)"
+          },
+          {
+            "field": "key_milestones",
+            "type": "array",
+            "confidence": "synthesisable",
+            "evidence": "WBS rows 1.0-6.x with Status and Due Date columns. Milestone M1-M5 table."
+          },
+          {
+            "field": "risks",
+            "type": "array",
+            "confidence": "synthesisable",
+            "evidence": "WBS rows 5.0/5.01 external dependency risk notes."
+          },
+          {
+            "field": "next_steps",
+            "type": "array",
+            "confidence": "synthesisable",
+            "evidence": "Open IN PROGRESS WBS rows indicate pending work."
+          }
+        ],
+        "missing_fields": [
+          {
+            "field": "real_time_jira_metrics",
+            "reason": "No Jira API integration in this source; only static Jira links present"
+          }
+        ],
+        "suggested_fields": [],
+        "summary": "Fixed source page: FA DB Upgrade from 19c to 26ai project plan (pageId 20030556732). Contains project metadata, WBS, milestone table."
+      }
+    ],
+    "artifact_layout": null,
+    "existing_kb_cards": []
+  }
+}

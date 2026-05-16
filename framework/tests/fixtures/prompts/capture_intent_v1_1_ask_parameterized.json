@@ -1,0 +1,9 @@
+{
+  "fixture_id": "capture_intent_v1_1_ask_parameterized",
+  "prompt_id": "capture_intent",
+  "description": "ADR-032 P1-A fixture — capture_intent v1.1: intent that implies consumer-supplied source page (ask_parameterized). Phrase 'accept a Confluence page' must drive source_binding_mode=ask_parameterized and a blocking_ambiguity about source binding.",
+  "persona": "tpm",
+  "vars": {
+    "intent": "I need a skill that accepts a Confluence page and drafts a stakeholder status email based on the project tracking content on that page. The consumer will pass whichever project page they want to use."
+  }
+}

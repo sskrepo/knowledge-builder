@@ -1,0 +1,9 @@
+{
+  "fixture_id": "capture_intent_v1_1_author_fixed",
+  "prompt_id": "capture_intent",
+  "description": "ADR-032 P1-A fixture — capture_intent v1.1: intent that specifies a fixed source page ID (author_fixed). Explicit pageId 20030556732 must drive source_binding_mode=author_fixed and no source-binding blocking_ambiguity.",
+  "persona": "tpm",
+  "vars": {
+    "intent": "I need a weekly exec PPTX for the 26ai FA DB Upgrade project. Read project page 20030556732 and draft a weekly email covering status, milestones, ORM, risks, and next steps."
+  }
+}

@@ -22,7 +22,7 @@ prompts:
   # ---------------------------------------------------------------------------
   capture_intent:
     id: capture_intent
-    version: "1.0"
+    version: "1.1"
     model: synthesis
     max_tokens: 2048
     response_format: json_object
@@ -52,7 +52,9 @@ prompts:
         ],
         "nice_to_know_ambiguities": [
           "questions that can be assumed; proceed and flag for user awareness"
-        ]
+        ],
+        "source_binding_mode": "author_fixed | ask_parameterized | ambiguous",
+        "source_binding_signal": "one-line evidence from the intent text (< 80 chars, or empty string)"
       }}
 
       Rules:
@@ -64,6 +66,18 @@ prompts:
         — FAAAS or 26AI-LEGACY?" is blocking. "which day of the week?" is nice_to_know.
       - "nice_to_know_ambiguities": advisory items; proceed with stated assumption, flag for user.
       - Keep all string values concise (< 80 chars each)
+      - "source_binding_mode": emit "ask_parameterized" if the intent implies the consumer
+        will supply the source page at query time — look for phrases like "for a given page",
+        "based on the page the user provides", "accept a Confluence URL", "for any project
+        tracking page", "whichever page the user passes". Emit "author_fixed" if specific
+        page IDs or URLs are identified in the intent (user is specifying which pages are
+        always used). Emit "ambiguous" if unclear.
+      - "source_binding_signal": a verbatim quote or paraphrase (< 80 chars) from the
+        intent that drove the source_binding_mode classification. Empty string if
+        mode is "author_fixed" and there is no relevant signal.
+      - If "source_binding_mode" is "ask_parameterized" or "ambiguous", add an entry to
+        "blocking_ambiguities": "Is the source page fixed at authoring time or supplied by
+        the consumer at query time?" This triggers CLARIFY before CONFIGURE_SOURCES.
 
   # ---------------------------------------------------------------------------
   # configure_sources
@@ -176,7 +190,7 @@ prompts:
   # ---------------------------------------------------------------------------
   design_skill:
     id: design_skill
-    version: "1.0"
+    version: "1.1"
     model: synthesis
     max_tokens: 8192
     response_format: json_object
@@ -236,7 +250,8 @@ prompts:
         ],
         "open_questions": [
           "cosmetic questions that can be noted without blocking — show at REVIEW_DESIGN"
-        ]
+        ],
+        "source_binding_mode": "author_fixed | ask_parameterized"
       }}
 
       Rules:
@@ -260,6 +275,11 @@ prompts:
       - "open_questions": advisory items — show at REVIEW_DESIGN but do not block.
       - Persona key fields above are strong hints — always attempt to include them if the
         source capability inventory can support them.
+      - "source_binding_mode": emit "ask_parameterized" if the source capability inventory
+        was collected via dynamic source discovery (user will supply page at query time) or
+        if the normalised intent implies dynamic source supply. Emit "author_fixed" if specific
+        page IDs from INSPECT_SOURCES are already in the source_bindings. When "ask_parameterized",
+        do NOT include page IDs in source_bindings — the source is dynamic, not fixed.
 
   # ---------------------------------------------------------------------------
   # review_design_replan

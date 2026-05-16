@@ -1,0 +1,59 @@
+{
+  "fixture_id": "design_skill_v1_1_ask_parameterized",
+  "prompt_id": "design_skill",
+  "description": "ADR-032 P1-B fixture — design_skill v1.1: capability inventory for dynamic source discovery (consumer will supply page at query time). Output must have source_binding_mode=ask_parameterized and no page IDs in source_bindings.",
+  "persona": "tpm",
+  "vars": {
+    "normalised_intent": {
+      "output_kind": "email",
+      "audience": "team",
+      "cadence": "on_request",
+      "scope_domains": ["project tracking"],
+      "success_criteria": ["accurate status summary", "actionable next steps"],
+      "source_binding_mode": "ask_parameterized",
+      "source_binding_signal": "accept a Confluence page"
+    },
+    "source_capability": [
+      {
+        "source_id": "confluence:dynamic",
+        "available_fields": [
+          {
+            "field": "project_name",
+            "type": "string",
+            "confidence": "high",
+            "evidence": "Title of the page"
+          },
+          {
+            "field": "overall_status",
+            "type": "string",
+            "confidence": "high",
+            "evidence": "Status metadata table"
+          },
+          {
+            "field": "key_milestones",
+            "type": "array",
+            "confidence": "synthesisable",
+            "evidence": "WBS milestone rows in project tracking pages"
+          },
+          {
+            "field": "risks",
+            "type": "array",
+            "confidence": "synthesisable",
+            "evidence": "WBS rows with blocked/at-risk status notes"
+          },
+          {
+            "field": "next_steps",
+            "type": "array",
+            "confidence": "synthesisable",
+            "evidence": "Open IN PROGRESS WBS rows"
+          }
+        ],
+        "missing_fields": [],
+        "suggested_fields": [],
+        "summary": "Dynamic source — consumer supplies the specific Confluence project tracking page at query time. Capability inventory represents typical project tracking page structure."
+      }
+    ],
+    "artifact_layout": null,
+    "existing_kb_cards": []
+  }
+}

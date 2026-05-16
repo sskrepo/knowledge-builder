@@ -4,6 +4,20 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] backend-dev | ADR-032 P1-A + P1-B — capture_intent/design_skill prompts bumped to v1.1; 4 fixtures added
+
+**P1-A + P1-B (parallel-safe YAML-only tasks) complete.**
+
+- `framework/config/prompts/skill_builder.yaml` — `capture_intent` v1.0 → v1.1: added `source_binding_mode` (author_fixed|ask_parameterized|ambiguous) and `source_binding_signal` to output schema; added two Rules (mode classification from intent phrases; blocking_ambiguities injection when mode is ask_parameterized or ambiguous).
+- `framework/config/prompts/skill_builder.yaml` — `design_skill` v1.0 → v1.1: added `source_binding_mode` (author_fixed|ask_parameterized) to output schema; added Rule (emit ask_parameterized when capability inventory implies dynamic source supply; do NOT include page IDs in source_bindings when ask_parameterized). max_tokens 8192 unchanged.
+- `framework/tests/fixtures/prompts/capture_intent_v1_1_ask_parameterized.json` — P1-A fixture: "accept a Confluence page" intent → expected ask_parameterized signal.
+- `framework/tests/fixtures/prompts/capture_intent_v1_1_author_fixed.json` — P1-A fixture: explicit pageId 20030556732 intent → expected author_fixed.
+- `framework/tests/fixtures/prompts/design_skill_v1_1_ask_parameterized.json` — P1-B fixture: dynamic source inventory → expected ask_parameterized, no page IDs.
+- `framework/tests/fixtures/prompts/design_skill_v1_1_author_fixed.json` — P1-B fixture: fixed page ID inventory → expected author_fixed, page IDs in source_bindings.
+- PromptRegistry loads cleanly; failure_classifier checksum unchanged: sha256:aef837cdde856fe83039f19fff816a101fe886187a7ce6f741a39eaab71c1d1f.
+- 88 tests pass (test_prompt_registry + test_failure_classifier_gate + test_prompt_lab), 0 failures.
+- Downstream P1-C/P1-D can now read source_binding_mode and source_binding_signal from capture_intent output; design_skill emits source_binding_mode for skill YAML synthesis.
+
 ## [2026-05-16] architect | ADR-032 DECISION-012 locked — Option C accepted; ADR-032 Accepted; impl blueprint authored
 
 **DECISION-012 resolved: Option C (ephemeral request-scoped ingestion). ADR-032 status Proposed → Accepted. Implementation blueprint filed.**
