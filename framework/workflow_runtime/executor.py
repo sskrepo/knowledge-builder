@@ -123,6 +123,26 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 _TELEMETRY_DIR = Path.home() / ".kbf" / "telemetry"
 
 
+def _any_promoted_skill_requires_ephemeral(workflow_skills_dir) -> bool:
+    """Return True if any skill YAML under workflow_skills_dir has
+    source_binding.mode == ask_parameterized and source_binding.ingest_on_demand == true.
+
+    Used by mcp_server lifespan to decide whether to initialize the Confluence
+    adapter at startup.  Graceful: any unreadable/unparseable YAML is skipped.
+
+    ADR-032 P2-Infra.
+    """
+    for skill_path in Path(workflow_skills_dir).rglob("*.yaml"):
+        try:
+            cfg = yaml.safe_load(skill_path.read_text()) or {}
+            sb = cfg.get("source_binding") or {}
+            if sb.get("mode") == "ask_parameterized" and sb.get("ingest_on_demand", False):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 class WorkflowExecutor:
     def __init__(self, store=None, llm=None, retrievers=None, shim_kb=None):
         """retrievers: dict of {name -> retriever_callable} (e.g. search_wiki,

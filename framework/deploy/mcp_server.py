@@ -258,6 +258,51 @@ def _load_app():
         log.info("registering workflow skills as MCP tools…")
         workflow_registry = register_workflow_skills_as_mcp_tools(WORKFLOW_SKILLS_DIR)
         state["workflow_registry"] = workflow_registry
+
+        # ADR-032 P2-Infra: Optional Confluence adapter for ask_parameterized
+        # skill ephemeral fetch.  Graceful optional dependency: if the adapter
+        # cannot be built (no creds / unreachable), the server still starts and
+        # ask_parameterized skills hard-fail with an actionable message at
+        # consumption time (never silent).
+        #
+        # The adapter is only initialized when at least one promoted skill has
+        # source_binding.ingest_on_demand: true — avoids unnecessary credential
+        # lookup when no skill uses the ephemeral path.
+        from ..adapters.confluence.factory import build_confluence_adapter as _build_confluence_adapter_factory
+        from ..workflow_runtime.executor import _any_promoted_skill_requires_ephemeral
+
+        confluence_adapter = None
+        if _any_promoted_skill_requires_ephemeral(WORKFLOW_SKILLS_DIR):
+            try:
+                confluence_adapter = _build_confluence_adapter_factory(kbf_env, REPO_ROOT)
+            except Exception as _ca_exc:
+                log.warning(
+                    "ADR-032: Confluence adapter init raised unexpectedly (%s: %s) — "
+                    "ask_parameterized skills will hard-fail at consumption time.",
+                    type(_ca_exc).__name__, _ca_exc,
+                )
+                confluence_adapter = None
+
+            if confluence_adapter is None:
+                log.warning(
+                    "ADR-032: ask_parameterized skills with ingest_on_demand:true are "
+                    "present but no Confluence adapter is configured for env=%r — "
+                    "those skills will hard-fail at consumption time with an actionable "
+                    "message (never silent). Configure framework/config/adapters/"
+                    "confluence.yaml to enable ephemeral fetch.",
+                    kbf_env,
+                )
+            else:
+                _mode = getattr(confluence_adapter, "mode", None) or type(confluence_adapter).__name__
+                log.info(
+                    "ADR-032: Confluence adapter initialized for ephemeral fetch (env=%s mode=%s).",
+                    kbf_env, _mode,
+                )
+
+        # Store on app.state so the consumption path (P2-Exec) can access it
+        # via request.app.state.confluence_adapter.  None = not available.
+        app.state.confluence_adapter = confluence_adapter
+
         # Wire retrievers + shim_kb into the executor so it can fetch actual
         # ingested content (search_wiki for wiki KBs, vector_search for
         # vector KBs, etc.) instead of falling back to fixture data.

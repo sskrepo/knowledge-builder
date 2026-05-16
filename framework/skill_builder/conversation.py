@@ -46,78 +46,12 @@ from .review import _parse_llm_json_response  # noqa: E402
 from .prompt_registry import get_registry  # noqa: E402
 
 
-def _build_confluence_adapter(kbf_env: str, repo_root: "Path"):
-    """Build the Confluence adapter from config.
-
-    Merges base framework/config/adapters/confluence.yaml with env-specific
-    adapters_overrides.confluence from {kbf_env}.yaml (e.g. laptop.yaml sets
-    mode: codex_proxy for eMCP via Codex CLI).  Returns None only when no
-    Confluence config exists at all (falls back to fixture HTML).
-    """
-    try:
-        import yaml as _yaml
-
-        # Load base adapter config
-        base_path = repo_root / "framework" / "config" / "adapters" / "confluence.yaml"
-        base_cfg: dict = {}
-        if base_path.exists():
-            base_cfg = _yaml.safe_load(base_path.read_text()) or {}
-
-        # Load env-specific overrides (laptop.yaml, staging.yaml, prod.yaml)
-        env_path = repo_root / "framework" / "config" / f"{kbf_env}.yaml"
-        env_cfg: dict = {}
-        if env_path.exists():
-            env_cfg = _yaml.safe_load(env_path.read_text()) or {}
-        overrides = env_cfg.get("adapters_overrides", {}).get("confluence", {})
-
-        # Merge: base first, env overrides on top
-        merged = {**base_cfg, **overrides}
-        mode = merged.get("mode", "")
-
-        if not mode:
-            log.info("Confluence mode not configured — using fixture mode")
-            return None
-
-        if mode == "codex_proxy":
-            from ..adapters.confluence.codex_proxy import ConfluenceCodexProxyAdapter
-            cp_cfg = {**merged.get("codex_proxy", {}), **overrides.get("codex_proxy", {})}
-            log.info("Confluence adapter: codex_proxy server_name=%s", cp_cfg.get("server_name"))
-            return ConfluenceCodexProxyAdapter(cp_cfg)
-
-        if mode == "codex_cli":
-            from ..adapters.confluence.codex_cli import ConfluenceCodexCLIAdapter
-            cc_cfg = {**merged.get("codex_cli", {}), **overrides.get("codex_cli", {})}
-            log.info("Confluence adapter: codex_cli server_name=%s", cc_cfg.get("server_name"))
-            return ConfluenceCodexCLIAdapter(cc_cfg)
-
-        if mode == "emcp_direct":
-            # Direct HTTPS+OAuth to the emcp.oracle.com Confluence MCP server.
-            # Uses the bearer token codex stored in the macOS Keychain (after
-            # `codex mcp login central_confluence`). ~10s/page versus the 180s
-            # timeout we saw with codex_proxy (BUG-queue-d3ec0).
-            from ..adapters.confluence.emcp_direct import ConfluenceEmcpDirectAdapter
-            ed_cfg = {**merged.get("emcp_direct", {}), **overrides.get("emcp_direct", {})}
-            log.info(
-                "Confluence adapter: emcp_direct server_name=%s",
-                ed_cfg.get("server_name"),
-            )
-            return ConfluenceEmcpDirectAdapter(ed_cfg)
-
-        if mode == "mcp":
-            from ..adapters.confluence.mcp import ConfluenceMcpAdapter
-            log.info("Confluence adapter: mcp endpoint=%s", merged.get("mcp", {}).get("endpoint"))
-            return ConfluenceMcpAdapter(merged.get("mcp", {}))
-
-        if mode == "native":
-            from ..adapters.confluence.native import ConfluenceNativeAdapter
-            log.info("Confluence adapter: native base_url=%s", merged.get("native", {}).get("base_url"))
-            return ConfluenceNativeAdapter(merged.get("native", {}))
-
-        log.info("Confluence mode=%r not recognised — using fixture mode", mode)
-        return None
-    except Exception as exc:
-        log.warning("could not build Confluence adapter (%s) — using fixture mode", exc)
-        return None
+# ADR-032 P2-Infra: factory relocated to framework/adapters/confluence/factory.py.
+# Re-exported here as a private alias so existing callers within this module
+# (INGEST state) and existing tests that import
+#   `from framework.skill_builder.conversation import _build_confluence_adapter`
+# continue to work without modification.
+from ..adapters.confluence.factory import build_confluence_adapter as _build_confluence_adapter  # noqa: E402
 
 
 # ADR-030 C1: All prompt constants moved to framework/config/prompts/skill_builder.yaml.
