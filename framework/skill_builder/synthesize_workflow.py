@@ -143,8 +143,14 @@ def _build_requires_extractions(
     for field, kb in covered.items():
         seen_kbs.setdefault(kb, []).append(field)
     for kb, kb_fields in seen_kbs.items():
+        # Persona-qualify reused KB refs. DESIGN_SKILL's reuse_plan.covered
+        # emits bare KB names (e.g. 'tpm_weekly_ops'); the validator's
+        # kb_index and ShimKb are keyed '{persona}.{kb}'. The new-KB entry
+        # above is already qualified — keep reused entries consistent or
+        # ADR-017 validate fails with "references unknown KB".
+        qualified_kb = kb if "." in kb else f"{persona}.{kb}"
         entries.append({
-            "kb": kb,
+            "kb": qualified_kb,
             "required_fields": kb_fields,
         })
 

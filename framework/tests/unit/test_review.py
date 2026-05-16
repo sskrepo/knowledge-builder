@@ -401,3 +401,29 @@ class TestBugQueue44364MaxTokenTruncation:
         assert "possible" in msg.lower() or "may" in msg.lower(), (
             f"Error message should hedge on root cause, not assert definitively: {msg}"
         )
+
+
+class TestReusedKbPersonaQualification:
+    """BUG (autonomous e2e): reused KB refs must be persona-qualified or
+    ADR-017 validate fails with 'references unknown KB'."""
+
+    def test_build_requires_extractions_qualifies_bare_reused_kb(self):
+        from framework.skill_builder.synthesize_workflow import _build_requires_extractions
+        intent = {"reuse": {"covered": {"blocking_issues": "tpm_dependencies",
+                                        "exec_asks": "tpm_weekly_ops"}}}
+        out = _build_requires_extractions(
+            [], ["program_title", "blocking_issues", "exec_asks"],
+            "tpm", "26ai_fa_db_upgrade_pptx", intent,
+        )
+        kbs = {e["kb"] for e in out}
+        assert "tpm.26ai_fa_db_upgrade_pptx" in kbs
+        assert "tpm.tpm_dependencies" in kbs   # qualified, not bare
+        assert "tpm.tpm_weekly_ops" in kbs
+        assert "tpm_dependencies" not in kbs   # bare form must NOT appear
+
+    def test_find_kb_resolves_bare_ref_defensively(self):
+        from framework.skill_builder.validate_links import _find_kb
+        idx = {"tpm.tpm_weekly_ops": {"name": "tpm_weekly_ops"}}
+        assert _find_kb(idx, "tpm.tpm_weekly_ops") is not None
+        assert _find_kb(idx, "tpm_weekly_ops") is not None  # bare fallback
+        assert _find_kb(idx, "nope") is None

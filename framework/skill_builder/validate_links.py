@@ -149,6 +149,19 @@ def _build_kb_index(builders_dir: Path) -> dict[str, dict]:
 def _find_kb(index: dict[str, dict], kb_ref: str) -> dict | None:
     """Lookup by 'persona.kb_name' (e.g. 'tpm.weekly_project_status').
 
+    Defensive fallback: if kb_ref is a bare name (no '.'), resolve it
+    against any 'persona.<kb_ref>' key. DESIGN_SKILL reuse plans
+    historically emitted bare KB names; the synthesizer now
+    persona-qualifies them, but tolerate bare refs so older artifacts
+    don't fail the link check spuriously.
+
     Returns None if not found.
     """
-    return index.get(kb_ref)
+    hit = index.get(kb_ref)
+    if hit is not None:
+        return hit
+    if "." not in kb_ref:
+        for key, entry in index.items():
+            if key.rsplit(".", 1)[-1] == kb_ref:
+                return entry
+    return None
