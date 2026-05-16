@@ -170,6 +170,25 @@ def maybe_render_artifact(app_state, result: dict, question: str) -> None:
     try:
         exec_result = executor.execute(skill_yaml_path, inputs={"input": question})
     except Exception as exc:  # noqa: BLE001
+        from ...workflow_runtime.executor import ConfluencePageNotInKBError
+        if isinstance(exc, ConfluencePageNotInKBError):
+            # ADR-032 P3: source-not-available hard-fail — mutate result so the
+            # consumer receives the actionable message rather than a silent empty
+            # artifact. Override the tier-1 answer with the P3 error text.
+            log.warning(
+                "render: P3 guard triggered for page %s (skill=%s) — "
+                "surfacing source_not_available to consumer",
+                exc.page_id, exc.skill_name,
+            )
+            result["answer"] = {"Answer": str(exc)}
+            result["tier"] = 4
+            result["tier_description"] = "source_not_available"
+            result["source_not_available"] = {
+                "page_id": exc.page_id,
+                "skill": exc.skill_name,
+                "resolution": "ingest then retry",
+            }
+            return
         log.error("render: WorkflowExecutor.execute failed: %s", exc, exc_info=True)
         return
 

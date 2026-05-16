@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from datetime import datetime
@@ -20,6 +21,103 @@ import yaml
 from framework.skill_builder.prompt_registry import get_registry  # ADR-030 C4
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# ADR-032 P3 guard — Confluence page-reference detection + source-match assertion
+#
+# This heuristic detects whether the skill invocation carries an explicit
+# Confluence page reference in the user-supplied inputs and hard-fails if the
+# retrieved passages do not match the requested page.
+#
+# TEMPORARY: this regex-on-input heuristic will be replaced by the
+# source_binding.input_param schema field once ADR-032 P1 ships. See
+# ADR-032 §C and §D.3 for the full design. DECISION-012 options A/B/C remain
+# open and are NOT pre-empted by this guard.
+# ---------------------------------------------------------------------------
+
+# Patterns for recognising a Confluence page reference in a free-text input.
+# Ordered most-specific first. All groups capture the numeric page id.
+_CONFLUENCE_PAGE_REF_PATTERNS = [
+    # querystring form: pageId=18625350641
+    re.compile(r"[?&]pageId=(\d+)", re.IGNORECASE),
+    # viewpage.action form: /pages/viewpage.action?pageId=<id>
+    re.compile(r"/pages/viewpage\.action\?pageId=(\d+)", re.IGNORECASE),
+    # REST short-form: /pages/<id>  (must NOT match /pages/viewpage — covered above)
+    re.compile(r"/pages/(\d+)(?:[/?#]|$)"),
+    # bare all-digit token presented as an explicit pageId= key-value pair
+    # in the raw input string (e.g. "pageId=18625350641" without leading ?)
+    re.compile(r"\bpageId=(\d+)\b", re.IGNORECASE),
+]
+
+
+class ConfluencePageNotInKBError(Exception):
+    """Raised when the user requested a specific Confluence page that is not
+    in the knowledge base and no matching passage was retrieved.
+
+    This is a hard-fail — the executor MUST NOT substitute a different page
+    or return partial/empty content silently. ADR-032 P3 / ADR-031.
+    """
+    def __init__(self, page_id: str, skill_name: str = ""):
+        self.page_id = page_id
+        self.skill_name = skill_name
+        msg = (
+            f"Requested Confluence page {page_id} is not in the knowledge base. "
+            "This skill does not substitute a different page. "
+            f"Run: kb-cli ingest --page-id {page_id} --persona tpm. "
+            "Then retry your request."
+        )
+        super().__init__(msg)
+
+
+def _extract_confluence_page_ids(inputs: dict) -> list[str]:
+    """Extract Confluence page IDs referenced in the skill inputs.
+
+    Scans every string value in `inputs` against known Confluence URL/id
+    patterns. Returns a deduplicated list of numeric page-id strings, or an
+    empty list if no explicit page reference is found.
+
+    Conservative: only all-digit tokens that match an explicit Confluence URL
+    pattern or a bare `pageId=<digits>` key-value are treated as page refs.
+    Arbitrary numbers embedded in prose are NOT matched.
+
+    ADR-032 P3 — heuristic guard; replaced by source_binding.input_param in P1.
+    """
+    found: list[str] = []
+    seen: set[str] = set()
+    for v in inputs.values():
+        if not isinstance(v, str):
+            continue
+        for pattern in _CONFLUENCE_PAGE_REF_PATTERNS:
+            for m in pattern.finditer(v):
+                pid = m.group(1)
+                if pid not in seen:
+                    seen.add(pid)
+                    found.append(pid)
+    return found
+
+
+def _passage_matches_page_id(passage: dict, requested_page_id: str) -> bool:
+    """Return True if the passage's citation/metadata corresponds to the requested
+    Confluence page id.
+
+    Checks (in order):
+      1. passage["metadata"]["page_id"] — set by SearchWikiRetriever and
+         ReadWikiPageRetriever on every Result object.
+      2. requested_page_id appears anywhere in passage["citation"] — covers
+         Confluence URLs (https://.../wiki/...?pageId=<id>), wiki:// URIs
+         (wiki://<page_id>), and fixture paths.
+
+    ADR-032 P3 — bound to the real field names in Result + retriever metadata.
+    """
+    meta = passage.get("metadata") or {}
+    meta_page_id = str(meta.get("page_id", "")).strip()
+    if meta_page_id and meta_page_id == requested_page_id:
+        return True
+    citation = str(passage.get("citation", "")).strip()
+    if citation and requested_page_id in citation:
+        return True
+    return False
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _TELEMETRY_DIR = Path.home() / ".kbf" / "telemetry"
@@ -232,6 +330,41 @@ class WorkflowExecutor:
                 "(this is laptop-mode behaviour; production should always hit a real retriever)"
             )
             passages = self._load_fixture_passages(inputs, cfg=cfg)
+
+        # ------------------------------------------------------------------
+        # ADR-032 P3 guard — no-silent-substitution assertion.
+        #
+        # If the user supplied an explicit Confluence page reference in inputs,
+        # verify that at least one retrieved passage actually corresponds to that
+        # page.  If none do, hard-fail with an actionable message — NEVER fall
+        # through to a different page's content.
+        #
+        # This is the "no-silent-degradation" invariant from ADR-031 applied to
+        # source selection: if a page was requested, the wrong page is always
+        # wrong, and silence is the worst possible error signal.
+        #
+        # TEMPORARY heuristic: regex-on-input detection will be replaced by
+        # source_binding.input_param schema field when ADR-032 P1 ships.
+        # DECISION-012 options A/B/C remain open and unconstrained by this guard.
+        # ------------------------------------------------------------------
+        requested_page_ids = _extract_confluence_page_ids(inputs)
+        if requested_page_ids:
+            skill_name = cfg.get("workflow_skill", "")
+            for requested_pid in requested_page_ids:
+                matching = [
+                    p for p in passages
+                    if _passage_matches_page_id(p, requested_pid)
+                ]
+                if not matching:
+                    log.error(
+                        "executor P3 guard: requested Confluence page %s not found in "
+                        "retrieved passages (skill=%s). Hard-failing — retrieved %d "
+                        "passage(s) from different page(s); substitution is forbidden.",
+                        requested_pid, skill_name, len(passages),
+                    )
+                    raise ConfluencePageNotInKBError(
+                        page_id=requested_pid, skill_name=skill_name
+                    )
 
         return passages
 

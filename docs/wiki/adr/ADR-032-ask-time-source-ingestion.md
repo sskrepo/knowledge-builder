@@ -205,6 +205,13 @@ additive — the regex guard ships now; the schema-driven guard replaces it late
 
 **Recommendation: fix P3 now with the regex heuristic; P1+P2 refine it.**
 
+**P3 guard landed standalone ahead of P1/P2 — see commit for SHA.** The heuristic
+regex-on-input guard is implemented in `framework/workflow_runtime/executor.py`
+(`_extract_confluence_page_ids`, `_passage_matches_page_id`, `ConfluencePageNotInKBError`,
+and the guard block in `_retrieve_for_inputs`). It will be replaced by the
+`source_binding.input_param` schema field when ADR-032 P1 ships. DECISION-012 options
+A/B/C remain open and unconstrained by this guard.
+
 ---
 
 ## D. Author-Time Detection (P1)

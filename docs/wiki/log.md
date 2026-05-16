@@ -4,6 +4,33 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] backend-dev | ADR-032 P3 guard landed standalone — ConfluencePageNotInKBError hard-fail
+
+**Fixed the silent wrong-page substitution in WorkflowExecutor._retrieve_for_inputs.**
+
+- `framework/workflow_runtime/executor.py` — added `_extract_confluence_page_ids`,
+  `_passage_matches_page_id`, `ConfluencePageNotInKBError`, and the P3 guard block
+  in `_retrieve_for_inputs` (~line 246–278 in modified file). Guard detects Confluence
+  page refs in inputs via regex heuristic (4 patterns: querystring pageId=, viewpage.action,
+  REST /pages/<id>, bare pageId= key-value), verifies at least one retrieved passage
+  cites the requested page_id via `metadata["page_id"]` or `citation_url` substring,
+  and raises `ConfluencePageNotInKBError` on mismatch. Guard is completely inert when
+  no page ref is present in inputs (no regression to fixed-source skills).
+- `framework/orchestrator/context_builder.py` — catches `ConfluencePageNotInKBError`
+  in `answer()` around tier dispatch; surfaces it as tier_4 / source_not_available
+  response dict with actionable message. Never propagates as unhandled 500.
+- `framework/deploy/routes/ask.py` — catches same error in `maybe_render_artifact`;
+  mutates result to tier_4 / source_not_available so the consumer always sees the
+  actionable message, never a silent empty artifact.
+- `framework/tests/unit/test_executor_source_guard.py` — 19 new tests; all pass.
+  Key assertions: wrong-page → hard-fail with actionable message (no substitution);
+  correct-page → passes through; no-page-ref → guard inert (regression proof);
+  URL form recognised same as querystring form.
+- DECISION-012 options A/B/C remain open and unconstrained by this guard.
+  Heuristic regex to be replaced by source_binding.input_param when ADR-032 P1 ships.
+
+---
+
 ## [2026-05-16] architect | ADR-032 — ask-time source ingestion (Proposed) + DECISION-012
 
 **Root-cause analysis of observed production failure: TPM email-draft skill silently

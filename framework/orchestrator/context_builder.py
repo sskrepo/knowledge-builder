@@ -186,14 +186,56 @@ class ContextBuilder:
         )
 
         # 2. Dispatch by tier
-        if classification.tier == 1:
-            packet = self._dispatch_tier1(query, classification, budget)
-        elif classification.tier == 2:
-            packet = self._dispatch_tier2(query, classification, budget)
-        elif classification.tier == 3:
-            packet = self._dispatch_tier3(query, classification, budget)
-        else:  # Tier 4
-            packet = self._dispatch_tier4(query, classification, budget)
+        # ADR-032 P3: catch ConfluencePageNotInKBError from the workflow executor
+        # and surface it as a clean tier_4 / source_not_available response — never
+        # let it propagate as an unhandled 500. The error is actionable (tells the
+        # consumer exactly which page to ingest and how) so it must reach the user.
+        try:
+            if classification.tier == 1:
+                packet = self._dispatch_tier1(query, classification, budget)
+            elif classification.tier == 2:
+                packet = self._dispatch_tier2(query, classification, budget)
+            elif classification.tier == 3:
+                packet = self._dispatch_tier3(query, classification, budget)
+            else:  # Tier 4
+                packet = self._dispatch_tier4(query, classification, budget)
+        except Exception as _exc:  # noqa: BLE001
+            # Narrow-catch: only re-surface ConfluencePageNotInKBError cleanly;
+            # all other exceptions propagate (they are genuine bugs).
+            from ..workflow_runtime.executor import ConfluencePageNotInKBError
+            if isinstance(_exc, ConfluencePageNotInKBError):
+                elapsed_ms = int((time.time() - t0) * 1000)
+                log.warning(
+                    "ADR-032 P3 guard: source-not-available hard-fail for page %s "
+                    "(skill=%s) — returning tier_4 source_not_available response",
+                    _exc.page_id,
+                    _exc.skill_name,
+                )
+                return {
+                    "answer": {"Answer": str(_exc)},
+                    "schema": GENERIC_QA.name,
+                    "tier": 4,
+                    "tier_description": "source_not_available",
+                    "intent": {
+                        "persona": classification.persona,
+                        "personas": classification.personas,
+                        "confidence": 0.0,
+                        "workflow_skill": classification.workflow_skill,
+                        "reasoning": "source_not_available",
+                    },
+                    "passages": [],
+                    "citations": [],
+                    "used_kbs": [],
+                    "used_tools": [],
+                    "cost": {},
+                    "latency_ms": elapsed_ms,
+                    "source_not_available": {
+                        "page_id": _exc.page_id,
+                        "skill": _exc.skill_name,
+                        "resolution": "ingest then retry",
+                    },
+                }
+            raise
 
         # 3. Cross-source enrichment (applies to Tiers 2 and 3 with passages)
         if self.cross_source_resolver and packet.passages:
