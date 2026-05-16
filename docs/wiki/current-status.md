@@ -11,7 +11,9 @@ status: current
 # Current Status
 
 ## Where we are
-**Phase 1-3 + V3 deployment layer + laptop mode code complete. ADR-028 S1-S5 live. ADR-029 Phase 1 (S5) implemented: artifact retention + image hard-reject + comparator at EVAL + user-accept gate.** 160+ Python files, ~18K+ LOC, 630+ tests passing.
+**Phase 1-3 + V3 deployment layer + laptop mode code complete. ADR-028 S1-S6 live. ADR-029 Phases 1+2 complete. ADR-030 design accepted (prompt externalization + harness); implementation blueprint ready for dispatch.** 160+ Python files, ~18K+ LOC, 630+ tests passing.
+
+ADR-030 design accepted (2026-05-16): all 12 authorSkill prompts to be externalized to hot-reloadable versioned YAML (`framework/config/prompts/`), with a `PromptRegistry` loader and `prompt_lab.py` harness CLI. `persona_prompts.yaml` confirmed live and wired; it migrates to `persona_overlays.yaml` in the same change. `_FAILURE_CLASSIFIER_PROMPT` carries a checksum lock; the gate test remains the re-validation gate for any classifier text change. Blueprint: 4 parallel P-streams (P1=registry, P2=YAML, P3=harness, P4=docs) + 4-step serial cutover + G1 gate.
 
 ADR-028 serial stream complete through S5:
 - S1-S4: synthesisable field type, must_show_human, CLARIFY state (17th state), persona prompt injection.

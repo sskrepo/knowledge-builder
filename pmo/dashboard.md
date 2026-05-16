@@ -10,8 +10,29 @@ status: current
 
 # Knowledgebase — Dashboard
 
-**Current phase:** Phase 1-3 + V3 + laptop mode — ADR-027 design-first authorSkill live
-**Updated:** 2026-05-15 by architect (ADR-028 + ADR-029 Accepted; DECISION-010 Superseded; DECISION-011 Resolved; persona_prompts.yaml committed; impl blueprint at docs/wiki/adr/ADR-028-029-impl-plan.md)
+**Current phase:** Phase 1-3 + V3 + laptop mode — ADR-028/029 complete; ADR-030 design accepted
+**Updated:** 2026-05-16 by architect (ADR-030 Accepted; impl blueprint filed; no open decisions)
+
+## Session update — 2026-05-16 (ADR-030 prompt externalization + harness design)
+
+**ADR-030 accepted. Prompt externalization design complete. Implementation blueprint ready for dispatch.**
+
+- `docs/wiki/adr/ADR-030-prompt-externalization-and-harness.md` — ACCEPTED
+- `docs/wiki/adr/ADR-030-impl-plan.md` — ACTIVE blueprint for dev dispatch
+
+**persona_prompts.yaml finding:** LIVE and wired (not dead code). Currently restart-gated;
+ADR-030 makes it hot-reloadable by folding it into the new PromptRegistry persona overlay
+mechanism. Its content migrates to `framework/config/prompts/persona_overlays.yaml` in C1.
+
+**Implementation fan-out (ready to dispatch):**
+- Agent A: P1 — PromptRegistry loader + 11 unit tests (new file, no collision)
+- Agent B: P2 — 3 YAML files with verbatim prompt constants + classifier checksum (new files)
+- Agent C: P3 — prompt_lab harness CLI + 9 fixtures (new files)
+- Agent D: P4 — authorskill-prompts.md generator (new, after P3)
+- Agent E (serial): C1→C2→C3→C4 — cutover of all 4 .py files (after P1+P2 pass)
+- Agent F: G1 — gate test update + live LLM re-run (after C1)
+
+**No open decisions.**
 
 ## Session update — 2026-05-14 (ADR-027 design-first authorSkill + DECISION-010)
 

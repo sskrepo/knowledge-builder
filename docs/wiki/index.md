@@ -60,6 +60,8 @@
 - [ADR-028 — authorSkill: prompt investment, human-loop enforcement, and conversational clarification](adr/ADR-028-authorskill-prompt-investment-human-loop-conversation.md) — **ACCEPTED 2026-05-15 — Item1=A (persona playbook), Item2=A (must_show_human), Item3=A (CLARIFY state), Item4=A (synthesisable)**
 - [ADR-029 — Outcome-based EVAL: demonstration-artifact acceptance loop](adr/ADR-029-outcome-based-eval-acceptance-loop.md) — **ACCEPTED 2026-05-15 — Option A + text-only comparator + image-only hard-reject; supersedes DECISION-010 terminal gate**
 - [ADR-028 + ADR-029 — Implementation Blueprint](adr/ADR-028-029-impl-plan.md) — **ACTIVE — file-partitioned, dependency-ordered work breakdown for 3-stream parallel dev team**
+- [ADR-030 — authorSkill: Externalize LLM prompts to hot-reloadable versioned YAML + prompt-test harness](adr/ADR-030-prompt-externalization-and-harness.md) — **ACCEPTED 2026-05-16 — YAML store layout, PromptRegistry loader contract, gate-lock enforcement, prompt_lab harness design, persona_prompts.yaml folded in**
+- [ADR-030 — Implementation Blueprint](adr/ADR-030-impl-plan.md) — **ACTIVE — file-partitioned, serial-aware work breakdown: 4 parallel P-streams + 4-step serial cutover + gate task**
 
 ## Skill builder
 - **[authorSkill flow — state-by-state LLM usage map](authorskill-flow.md)** — NEW 16-state machine (post-ADR-027): design-first, source inspection before schema design, real EVAL with auto-generated gold sets

@@ -4,6 +4,31 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] architect | ADR-030 — Prompt externalization design + implementation blueprint
+
+**Task: Design ADR-030 (user-chosen approach: Externalize to YAML + harness).**
+
+- Verified persona_prompts.yaml is LIVE and actively wired (not dead code).
+  `_load_persona_prompt_fragments` called at CAPTURE_INTENT (line 1208) and DESIGN_SKILL
+  (line 2037). Fragments injected as {persona_key_fields}, {persona_extraction_style},
+  {persona_few_shot_example}. Currently restart-gated; ADR-030 makes it hot-reloadable.
+- Inventoried all 12 prompt units: 8 constants in conversation.py, 1 in synthesize_schema.py,
+  1 in review.py, 1 unnamed inline in executor.py, + _CLARIFY_PROMPT (turn message, not LLM).
+- Filed `docs/wiki/adr/ADR-030-prompt-externalization-and-harness.md` (Status: Accepted).
+  Records: 3-file YAML layout (skill_builder.yaml + executor.yaml + persona_overlays.yaml),
+  PromptRegistry loader contract (hot-reload via mtime, hard-fail on malformed YAML,
+  checksum lock for failure_classifier), gate-lock enforcement chain, prompt_lab harness
+  CLI design, fixture format, persona overlay schema (absorbs persona_prompts.yaml),
+  migration plan (byte-identical, atomic per file), authorskill-prompts.md as generated.
+- Filed `docs/wiki/adr/ADR-030-impl-plan.md` (implementation blueprint): 4 parallel
+  P-streams (P1=registry, P2=YAML files, P3=harness, P4=docs generator), 4-step serial
+  cutover (C1=conversation.py, C2=synthesize_schema.py, C3=review.py, C4=executor.py),
+  gate task G1 (classifier live-LLM re-run post-migration). 6 technical risks flagged.
+- Updated docs/wiki/index.md with both new ADR entries.
+- Updated pmo/dashboard.md.
+
+---
+
 ## [2026-05-15] architect | ADR-029 classifier validation gate — PASS (3/3 runs MISSING_FIELDS)
 
 **Task: Design + validate _FAILURE_CLASSIFIER_PROMPT before S6 routing is enabled.**
