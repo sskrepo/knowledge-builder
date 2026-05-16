@@ -4,6 +4,38 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] backend-dev | BUG-queue-44364 comprehensive fix — no arbitrary content caps; all LLM-JSON parses detect truncation
+
+**Policy: ADR-031 accepted. synthesized schemas carry no maxLength on content fields; source text sized to model context; every LLM-JSON parse site detects truncation and hard-fails (BUG-queue-44364).**
+
+Changes:
+- `framework/skill_builder/synthesize_schema.py` (Group B): removed `maxLength:1000` from summary/text/description/body fields; removed `maxLength:500` from catch-all string fallback. Kept `maxLength:64` (_id) and `maxLength:50` (_status) — genuinely source-bounded.
+- `framework/skill_builder/review.py` (Group D): source-text cap `[:12000]` → `[:80000]`; stub fallback 500 → 10000; `_EXTRACT_MAX_TOKENS` constant updated to 16384 (matches YAML ceiling).
+- `framework/workflow_runtime/executor.py` (Group E): snippet cap `[:24000]` → `[:80000]` (parity with review.py).
+- `framework/skill_builder/conversation.py` (Group C, 10 hunks):
+  - C1: `_SOURCE_GROUNDED_REVIEW_PROMPT` deleted; migrated to PromptRegistry as `source_grounded_review` in skill_builder.yaml (max_tokens:4096, up from hard-coded 2048). Last hard-coded prompt eliminated. Parse via `_parse_llm_json_response`.
+  - C2: `design_skill` parse — raw `json.loads` → `_parse_llm_json_response` with tokens_out; raises BUG-queue-44364 error on truncation.
+  - C3: `inspect_sources` parse — same.
+  - C4: `review_design_replan` parse — same.
+  - C5: failure_classifier route — `max_tokens=512` hard-coded → `classifier_spec.max_tokens` (spec-driven; won't drift). Template NOT changed (gate-locked checksum intact).
+  - C6: source-text caps raised (inspect_sources: 3k→20k per-sample, 6k→40k total; _source_grounded_review: 4k→20k per-sample, 8k→40k total; gold-row source_snippet: 12k→80k).
+  - C7: schema_lines `desc[:120]` → full description (no slice).
+  - C8: eval_judge `field_description[:200]` → full; `extracted_value[:300]` → `[:2000]`.
+  - C9: `describe <field> as` command: removed `"maxLength": 500` from new field spec.
+  - C10: `expected_fields = all_fields[:5]` → `all_fields` (eval quality gate covers whole schema).
+- `framework/config/prompts/skill_builder.yaml`: added `source_grounded_review` prompt entry.
+- `docs/wiki/adr/ADR-031-no-arbitrary-content-caps.md`: new ADR (Status: Accepted).
+- `docs/wiki/index.md`: ADR-031 indexed.
+
+New tests (0 non-baseline failures):
+- `framework/tests/unit/test_synthesize_schema_limits.py` (12 assertions — Group B).
+- `framework/tests/unit/test_extraction_no_truncation.py` (6 assertions — regression suite).
+- `framework/tests/unit/test_review.py` updated: `test_max_tokens_is_4096` → `test_max_tokens_is_16384`; truncation test ceiling updated 4096→16384.
+
+Classifier gate: still green (template unchanged; checksum sha256:aef837cd…1c1d1f verified).
+
+Full prescribed suite: 272 passed, 0 failures (excl. 8 pre-existing baseline).
+
 ## [2026-05-16] backend-dev | BUG-queue-2ad9a — ShimWorkflows ADB-aware (drafts no longer reach Tier-1 router)
 
 **Fix: HIGH-severity silent-wrong-output. A promoted .eml skill silently returned another skill's .pptx because ShimWorkflows.all_cards() was disk-only and fed drafts to the Tier-1 LLM classifier.**

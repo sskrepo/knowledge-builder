@@ -10,8 +10,21 @@ status: current
 
 # Knowledgebase — Dashboard
 
-**Current phase:** Phase 1-3 + V3 + laptop mode — ADR-028/029 complete; ADR-030 design accepted
-**Updated:** 2026-05-16 by architect (ADR-030 Accepted; impl blueprint filed; no open decisions)
+**Current phase:** Phase 1-3 + V3 + laptop mode — ADR-030 complete; ADR-031 accepted (BUG-queue-44364 comprehensive fix)
+**Updated:** 2026-05-16 by backend-dev (ADR-031 accepted; BUG-44364 comprehensive fix complete; no open decisions)
+
+## Session update — 2026-05-16 (BUG-queue-44364 comprehensive fix — ADR-031)
+
+**ADR-031 accepted. No arbitrary content caps. All LLM-JSON parse sites detect truncation and hard-fail.**
+
+- `docs/wiki/adr/ADR-031-no-arbitrary-content-caps.md` — ACCEPTED
+- Group B: synthesize_schema — removed maxLength:1000 (summary/text), maxLength:500 (catch-all). Kept _id:64, _status:50.
+- Group C (10 hunks in conversation.py): last hard-coded prompt migrated to registry; all JSON parse sites now detect truncation; source-text caps raised 3–10×.
+- Group D/E: review._llm_extract + executor._llm_extract_fields source caps 12k/24k → 80k chars.
+- Gate test: classifier checksum sha256:aef837cd…1c1d1f STILL GREEN. Template unchanged.
+- 272 passed, 0 failures (excl. 8 pre-existing baseline).
+
+**No open decisions.**
 
 ## Session update — 2026-05-16 (ADR-030 prompt externalization + harness design)
 

@@ -288,15 +288,18 @@ class TestLlmExtractHardFail:
 
 
 class TestBugQueue44364MaxTokenTruncation:
-    def test_max_tokens_is_4096(self):
-        """_llm_extract must call llm.chat with max_tokens=4096 (not 2048).
+    def test_max_tokens_is_16384(self):
+        """_llm_extract must call llm.chat with max_tokens=16384 (raised from 4096).
 
-        This asserts the constant _EXTRACT_MAX_TOKENS is 4096 AND that it is
-        actually passed through to llm.chat, closing the drift risk between
-        review.py and WorkflowExecutor._llm_extract_fields (executor.py ~495).
+        BUG-queue-44364 stop-bleed (commit bf6dfab) raised the YAML ceiling from
+        4096 → 16384. This asserts the new ceiling is in effect AND is actually
+        passed through to llm.chat, closing the drift risk between review.py and
+        WorkflowExecutor._llm_extract_fields (executor.py ~495).
+
+        _EXTRACT_MAX_TOKENS is a legacy constant retained for import compatibility;
+        the authoritative value is now served by PromptRegistry from review_extract
+        in skill_builder.yaml (max_tokens: 16384).
         """
-        assert _EXTRACT_MAX_TOKENS == 4096
-
         schema = _make_schema_with_n_fields(5)
         data = {f"field_0{i}": f"v{i}" for i in range(5)}
         mock_llm = _make_mock_llm(json.dumps(data))
@@ -311,15 +314,16 @@ class TestBugQueue44364MaxTokenTruncation:
         else:
             # fall back to positional if called that way (shouldn't happen)
             passed = None
-        assert passed == 4096, (
-            f"_llm_extract called llm.chat with max_tokens={passed}, expected 4096. "
-            "This is BUG-queue-44364 — review.py and executor.py are drifted."
+        assert passed == 16384, (
+            f"_llm_extract called llm.chat with max_tokens={passed}, expected 16384 "
+            "(BUG-queue-44364 stop-bleed raised ceiling). "
+            "review.py and executor.py must stay in sync via PromptRegistry."
         )
 
     def test_truncated_response_raises_truncation_error(self):
-        """Truncated JSON + tokens_out==4096 raises a BUG-queue-44364 error.
+        """Truncated JSON + tokens_out==16384 raises a BUG-queue-44364 error.
 
-        Simulates a 32-field schema where the model hit the token ceiling and
+        Simulates a 32-field schema where the model hit the new token ceiling and
         the response is cut mid-key (fields 19 onward missing, as observed).
         Assert the error message identifies truncation, names BUG-queue-44364,
         and does NOT claim control chars are a definite cause.
@@ -332,8 +336,8 @@ class TestBugQueue44364MaxTokenTruncation:
         truncated_json = json.dumps(partial, indent=2)[:-5]  # slice off closing }}\n
         truncated_json += '  "m'  # mid-key, exactly as observed in the bug report
 
-        # tokens_out == 4096 = the ceiling
-        mock_llm = _make_mock_llm(truncated_json, tokens_out=4096)
+        # tokens_out == 16384 = the new ceiling (raised from 4096 in bf6dfab)
+        mock_llm = _make_mock_llm(truncated_json, tokens_out=16384)
 
         with pytest.raises(ValueError) as exc_info:
             _llm_extract(sample, schema, mock_llm)
