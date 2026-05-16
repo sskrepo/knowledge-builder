@@ -79,11 +79,11 @@ def _is_content_filter_error(exc: BaseException) -> bool:
     )
 
 
-# Maximum tokens requested from the LLM for extraction.  Must match
-# WorkflowExecutor._llm_extract_fields (executor.py ~line 495) so the eval
-# preview path and the production runtime path cannot drift.
-# Raised from 2048 → 4096 to fix BUG-queue-44364 (truncation on 32-field schemas).
-_EXTRACT_MAX_TOKENS = 4096
+# Legacy documentation constant — the authoritative value is now served by
+# PromptRegistry from review_extract in skill_builder.yaml (max_tokens: 16384).
+# Raised 2048→4096 in the initial BUG-queue-44364 stop-bleed, then 4096→16384
+# in the comprehensive fix (commit bf6dfab). Retained for import compatibility.
+_EXTRACT_MAX_TOKENS = 16384
 
 
 def review_extractions(
@@ -373,7 +373,10 @@ def _llm_extract(sample: dict, schema: dict, llm) -> dict[str, Any]:
     text = sample.get("content") or sample.get("text") or sample.get("body") or ""
     if isinstance(text, dict):
         text = json.dumps(text, indent=2)
-    text = str(text)[:12000]  # cap for prompt budget
+    # ADR-031 Group D: raise cap 12000→80000 chars (parity with executor.py Group E
+    # and conversation.py gold-row C6). gpt-4o input is ~128k tokens; the old 12k
+    # cap silently discarded source structure, causing missing field extractions.
+    text = str(text)[:80000]
 
     if not text.strip():
         log.warning("_llm_extract: sample has no extractable text, returning empty")
@@ -480,4 +483,7 @@ def _heuristic_string_extract(field: str, text: str, spec: dict) -> str | None:
     if spec.get("maxLength", 10000) < 100:
         words = text.split()
         return " ".join(words[:5]) if words else None
-    return text[:spec.get("maxLength", 500)]
+    # ADR-031 Group D: raise fallback 500→10000 (stub/test path only).
+    # This is never reached in production (no-stub-mode policy per ADR-026),
+    # but must not accidentally clip if a test schema has no maxLength set.
+    return text[:spec.get("maxLength", 10000)]

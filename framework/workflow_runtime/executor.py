@@ -488,9 +488,11 @@ class WorkflowExecutor:
             req_tag = " [required]" if name in required else ""
             field_lines.append(f'  - "{name}" ({type_hint}{extra}){req_tag}: {desc}')
 
-        # Truncate to stay well under context budget (Confluence pages are tame
-        # — typical 5-15k chars; we cap at 24k chars of passage text).
-        snippet = text[:24000]
+        # ADR-031 Group E: raise cap 24000→80000 chars for parity with
+        # review._llm_extract (Group D). gpt-4o input is ~128k tokens.
+        # The old 24k cap silently discarded source structure on large pages
+        # (e.g. Confluence pages with long WBS tables or multi-section content).
+        snippet = text[:80000]
 
         # ADR-030 C4: prompt via PromptRegistry.
         # Caller pre-joins field_lines with chr(10); template uses {field_lines},
