@@ -27,7 +27,41 @@ from framework.skill_builder.review import (
     _escape_bare_control_chars,
     _llm_extract,
     _EXTRACT_MAX_TOKENS,
+    ContentFilterRejection,
+    _is_content_filter_error,
 )
+
+
+class TestContentFilterRejection:
+    """Fix #1: OCI content-safety 400 → clean ContentFilterRejection, no 500."""
+
+    def test_is_content_filter_error_matches_oci_message(self):
+        exc = Exception(
+            "{'status': 400, 'message': 'Inappropriate content detected!!!'}"
+        )
+        assert _is_content_filter_error(exc) is True
+
+    def test_is_content_filter_error_ignores_unrelated(self):
+        assert _is_content_filter_error(Exception("connection timed out")) is False
+
+    def test_llm_extract_raises_content_filter_rejection_not_raw(self):
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = Exception(
+            "oci.exceptions.ServiceError {'status': 400, 'code': '400', "
+            "'message': 'Inappropriate content detected!!!', "
+            "'opc-request-id': 'SECRET-LEAK-DO-NOT-EXPOSE'}"
+        )
+        sample = {"content": "x" * 50, "source_citation": "wiki://20030556732"}
+        schema = {"properties": {"f": {"type": "string", "description": "d"}},
+                  "required": ["f"]}
+        with pytest.raises(ContentFilterRejection) as ei:
+            _llm_extract(sample, schema, mock_llm)
+        msg = str(ei.value)
+        assert ei.value.request_id.startswith("KBF-")
+        # No provider internals leaked
+        assert "opc-request-id" not in msg
+        assert "SECRET-LEAK-DO-NOT-EXPOSE" not in msg
+        assert "oci.exceptions" not in msg
 
 
 # ---------------------------------------------------------------------------

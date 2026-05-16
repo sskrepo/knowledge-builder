@@ -37,6 +37,46 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+
+class ContentFilterRejection(Exception):
+    """The inference provider's content-safety filter rejected the request.
+
+    Raised by _llm_extract / executor._llm_extract_fields when the upstream
+    LLM (e.g. OCI GenAI) returns a 400 "Inappropriate content detected".
+    Callers (PREVIEW_EXTRACTION / EVAL handlers) catch this and surface a
+    clean, actionable, provider-detail-free error to the operator instead
+    of leaking an OCI endpoint / opc-request-id in an unhandled 500.
+
+    Carries a KBF-generated request_id for support correlation (mirrors the
+    tier-4 content-filter discipline in orchestrator/context_builder.py —
+    no provider internals exposed).
+    """
+
+    def __init__(self, request_id: str, source_hint: str = ""):
+        self.request_id = request_id
+        self.source_hint = source_hint
+        super().__init__(
+            f"Source content was rejected by the LLM provider's content-safety "
+            f"filter and cannot be used for automated extraction. "
+            f"Request ID: {request_id}"
+            + (f" (source: {source_hint})" if source_hint else "")
+        )
+
+
+def _is_content_filter_error(exc: BaseException) -> bool:
+    """True when *exc* is an upstream content-policy rejection.
+
+    Mirrors orchestrator/synthesizer.py::_is_content_filter_error — kept as a
+    local copy to avoid importing the orchestrator from skill_builder.
+    Matches OCI GenAI 400 "Inappropriate content detected!!!" and any HTTP-400
+    from an inference provider whose message mentions content.
+    """
+    msg = str(exc)
+    return "Inappropriate content" in msg or (
+        "400" in msg and "content" in msg.lower()
+    )
+
+
 # Maximum tokens requested from the LLM for extraction.  Must match
 # WorkflowExecutor._llm_extract_fields (executor.py ~line 495) so the eval
 # preview path and the production runtime path cannot drift.
@@ -377,7 +417,20 @@ def _llm_extract(sample: dict, schema: dict, llm) -> dict[str, Any]:
             max_tokens=max_tokens,
             n_fields=n_fields,
         )
+    except ContentFilterRejection:
+        raise
     except Exception as exc:
+        if _is_content_filter_error(exc):
+            import uuid as _uuid
+            request_id = f"KBF-{_uuid.uuid4().hex[:12].upper()}"
+            log.warning(
+                "_llm_extract: content-filter rejection from inference provider "
+                "(requestId=%s): %s", request_id, exc,
+            )
+            raise ContentFilterRejection(
+                request_id,
+                source_hint=str(sample.get("source_citation", ""))[:120],
+            ) from None
         log.error("_llm_extract: LLM call failed: %s", exc)
         raise
 

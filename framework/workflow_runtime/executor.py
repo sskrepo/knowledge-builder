@@ -469,7 +469,11 @@ class WorkflowExecutor:
                         silently returns {} — no-stub-mode policy).
             Exception:  propagates any LLM-call-level exception.
         """
-        from framework.skill_builder.review import _parse_llm_json_response
+        from framework.skill_builder.review import (
+            _parse_llm_json_response,
+            _is_content_filter_error,
+            ContentFilterRejection,
+        )
 
         properties = schema.get("properties", {})
         required = schema.get("required", [])
@@ -502,12 +506,23 @@ class WorkflowExecutor:
         # max_tokens=4096 must stay in sync with _EXTRACT_MAX_TOKENS in
         # skill_builder/review.py — see BUG-queue-44364.
         _MAX_TOKENS = 4096
-        result = self.llm.chat(
-            model="synthesis",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            max_tokens=_MAX_TOKENS,
-        )
+        try:
+            result = self.llm.chat(
+                model="synthesis",
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                max_tokens=_MAX_TOKENS,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if _is_content_filter_error(exc):
+                import uuid as _uuid
+                request_id = f"KBF-{_uuid.uuid4().hex[:12].upper()}"
+                log.warning(
+                    "_llm_extract_fields: content-filter rejection from inference "
+                    "provider (requestId=%s): %s", request_id, exc,
+                )
+                raise ContentFilterRejection(request_id) from None
+            raise
         raw = result.get("text", "") if isinstance(result, dict) else str(result)
         tokens_out = result.get("tokens_out") if isinstance(result, dict) else None
 

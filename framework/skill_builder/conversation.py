@@ -2409,10 +2409,43 @@ class SkillBuilderConversation:
 
     # -- PREVIEW_EXTRACTION ----------------------------------------------
 
+    def _content_filter_turn(self, state: str, exc) -> ConversationTurn:
+        """Build a clean, actionable must_show_human turn for a content-filter
+        rejection (ContentFilterRejection). No provider internals leaked —
+        mirrors the tier-4 content-filter discipline. State is NOT advanced;
+        the session is preserved so the operator can choose a different source.
+        """
+        rid = getattr(exc, "request_id", "KBF-UNKNOWN")
+        hint = getattr(exc, "source_hint", "") or ""
+        msg = (
+            "The source content was rejected by the LLM provider's "
+            "content-safety filter and cannot be used for automated "
+            f"extraction.\n\nRequest ID: {rid}"
+            + (f"\nSource: {hint}" if hint else "")
+            + "\n\nThis is not a framework error — the inference provider "
+            "blocked the request. Options:\n"
+            "  • 'change sources' — go back and use a different / sanitised "
+            "source\n"
+            "  • 'stop here' — abandon this session"
+        )
+        log.warning(
+            "%s: content-filter rejection surfaced to operator (requestId=%s)",
+            state, rid,
+        )
+        return ConversationTurn(
+            synth_id=self._data.synth_id,
+            state=state,
+            message=msg,
+            data={"error": "content_filter_rejection", "request_id": rid},
+            options=["change sources", "stop here"],
+            must_show_human=True,
+            awaiting_user=True,
+        )
+
     def _advance_to_preview_extraction(self) -> ConversationTurn:
         """Transition to PREVIEW_EXTRACTION: run real LLM extraction on cached samples."""
         self._state = "PREVIEW_EXTRACTION"
-        from .review import review_extractions
+        from .review import review_extractions, ContentFilterRejection
         from .synthesize_schema import synthesize_extraction_schema
 
         if not self._llm:
@@ -2444,12 +2477,17 @@ class SkillBuilderConversation:
             if f in self._data.field_specs and f in schema.get("properties", {}):
                 schema["properties"][f] = dict(self._data.field_specs[f])
 
-        # Run review_extractions (ADR-026 Fix 3)
-        review_result = review_extractions(
-            samples=all_samples[:3],  # up to 3 samples
-            schema=schema,
-            llm=self._llm,
-        )
+        # Run review_extractions (ADR-026 Fix 3). A content-filter rejection
+        # from the inference provider is surfaced as a clean must_show_human
+        # turn (no 500, no provider internals, state NOT advanced).
+        try:
+            review_result = review_extractions(
+                samples=all_samples[:3],  # up to 3 samples
+                schema=schema,
+                llm=self._llm,
+            )
+        except ContentFilterRejection as exc:
+            return self._content_filter_turn("PREVIEW_EXTRACTION", exc)
 
         # Format for user display
         lines = ["=== Extraction Preview (live data) ===\n"]
@@ -2492,6 +2530,13 @@ class SkillBuilderConversation:
     def _handle_preview_extraction_response(self, user_input: str) -> ConversationTurn:
         """Handle user input at PREVIEW_EXTRACTION state."""
         lowered = user_input.lower().strip()
+        # Content-filter recovery: 'change sources' → back to CONFIGURE_SOURCES
+        if "change source" in lowered or "different source" in lowered:
+            return self._advance_to_configure_sources_v2()
+        if "stop" in lowered:
+            return ConversationTurn(
+                state="DONE", message="Session abandoned.", done=True,
+            )
         if any(kw in lowered for kw in ("ok", "commit", "yes", "looks good", "proceed")):
             return self._handle_commit_v2()
         if "back" in lowered or "design" in lowered:
@@ -4031,13 +4076,17 @@ Rules:
                     schema["properties"][f] = dict(self._data.field_specs[f])
 
         # Step 3: run extraction on each sample and generate gold rows
-        from .review import _llm_extract
+        from .review import _llm_extract, ContentFilterRejection
         extraction_gold_rows: list[dict] = []
         extraction_results: list[dict] = []
 
         for sample in all_samples[:3]:
             try:
                 extracted = _llm_extract(sample, schema, self._llm)
+            except ContentFilterRejection as exc:
+                # Provider blocked this source — surface a clean
+                # must_show_human turn; do NOT 500, do NOT advance state.
+                return self._content_filter_turn("EVAL", exc)
             except Exception as exc:
                 raise RuntimeError(
                     f"EVAL: extraction LLM call failed for sample "
@@ -4503,6 +4552,12 @@ Rules:
         S5 and S6 per the blueprint). The reject path is a labeled seam here.
         """
         lowered = user_input.lower().strip()
+
+        # --- CONTENT-FILTER RECOVERY (from _content_filter_turn) ---
+        # The provider blocked extraction on the current source; let the
+        # operator pick a different source rather than dead-ending.
+        if "change source" in lowered or "different source" in lowered:
+            return self._advance_to_configure_sources_v2()
 
         # --- STOP / PAUSE ---
         if any(kw in lowered for kw in ("stop", "exit", "pause")):
