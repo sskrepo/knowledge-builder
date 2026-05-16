@@ -514,8 +514,7 @@ prompts:
       {field_contexts}
 
       Return ONLY a JSON object mapping field_name → extraction_instruction string.
-      Example: {{"schedule_health": "RAG status (Red/Amber/Green) for the schedule, \
-      with a 1-2 sentence justification citing specific milestone dates or blockers."}}
+      Example: {{"schedule_health": "RAG status (Red/Amber/Green) for the schedule, with a 1-2 sentence justification citing specific milestone dates or blockers."}}
 
   # ---------------------------------------------------------------------------
   # review_extract

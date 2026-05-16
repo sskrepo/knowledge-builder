@@ -42,85 +42,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 from .sampler import fetch_samples  # noqa: E402
 # ADR-029 Phase 2 (S6): shared JSON-parse helper — same as S5/review.py path
 from .review import _parse_llm_json_response  # noqa: E402
-
-
-# ---------------------------------------------------------------------------
-# ADR-028 Item 1 (S4): Persona prompt fragment loader
-# ---------------------------------------------------------------------------
-
-# Module-level cache — loaded once at import time, updated on reload.
-_PERSONA_PROMPT_FRAGMENTS: dict[str, dict] | None = None
-_PERSONA_PROMPTS_YAML_PATH = REPO_ROOT / "framework" / "config" / "persona_prompts.yaml"
-
-
-def _load_persona_prompt_fragments(persona: str) -> dict:
-    """Load per-persona prompt fragments from persona_prompts.yaml.
-
-    Returns a dict with keys: key_fields (list[str]), extraction_style (str),
-    few_shot_example (str). Falls back to empty-string defaults if the persona
-    is not found in the YAML — logs a WARNING (not silent; not a crash).
-
-    The YAML is loaded lazily on first call and cached at module level.
-    Restart the server (or call _reload_persona_prompts()) to pick up YAML edits.
-
-    ADR-028 Item 1 Option A — per-persona prompt fragments in
-    framework/config/persona_prompts.yaml.
-    """
-    global _PERSONA_PROMPT_FRAGMENTS
-
-    if _PERSONA_PROMPT_FRAGMENTS is None:
-        _reload_persona_prompts()
-
-    frags = (_PERSONA_PROMPT_FRAGMENTS or {}).get(persona)
-    if frags is None:
-        log.warning(
-            "_load_persona_prompt_fragments: persona %r not found in %s. "
-            "Persona-aware prompting will be disabled for this session. "
-            "Add a stanza for this persona to persona_prompts.yaml to enable it.",
-            persona,
-            _PERSONA_PROMPTS_YAML_PATH.name,
-        )
-        return {
-            "key_fields": [],
-            "extraction_style": "",
-            "few_shot_example": "",
-        }
-
-    return {
-        "key_fields": frags.get("key_fields", []),
-        "extraction_style": frags.get("extraction_style", ""),
-        "few_shot_example": frags.get("few_shot_example", ""),
-    }
-
-
-def _reload_persona_prompts() -> None:
-    """(Re)load persona_prompts.yaml into the module-level cache.
-
-    Called on first use and can be called explicitly to hot-reload
-    the YAML without restarting the server.
-    """
-    global _PERSONA_PROMPT_FRAGMENTS
-    try:
-        if _PERSONA_PROMPTS_YAML_PATH.exists():
-            raw = yaml.safe_load(_PERSONA_PROMPTS_YAML_PATH.read_text()) or {}
-            _PERSONA_PROMPT_FRAGMENTS = {k: v for k, v in raw.items() if isinstance(v, dict)}
-            log.info(
-                "_reload_persona_prompts: loaded %d persona stanzas from %s",
-                len(_PERSONA_PROMPT_FRAGMENTS),
-                _PERSONA_PROMPTS_YAML_PATH.name,
-            )
-        else:
-            log.warning(
-                "_reload_persona_prompts: %s not found — persona prompt injection disabled",
-                _PERSONA_PROMPTS_YAML_PATH,
-            )
-            _PERSONA_PROMPT_FRAGMENTS = {}
-    except Exception as exc:
-        log.warning(
-            "_reload_persona_prompts: failed to load %s: %s — persona prompt injection disabled",
-            _PERSONA_PROMPTS_YAML_PATH.name, exc,
-        )
-        _PERSONA_PROMPT_FRAGMENTS = {}
+# ADR-030 C1: prompt registry — replaces hard-coded constants + persona_prompts.yaml wiring
+from .prompt_registry import get_registry  # noqa: E402
 
 
 def _build_confluence_adapter(kbf_env: str, repo_root: "Path"):
@@ -197,434 +120,8 @@ def _build_confluence_adapter(kbf_env: str, repo_root: "Path"):
         return None
 
 
-_ANALYZE_ARTIFACT_PROMPT = """\
-You are a Knowledge Builder Framework schema engineer. An artifact has been parsed \
-and its structural sections identified.
-
-Persona: {persona}
-Intent: "{intent}"
-Artifact type: {artifact_type}
-
-Sections / slides found in the artifact:
-{field_contexts}
-
-For EACH field listed above, decide:
-1. The most appropriate JSON Schema type ("string", "integer", "boolean", "array").
-   Use "array" only for genuinely multi-valued list fields. Default to "string".
-2. A precise 1–2 sentence extraction instruction that tells the LLM parser exactly
-   what content to look for and how to format the output.
-
-Return ONLY a JSON object mapping field_name → object with "type" and "description":
-{{
-  "schedule_health": {{
-    "type": "string",
-    "description": "RAG status (Red/Amber/Green) for the schedule, with a 1–2 sentence \
-justification citing specific milestone dates or blockers from the slide."
-  }}
-}}
-"""
-
-# ---------------------------------------------------------------------------
-# ADR-027 LLM prompts
-# ---------------------------------------------------------------------------
-
-_CAPTURE_INTENT_PROMPT = """\
-You are a Knowledge Builder Framework assistant. Parse the user's intent into a
-normalised goal object so downstream design steps have a structured representation
-to work from.
-
-Persona: {persona}
-Raw intent: "{intent}"
-
-Persona guidance: This persona's canonical output always includes these fields —
-{persona_key_fields}
-Use this list as a starting point for understanding what dimensions matter most.
-
-Return ONLY a JSON object with these keys:
-{{
-  "output_kind": "pptx | docx | markdown | email | slack",
-  "audience": "exec | team | ops | all",
-  "cadence": "weekly | monthly | on_request | daily",
-  "scope_domains": ["domain1", "domain2"],
-  "success_criteria": ["criterion1", "criterion2"],
-  "blocking_ambiguities": [
-    "questions whose answers would change the schema structure, output kind, or source selection"
-  ],
-  "nice_to_know_ambiguities": [
-    "questions that can be assumed; proceed and flag for user awareness"
-  ]
-}}
-
-Rules:
-- "output_kind": infer from words like "PPT", "deck", "slide", "document", "report", "email"
-- "scope_domains": extract project/service names (e.g. "26ai", "FA DB", "OCIFACP")
-- "success_criteria": infer from phrases like "one slide", "real data", "exec-ready"
-- "blocking_ambiguities": ONLY include if the answer would materially change the schema
-  structure, the source selection, or the output format. Example: "which Confluence space
-  — FAAAS or 26AI-LEGACY?" is blocking. "which day of the week?" is nice_to_know.
-- "nice_to_know_ambiguities": advisory items; proceed with stated assumption, flag for user.
-- Keep all string values concise (< 80 chars each)
-"""
-
-_CONFIGURE_SOURCES_SUGGEST_PROMPT = """\
-You are a Knowledge Builder Framework source advisor. Given the user's intent and the
-persona's declared adapters, propose the most likely source descriptors.
-
-Persona: {persona}
-Normalised intent: {normalised_intent}
-Available adapters: {adapter_list}
-Intent text (original): "{intent_text}"
-
-Return ONLY a JSON array of source descriptor objects. Each object must include:
-- "kind": "confluence" | "jira" | "git" | "adb"
-- For confluence: optionally "pages" (list of page IDs or URLs), "space", "labels"
-- For jira: "jql" string
-- "rationale": why this source is likely to contain the required data (1 sentence)
-
-Example:
-[
-  {{
-    "kind": "confluence",
-    "pages": ["20030556732"],
-    "rationale": "26ai project status page explicitly mentioned in intent"
-  }}
-]
-
-Rules:
-- Extract all page IDs or URLs from the intent text — these are high-confidence.
-- Propose additional sources only when the adapter list makes them available AND
-  the intent clearly implies them.
-- Do not invent sources not supported by the adapter list.
-- Return an empty array [] if no confident source can be proposed.
-"""
-
-_INSPECT_SOURCES_PROMPT = """\
-You are a Knowledge Builder Framework source analyst. Review the sample content
-fetched from a source and produce a capability inventory.
-
-Source ID: {source_id}
-Persona: {persona}
-Intent: {normalised_intent}
-
-Sample content (up to 3 pages):
-{sample_content}
-
-Return ONLY a JSON object:
-{{
-  "source_id": "{source_id}",
-  "available_fields": [
-    {{"field": "snake_case_name", "type": "string|array|integer",
-      "confidence": "high|medium|synthesisable|low",
-      "evidence": "quote or location from sample (< 100 chars)"}}
-  ],
-  "missing_fields": [
-    {{"field": "field_the_intent_might_want",
-      "reason": "why this content cannot supply it"}}
-  ],
-  "suggested_fields": [
-    {{"field": "snake_case_name", "type": "string|array|integer",
-      "reason": "why this is consistently present and useful"}}
-  ],
-  "summary": "2-3 sentence overview of what this source contains"
-}}
-
-Confidence taxonomy for available_fields:
-- "high": the field value is present as an explicitly labelled element in the source
-  (e.g. a named table cell, a heading with its content, a structured field).
-- "medium": the field value is clearly inferrable from the source with minimal
-  interpretation (e.g. a status implied by a colour-coded row, a date in a nearby cell).
-- "synthesisable": the field VALUE must be DERIVED by aggregating or combining content
-  that IS present in the source but does not appear as a single labelled element.
-  Examples: "risks" synthesised from WBS table status cells marked "blocked" or
-  "at risk"; "next_steps" synthesised from open action items across multiple rows.
-  Use this level when the source has the raw ingredients but the LLM must aggregate
-  them — do NOT classify these as "low" or "missing".
-- "low": the field is marginally mentioned or ambiguous; treat as advisory only.
-
-Rules:
-- "available_fields": ONLY fields clearly extractable or synthesisable from the sample.
-- "suggested_fields": fields present in the sample that the intent might have missed.
-- "missing_fields": fields the intent implies but the source clearly CANNOT provide
-  even via synthesis (the raw content is genuinely absent).
-- Base ALL findings on the sample content — do not invent.
-"""
-
-_DESIGN_SKILL_PROMPT = """\
-You are a Knowledge Builder Framework skill architect. Design a complete skill from
-the user's intent, the source capability inventory, the artifact layout, and the
-existing reusable KB cards.
-
-Persona: {persona}
-Normalised intent: {normalised_intent}
-Source capability inventory: {source_capability}
-Artifact layout hint (may be null): {artifact_layout}
-Existing reusable KB cards: {existing_kb_cards}
-
-Persona guidance — canonical key fields for this persona:
-{persona_key_fields}
-
-Persona extraction style:
-{persona_extraction_style}
-
-Worked example of a well-designed field for this persona:
-{persona_few_shot_example}
-
-Produce a single JSON design object:
-{{
-  "schema": {{
-    "title": "skill_name",
-    "properties": {{
-      "field_name": {{
-        "type": "string|array|integer|boolean",
-        "description": "precise 1-2 sentence extraction instruction",
-        "maxLength": 500
-      }}
-    }},
-    "required": ["field1", "field2"]
-  }},
-  "source_bindings": {{
-    "field_name": ["source_id1"]
-  }},
-  "workflow_shape": {{
-    "output_format": "pptx|docx|markdown|email|slack",
-    "layout": "weekly_exec_review_v1 | default",
-    "trigger": {{"on_request": true, "schedule": "cron_or_null"}},
-    "retriever": "search_wiki"
-  }},
-  "reuse_plan": {{
-    "covered": {{"field": "existing_kb_name"}},
-    "gaps": ["field1", "field2"]
-  }},
-  "unsupportable_fields": [
-    {{"field": "field_name", "reason": "why no source can provide this"}}
-  ],
-  "blocking_questions": [
-    "questions whose answers would change the schema structure — must resolve before review"
-  ],
-  "open_questions": [
-    "cosmetic questions that can be noted without blocking — show at REVIEW_DESIGN"
-  ]
-}}
-
-Rules:
-- Include fields that at least one source can support with confidence "high", "medium",
-  or "synthesisable". Do NOT exclude synthesisable fields — they are extractable.
-- For fields with confidence="synthesisable": the extraction instruction MUST explicitly
-  state "Derive this value by [aggregating / combining / summarising] the following
-  content: [specific source element, e.g. WBS table rows flagged as blocked]."
-  A synthesisable field with no aggregation instruction in its description is a prompt
-  defect — it will cause the LLM to fail or hallucinate at extraction time.
-- Fields with confidence="low" or genuinely "missing" from all sources: exclude them
-  or place them in "unsupportable_fields" with a clear reason.
-- Source bindings must reference source IDs from the capability inventory.
-- Reuse plan covers must reference real KB cards from "existing_kb_cards".
-- If artifact layout is provided, align the output_format and layout accordingly.
-- Choose "weekly_exec_review_v1" layout only for exec-review PPTX skills.
-- "required" list should contain only fields critical to the skill's purpose.
-- maxLength: 200 for IDs/statuses, 500 for summaries, 2000 for detailed content.
-- "blocking_questions": ONLY include questions where the answer would change the schema
-  structure, field types, or source bindings. These trigger CLARIFY before REVIEW_DESIGN.
-- "open_questions": advisory items — show at REVIEW_DESIGN but do not block.
-- Persona key fields above are strong hints — always attempt to include them if the
-  source capability inventory can support them.
-"""
-
-_REVIEW_DESIGN_REPLAN_PROMPT = """\
-You are a Knowledge Builder Framework skill architect. The user wants to modify the
-current skill design. Return ONLY the changes needed as a diff object.
-
-Current design: {current_design}
-User edit request: "{edit_request}"
-Updated source capability (if sources changed): {updated_source_capability}
-
-Return ONLY a JSON diff object with keys matching what changed:
-{{
-  "schema_add": {{"field_name": {{"type": "...", "description": "...", "maxLength": 500}}}},
-  "schema_remove": ["field_to_remove"],
-  "schema_update": {{"field_name": {{"description": "updated instruction"}}}},
-  "source_bindings_add": {{"new_field": ["source_id"]}},
-  "source_bindings_remove": ["field_to_unbind"],
-  "workflow_shape_update": {{"layout": "new_layout"}},
-  "reuse_plan_update": {{"covered": {{}}, "gaps": ["field1"]}},
-  "open_questions": ["any new questions from the edit"]
-}}
-
-Rules:
-- Only include keys that actually change — omit unchanged sections.
-- If the edit request is trivial (rename, description change), return only the
-  affected field in schema_update.
-- If new sources must be added (the edit implies data not in the inventory),
-  add an open_question noting the source gap.
-"""
-
-_EVAL_JUDGE_PROMPT = """\
-You are a Knowledge Builder Framework faithfulness judge. Determine whether an
-extracted field value is faithfully grounded in the source document snippet.
-
-Field: {field_name}
-Extraction instruction: {field_description}
-Extracted value: {extracted_value}
-Source snippet: {source_snippet}
-
-Return ONLY a JSON object:
-{{
-  "faithful": true | false,
-  "confidence": "high | medium | low",
-  "reason": "1 sentence explanation"
-}}
-
-Rules:
-- "faithful" = true if the extracted value is directly supported by the source snippet.
-- "faithful" = false if the extracted value contains information NOT present in the snippet.
-- Paraphrasing is acceptable; exact wording is not required.
-- If the extracted value is empty/null and the field is optional, mark faithful=true.
-- Base the judgment ONLY on the source snippet provided — do not use outside knowledge.
-"""
-
-# ADR-028 Item 3: CLARIFY state prompt.
-# Emits conversational prose the human can read and respond to — NOT a JSON blob.
-# The handler asks one blocking question per turn and waits for the user's answer.
-_CLARIFY_PROMPT = """\
-Before I proceed, I need to clarify one thing:
-
-{question}
-
-Please provide a specific answer. I will use your response to design the skill correctly.
-(You can type 'skip' to proceed with my best assumption — but be aware this may affect
-the quality of the extraction schema.)
-"""
-
-# ---------------------------------------------------------------------------
-# ADR-029 S6: Failure-class classifier prompt (S6-pending, not yet wired).
-#
-# PURPOSE: Receives the comparator gap report, the full source capability
-# inventory (with synthesisable confidence tags), and the current schema.
-# Returns a structured failure_class label + per-class evidence + confidence.
-# The routing map in S6 translates the label to a target state — the LLM
-# never picks the target state directly.
-#
-# VALIDATION GATE: This prompt MUST pass the gate test in
-# framework/tests/unit/test_failure_classifier_gate.py (gold case:
-# tpm.26ai_fa_db_upgrade_to_26ai_pptx — WBS content exists in source but
-# schema never asked for it → correct label = MISSING_FIELDS, NOT
-# SOURCE_COVERAGE) before being wired into _handle_eval_response at S6.
-#
-# INPUT CONTRACT (mandatory — S6 must honor all five inputs):
-#   {normalised_intent}   — the normalised intent dict from CAPTURE_INTENT
-#   {schema_properties}   — the current schema properties (JSON)
-#   {capability_inventory}— the full INSPECT_SOURCES output per source,
-#                           including available_fields with confidence tags
-#                           (especially synthesisable ones)
-#   {gap_report}          — the ArtifactComparator gap_report string
-#   {missing_sections}    — list of missing section names from the comparator
-#   {thin_sections}       — list of thin section names from the comparator
-#
-# DO NOT wire this into _handle_eval_response until the gate test passes.
-# The S6 seam in _handle_eval_response is labeled: # TODO-S6
-# ---------------------------------------------------------------------------
-_FAILURE_CLASSIFIER_PROMPT = """\
-You are a Knowledge Builder Framework failure-class classifier. Your job is to
-diagnose WHY a produced artifact does not match the reference, and return a
-structured, auditable classification so the framework can route the user to the
-correct fix state.
-
-=== INPUTS ===
-
-Normalised intent:
-{normalised_intent}
-
-Current schema (fields the skill was designed to extract):
-{schema_properties}
-
-Source capability inventory (what each source can provide, with confidence levels):
-{capability_inventory}
-
-Comparator gap report:
-{gap_report}
-
-Missing sections (present in reference, absent from produced artifact):
-{missing_sections}
-
-Thin sections (present in produced artifact but far less content than reference):
-{thin_sections}
-
-=== FAILURE CLASSES ===
-
-Choose exactly ONE failure class from this list:
-
-- MISSING_FIELDS: The missing/thin sections are absent because the SCHEMA never
-  included fields for them. The source capability inventory shows these fields
-  ARE available (confidence=high, medium, or synthesisable) — the data exists
-  in the source but the schema never asked for it.
-
-- THIN_FIELDS: The fields ARE in the schema, but their extraction instructions
-  produce thin or empty output. The source capability inventory shows the content
-  IS available (confidence=synthesisable is common here — the LLM must aggregate
-  across multiple rows/items but the instruction does not say so).
-
-- WRONG_LAYOUT: The required sections/fields are present in the schema and the
-  source, but the output artifact has wrong ordering, missing slide structure,
-  wrong column arrangement, or incorrect section grouping.
-
-- SOURCE_COVERAGE: The missing sections correspond to fields that the source
-  capability inventory marks as confidence=missing or confidence=low with reason
-  "content genuinely absent from source". The content does NOT exist in the
-  source pages in any form — not even as synthesisable fragments.
-
-- WRONG_SOURCE: A different source page or Confluence space likely has the
-  required content. The current source pages are the wrong ones — the content
-  exists somewhere else, not in the currently configured sources.
-
-- UNSUPPORTABLE: The missing content cannot be derived from any configured source
-  at all, even with synthesis. Human judgment is required. No automated fix will
-  help.
-
-=== CRITICAL REASONING RULE (anti-bias guard) ===
-
-Before choosing SOURCE_COVERAGE, you MUST verify: does the source capability
-inventory show confidence=synthesisable for ANY field related to the missing
-section? If YES, the content IS present in the source — it just requires synthesis
-(aggregation/combination) from scattered elements. In that case the correct class
-is MISSING_FIELDS (the schema never asked for the synthesis) or THIN_FIELDS
-(the schema asked for it but the instruction did not specify the synthesis logic).
-
-"No verbatim labelled row for X" does NOT mean the source lacks X. If the
-capability inventory shows synthesisable evidence (e.g. WBS table rows with
-status/notes/risk data), the content EXISTS. The failure is in the schema or
-extraction instruction — NOT in the source coverage.
-
-Only choose SOURCE_COVERAGE if the capability inventory explicitly shows
-confidence=missing or confidence=low with a reason stating the content is
-genuinely absent (e.g. "source page has no risk section", "no milestone dates
-found anywhere in the page").
-
-=== REQUIRED OUTPUT ===
-
-Return ONLY a valid JSON object with exactly these fields:
-
-{{
-  "failure_class": "MISSING_FIELDS|THIN_FIELDS|WRONG_LAYOUT|SOURCE_COVERAGE|WRONG_SOURCE|UNSUPPORTABLE",
-  "confidence": "high|medium|low",
-  "evidence": "Concrete reasoning (2-4 sentences). MUST reference specific fields
-               from the capability inventory and schema. For example: 'The capability
-               inventory shows risks (confidence=synthesisable, evidence=WBS rows with
-               blocked/at-risk notes). The schema has no risks field. Therefore the fix
-               is to add the field to the schema, not add more source pages.'",
-  "alternative_class": "the second most likely failure class",
-  "why_not_alternative": "1-2 sentences explaining why the alternative class is
-                          ruled out. MUST cite the capability inventory evidence
-                          that makes the alternative implausible."
-}}
-
-Rules:
-- failure_class and confidence are REQUIRED — do not omit them.
-- evidence and why_not_alternative are REQUIRED and must cite specific inventory entries.
-- If confidence=low, you are uncertain — note the ambiguity in evidence.
-- Do NOT choose SOURCE_COVERAGE unless the capability inventory explicitly confirms
-  the content is absent from all sources (confidence=missing with clear reason).
-- The routing map (code, not your choice) will translate your failure_class to a
-  target state. Your job is diagnosis, not routing.
-"""
+# ADR-030 C1: All prompt constants moved to framework/config/prompts/skill_builder.yaml.
+# Use get_registry().get_prompt(prompt_id, ...) at each call site.
 
 # ---------------------------------------------------------------------------
 # ADR-029 Phase 2 (S6): constrained routing map + guardrail constants
@@ -1204,25 +701,36 @@ class SkillBuilderConversation:
         intent = self._data.intent_description
         persona = self._data.persona
 
-        # ADR-028 Item 1 (S4): load persona prompt fragments for CAPTURE_INTENT
-        persona_frags = _load_persona_prompt_fragments(persona)
-        key_fields_text = (
-            ", ".join(persona_frags.get("key_fields", []))
-            if persona_frags.get("key_fields")
-            else "(none specified)"
-        )
-
-        prompt = _CAPTURE_INTENT_PROMPT.format(
-            persona=persona,
-            intent=intent,
-            persona_key_fields=key_fields_text,
-        )
+        # ADR-030 C1: capture_intent prompt via registry.
+        # persona= triggers overlay resolution for persona_key_fields from persona_overlays.yaml.
+        # For unknown personas not in persona_overlays.yaml, the overlay falls through (WARNING)
+        # and we supply empty-string defaults to preserve the old graceful-degradation behavior.
+        from .prompt_registry import MissingVarsError as _MissingVarsError
+        try:
+            spec = get_registry().get_prompt(
+                "capture_intent",
+                persona=persona,
+                intent=intent,
+            )
+        except _MissingVarsError:
+            # Unknown persona: overlay supplied no persona_key_fields — use empty defaults
+            log.warning(
+                "_advance_to_capture_intent: unknown persona %r has no overlay — "
+                "degrading to empty persona_key_fields",
+                persona,
+            )
+            spec = get_registry().get_prompt(
+                "capture_intent",
+                persona=persona,
+                intent=intent,
+                persona_key_fields="(none specified)",
+            )
         try:
             result = self._llm.chat(
-                model="synthesis",
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                max_tokens=1024,
+                model=spec.model,
+                messages=[{"role": "user", "content": spec.text}],
+                response_format=spec.response_format,
+                max_tokens=spec.max_tokens,
             )
             raw = result.get("text", "") if isinstance(result, dict) else str(result)
             import re as _re
@@ -1356,7 +864,8 @@ class SkillBuilderConversation:
 
         progress_note = f"({resolved_count + 1}/{total})" if total > 1 else ""
 
-        message = _CLARIFY_PROMPT.format(question=question)
+        # ADR-030 C1: clarify prompt via registry (model=none; only .text is used)
+        message = get_registry().get_prompt("clarify", question=question).text
         if progress_note:
             message = f"Clarification {progress_note}:\n\n{question}\n\nPlease answer so I can proceed."
 
@@ -1537,7 +1046,9 @@ class SkillBuilderConversation:
                 "Per ADR-027 no-stub-mode policy."
             )
 
-        prompt = _CONFIGURE_SOURCES_SUGGEST_PROMPT.format(
+        # ADR-030 C1: configure_sources prompt via registry
+        spec = get_registry().get_prompt(
+            "configure_sources",
             persona=self._data.persona,
             normalised_intent=json.dumps(self._data.normalised_intent, indent=2),
             adapter_list=json.dumps(adapter_list, indent=2),
@@ -1545,10 +1056,10 @@ class SkillBuilderConversation:
         )
         try:
             result = self._llm.chat(
-                model="synthesis",
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                max_tokens=1024,
+                model=spec.model,
+                messages=[{"role": "user", "content": spec.text}],
+                response_format=spec.response_format,
+                max_tokens=spec.max_tokens,
             )
             raw = result.get("text", "") if isinstance(result, dict) else str(result)
             import re as _re
@@ -1730,7 +1241,9 @@ class SkillBuilderConversation:
                         break
                 sample_content = "\n\n".join(sample_parts)
 
-                prompt = _INSPECT_SOURCES_PROMPT.format(
+                # ADR-030 C1: inspect_sources prompt via registry
+                spec = get_registry().get_prompt(
+                    "inspect_sources",
                     source_id=cache_key,
                     persona=self._data.persona,
                     normalised_intent=json.dumps(self._data.normalised_intent, indent=2),
@@ -1738,10 +1251,10 @@ class SkillBuilderConversation:
                 )
                 try:
                     result = self._llm.chat(
-                        model="synthesis",
-                        messages=[{"role": "user", "content": prompt}],
-                        response_format={"type": "json_object"},
-                        max_tokens=2048,
+                        model=spec.model,
+                        messages=[{"role": "user", "content": spec.text}],
+                        response_format=spec.response_format,
+                        max_tokens=spec.max_tokens,
                     )
                     raw = result.get("text", "") if isinstance(result, dict) else str(result)
                     import re as _re
@@ -2032,33 +1545,47 @@ class SkillBuilderConversation:
             log.warning("_run_design_skill: could not load ShimKb cards: %s", exc)
             cards_summary = []
 
-        # ADR-028 Item 1 (S4): load persona prompt fragments; graceful degradation
-        # if persona not in YAML (logs warning, uses empty strings).
-        persona_frags = _load_persona_prompt_fragments(self._data.persona)
-        key_fields_text = (
-            ", ".join(persona_frags.get("key_fields", []))
-            if persona_frags.get("key_fields")
-            else "(none specified — use intent-driven fields)"
-        )
-
-        prompt = _DESIGN_SKILL_PROMPT.format(
-            persona=self._data.persona,
+        # ADR-030 C1: design_skill prompt via registry.
+        # persona= triggers overlay resolution for persona_key_fields,
+        # persona_extraction_style, persona_few_shot_example from persona_overlays.yaml.
+        # For unknown personas not in persona_overlays.yaml, the overlay falls through (WARNING)
+        # and we supply empty-string defaults to preserve the old graceful-degradation behavior.
+        from .prompt_registry import MissingVarsError as _MissingVarsError
+        _design_base_kwargs = dict(
             normalised_intent=json.dumps(self._data.normalised_intent, indent=2),
             source_capability=json.dumps(self._data.source_capability, indent=2),
             artifact_layout=json.dumps(self._data.artifact_layout, indent=2)
             if self._data.artifact_layout
             else "null",
             existing_kb_cards=json.dumps(cards_summary, indent=2),
-            persona_key_fields=key_fields_text,
-            persona_extraction_style=persona_frags.get("extraction_style", ""),
-            persona_few_shot_example=persona_frags.get("few_shot_example", ""),
         )
         try:
+            spec = get_registry().get_prompt(
+                "design_skill",
+                persona=self._data.persona,
+                **_design_base_kwargs,
+            )
+        except _MissingVarsError:
+            # Unknown persona: overlay supplied no persona fragment vars — use empty defaults
+            log.warning(
+                "_run_design_skill: unknown persona %r has no overlay — "
+                "degrading to empty persona fragment vars",
+                self._data.persona,
+            )
+            spec = get_registry().get_prompt(
+                "design_skill",
+                persona=self._data.persona,
+                **_design_base_kwargs,
+                persona_key_fields="(none specified — use intent-driven fields)",
+                persona_extraction_style="",
+                persona_few_shot_example="",
+            )
+        try:
             result = self._llm.chat(
-                model="synthesis",
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                max_tokens=4096,
+                model=spec.model,
+                messages=[{"role": "user", "content": spec.text}],
+                response_format=spec.response_format,
+                max_tokens=spec.max_tokens,
             )
             raw = result.get("text", "") if isinstance(result, dict) else str(result)
             import re as _re
@@ -2074,7 +1601,7 @@ class SkillBuilderConversation:
         if "schema" not in design or "properties" not in design.get("schema", {}):
             raise RuntimeError(
                 "DESIGN_SKILL: LLM returned an invalid design (missing schema.properties). "
-                "This is a prompt engineering bug — check _DESIGN_SKILL_PROMPT."
+                "This is a prompt engineering bug — check design_skill in skill_builder.yaml."
             )
 
         self._data.design = design
@@ -2371,17 +1898,19 @@ class SkillBuilderConversation:
                 "REVIEW_DESIGN replan requires an LLM client. "
                 "Per ADR-027 no-stub-mode policy."
             )
-        prompt = _REVIEW_DESIGN_REPLAN_PROMPT.format(
+        # ADR-030 C1: review_design_replan prompt via registry
+        spec = get_registry().get_prompt(
+            "review_design_replan",
             current_design=json.dumps(self._data.design, indent=2),
             edit_request=edit_request,
             updated_source_capability=json.dumps(self._data.source_capability, indent=2),
         )
         try:
             result = self._llm.chat(
-                model="synthesis",
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                max_tokens=2048,
+                model=spec.model,
+                messages=[{"role": "user", "content": spec.text}],
+                response_format=spec.response_format,
+                max_tokens=spec.max_tokens,
             )
             raw = result.get("text", "") if isinstance(result, dict) else str(result)
             import re as _re
@@ -2651,7 +2180,9 @@ class SkillBuilderConversation:
                     ctx += f"\n  Sample content: {body[:200]}"
                 context_lines.append(ctx)
 
-            prompt = _ANALYZE_ARTIFACT_PROMPT.format(
+            # ADR-030 C1: analyze_artifact prompt via registry (legacy path — in-flight sessions only)
+            spec = get_registry().get_prompt(
+                "analyze_artifact",
                 persona=self._data.persona or "unknown",
                 intent=self._data.intent_description or "",
                 artifact_type=artifact_type,
@@ -2659,10 +2190,10 @@ class SkillBuilderConversation:
             )
 
             result = self._llm.chat(
-                model="synthesis",
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                max_tokens=2048,
+                model=spec.model,
+                messages=[{"role": "user", "content": spec.text}],
+                response_format=spec.response_format,
+                max_tokens=spec.max_tokens,
             )
             raw = result["text"] if isinstance(result, dict) else str(result)
 
@@ -4166,7 +3697,9 @@ Rules:
                 if not val:
                     continue
                 faithfulness_total += 1
-                judge_prompt = _EVAL_JUDGE_PROMPT.format(
+                # ADR-030 C1: eval_judge prompt via registry
+                judge_spec = get_registry().get_prompt(
+                    "eval_judge",
                     field_name=fname,
                     field_description=fspec.get("description", "")[:200],
                     extracted_value=str(val)[:300],
@@ -4174,10 +3707,10 @@ Rules:
                 )
                 try:
                     judge_result_raw = self._llm.chat(
-                        model="synthesis",
-                        messages=[{"role": "user", "content": judge_prompt}],
-                        response_format={"type": "json_object"},
-                        max_tokens=256,
+                        model=judge_spec.model,
+                        messages=[{"role": "user", "content": judge_spec.text}],
+                        response_format=judge_spec.response_format,
+                        max_tokens=judge_spec.max_tokens,
                     )
                     judge_raw = (
                         judge_result_raw.get("text", "")
@@ -4739,8 +4272,11 @@ Rules:
             )
 
         # --- Run the failure-class classifier ---
+        # ADR-030 C1: failure_classifier prompt via registry.
+        # Gate-locked — LockedPromptTamperedError surfaces as hard-fail if checksum drifts.
         schema_properties = (self._data.design or {}).get("schema", {}).get("properties", {})
-        prompt = _FAILURE_CLASSIFIER_PROMPT.format(
+        classifier_spec = get_registry().get_prompt(
+            "failure_classifier",
             normalised_intent=json.dumps(self._data.normalised_intent, indent=2),
             schema_properties=json.dumps(schema_properties, indent=2),
             capability_inventory=json.dumps(self._data.source_capability, indent=2),
@@ -4756,10 +4292,10 @@ Rules:
         )
         try:
             classifier_response = self._llm.chat(
-                model="synthesis",
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                max_tokens=512,
+                model=classifier_spec.model,
+                messages=[{"role": "user", "content": classifier_spec.text}],
+                response_format=classifier_spec.response_format,
+                max_tokens=classifier_spec.max_tokens,
             )
         except Exception as exc:
             log.error("_classify_and_route: LLM call failed: %s", exc)

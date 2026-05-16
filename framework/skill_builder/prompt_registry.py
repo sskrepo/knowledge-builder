@@ -678,8 +678,12 @@ def validate_registry(registry: PromptRegistry) -> None:
 _registry: Optional[PromptRegistry] = None
 _registry_lock = threading.Lock()
 
-# Default prompts directory (relative to this file → repo root / framework / config / prompts)
-_DEFAULT_PROMPTS_DIR = Path(__file__).resolve().parents[2] / "config" / "prompts"
+# Default prompts directory (relative to this file → framework/config/prompts/)
+# prompt_registry.py lives at framework/skill_builder/prompt_registry.py
+#   parents[0] = framework/skill_builder/
+#   parents[1] = framework/
+# So parents[1] / "config" / "prompts" = framework/config/prompts/ (correct)
+_DEFAULT_PROMPTS_DIR = Path(__file__).resolve().parents[1] / "config" / "prompts"
 
 
 def get_registry(prompts_dir: Optional[Path] = None) -> PromptRegistry:

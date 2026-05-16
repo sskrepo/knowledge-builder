@@ -33,7 +33,7 @@ prompts:
     description: "Production render-time extraction prompt for /api/v1/ask workflow output. Extracts structured fields from Confluence pages using the committed skill schema."
     notes: "Template uses {field_lines} (pre-joined with newlines by caller), {user_request} (the user's input string), {snippet} (source text truncated to 24000 chars). These map directly to the f-string variables in the original executor.py _llm_extract_fields method."
     required_vars: [field_lines, user_request, snippet]
-    template: |
+    template: |-
       You are extracting structured fields from a Confluence/wiki page to populate an executive-review presentation. Return a single JSON object with EXACTLY these keys (use empty string "" or empty list [] when a field is genuinely absent — do not invent data):
 
       {field_lines}

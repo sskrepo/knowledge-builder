@@ -1,49 +1,38 @@
-"""P1 — persona_prompts.yaml loader unit tests.
+"""Persona overlay tests — ADR-030 C1 cutover version.
 
-Stream C / QA Engineer — parallel stream for ADR-028/ADR-029 impl-plan P1.
+Originally tested framework/config/persona_prompts.yaml and
+_load_persona_prompt_fragments (ADR-028 S4).  Both were deleted by ADR-030 C1:
 
-PURPOSE
--------
-These tests specify the contract for the ``_load_persona_prompt_fragments``
-loader that Stream A will implement in S4 (framework/skill_builder/conversation.py).
+  - persona_prompts.yaml -> content migrated to
+    framework/config/prompts/persona_overlays.yaml
+  - _load_persona_prompt_fragments() -> replaced by PromptRegistry overlay
+    mechanism (get_registry().get_prompt(prompt_id, persona=..., ...))
 
-TWO CATEGORIES of tests live here:
+This file now validates the equivalent guarantees via the registry:
 
-  (A) YAML-content assertions — these can pass RIGHT NOW because
-      framework/config/persona_prompts.yaml is already committed.  They assert
-      that every required persona stanza is present and non-empty.  These
-      MUST be green before S4 work begins.
+  (A) Overlay-content assertions — verify persona_overlays.yaml has all 9
+      personas, each with non-empty overlay_vars.
+  (B) Registry-integration tests — verify that get_prompt() injects overlay
+      vars correctly for known personas, and degrades gracefully for unknown.
 
-  (B) Loader-function contract tests — these target the
-      ``_load_persona_prompt_fragments`` helper that S4 will implement.  They
-      WILL FAIL until S4 lands; that is expected and correct — they are the
-      executable contract that S4 must satisfy.  Tests are NOT xfail/skip'd;
-      they fail hard so the developer gets an immediate red signal.
-
-Blueprint reference: ADR-028-029-impl-plan.md §P1 and §S4.
-
-PERSONAS UNDER TEST
--------------------
-The nine personas defined in framework/config/persona_prompts.yaml:
-
-  tpm, pm, architect, eng_mgr, developer, ops_eng, ops_mgr,
-  service_owner, kbf_ops
+Blueprint reference: ADR-030 C1 cutover spec.
 """
 from __future__ import annotations
 
-import importlib
 import logging
 from pathlib import Path
 
 import pytest
 import yaml
 
+from framework.skill_builder.prompt_registry import get_registry, MissingVarsError
+
 # ---------------------------------------------------------------------------
-# Paths
+# Constants
 # ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-PERSONA_PROMPTS_YAML = REPO_ROOT / "framework" / "config" / "persona_prompts.yaml"
+PERSONA_OVERLAYS_YAML = REPO_ROOT / "framework" / "config" / "prompts" / "persona_overlays.yaml"
 
 EXPECTED_PERSONAS = [
     "tpm",
@@ -57,295 +46,253 @@ EXPECTED_PERSONAS = [
     "kbf_ops",
 ]
 
-REQUIRED_KEYS = ["key_fields", "extraction_style", "few_shot_example"]
+REQUIRED_OVERLAY_VARS = [
+    "persona_key_fields",
+    "persona_extraction_style",
+    "persona_few_shot_example",
+]
+
+# Prompts that accept persona overlays
+OVERLAY_PROMPT_IDS = ["capture_intent", "design_skill"]
+
+# Minimal kwargs so overlay-using prompts can be rendered without MissingVarsError
+# (the overlay provides persona_key_fields / persona_extraction_style / persona_few_shot_example;
+# the caller must supply the non-overlay required_vars)
+_CAPTURE_INTENT_BASE = dict(intent="weekly exec review")
+_DESIGN_SKILL_BASE = dict(
+    normalised_intent='{"output_kind": "pptx"}',
+    source_capability="[]",
+    artifact_layout="null",
+    existing_kb_cards="[]",
+)
 
 
 # ---------------------------------------------------------------------------
-# (A) YAML-content assertions — MUST BE GREEN NOW
-#     persona_prompts.yaml is already committed; these validate its content.
+# (A) Overlay YAML content assertions
 # ---------------------------------------------------------------------------
 
 
-class TestPersonaPromptsYamlContent:
-    """Assert that the committed YAML is structurally complete.
+class TestPersonaOverlaysYamlContent:
+    """Assert that persona_overlays.yaml is structurally complete.
 
-    These tests do NOT import conversation.py. They load the YAML directly.
-    They MUST PASS immediately because the file is already committed.
-    Any red result here indicates a content defect in persona_prompts.yaml itself.
+    These tests load the YAML directly, without importing conversation.py.
+    They MUST PASS because persona_overlays.yaml is committed.
+    Any red result indicates a content defect in the YAML itself.
     """
 
     @pytest.fixture(scope="class")
     def yaml_data(self):
-        assert PERSONA_PROMPTS_YAML.exists(), (
-            f"persona_prompts.yaml not found at {PERSONA_PROMPTS_YAML}. "
-            "This file must be committed before tests run."
+        assert PERSONA_OVERLAYS_YAML.exists(), (
+            f"persona_overlays.yaml not found at {PERSONA_OVERLAYS_YAML}. "
+            "This file must be committed — it absorbed persona_prompts.yaml in ADR-030 C1."
         )
-        raw = PERSONA_PROMPTS_YAML.read_text(encoding="utf-8")
+        raw = PERSONA_OVERLAYS_YAML.read_text(encoding="utf-8")
         data = yaml.safe_load(raw)
-        assert isinstance(data, dict), "persona_prompts.yaml must be a YAML mapping at the top level"
-        return data
+        assert isinstance(data, dict), "persona_overlays.yaml must be a YAML mapping at the top level"
+        # The file has a top-level 'personas' key
+        personas = data.get("personas", {})
+        assert isinstance(personas, dict), "'personas' key must be a mapping"
+        return personas
 
     def test_yaml_file_exists(self):
-        assert PERSONA_PROMPTS_YAML.exists(), (
-            f"persona_prompts.yaml missing at expected path: {PERSONA_PROMPTS_YAML}"
+        assert PERSONA_OVERLAYS_YAML.exists(), (
+            f"persona_overlays.yaml missing at expected path: {PERSONA_OVERLAYS_YAML}"
+        )
+
+    def test_old_yaml_deleted(self):
+        old_yaml = REPO_ROOT / "framework" / "config" / "persona_prompts.yaml"
+        assert not old_yaml.exists(), (
+            f"persona_prompts.yaml still exists at {old_yaml}. "
+            "ADR-030 C1 requires it to be deleted (content migrated to persona_overlays.yaml)."
         )
 
     @pytest.mark.parametrize("persona", EXPECTED_PERSONAS)
     def test_persona_stanza_present(self, yaml_data, persona):
-        """Every expected persona must have a top-level key in the YAML."""
+        """Every expected persona must have a stanza in persona_overlays.yaml."""
         assert persona in yaml_data, (
-            f"Persona '{persona}' is missing from persona_prompts.yaml. "
+            f"Persona '{persona}' is missing from persona_overlays.yaml. "
             f"Present keys: {list(yaml_data.keys())}"
         )
 
     @pytest.mark.parametrize("persona", EXPECTED_PERSONAS)
-    @pytest.mark.parametrize("required_key", REQUIRED_KEYS)
-    def test_required_key_present_for_persona(self, yaml_data, persona, required_key):
-        """Each persona stanza must contain key_fields, extraction_style, and few_shot_example."""
+    def test_applies_to_present(self, yaml_data, persona):
+        """Each stanza must have an applies_to list."""
         stanza = yaml_data.get(persona, {})
-        assert required_key in stanza, (
-            f"Persona '{persona}' is missing required key '{required_key}' "
-            f"in persona_prompts.yaml. Present keys: {list(stanza.keys())}"
+        assert "applies_to" in stanza, (
+            f"Persona '{persona}' missing 'applies_to' in persona_overlays.yaml"
+        )
+        assert isinstance(stanza["applies_to"], list) and len(stanza["applies_to"]) > 0, (
+            f"Persona '{persona}': applies_to must be a non-empty list"
         )
 
     @pytest.mark.parametrize("persona", EXPECTED_PERSONAS)
-    def test_key_fields_is_non_empty_list(self, yaml_data, persona):
-        """key_fields must be a non-empty list of strings."""
-        key_fields = yaml_data[persona]["key_fields"]
-        assert isinstance(key_fields, list), (
-            f"Persona '{persona}': key_fields must be a list, got {type(key_fields).__name__}"
-        )
-        assert len(key_fields) > 0, (
-            f"Persona '{persona}': key_fields must be non-empty"
-        )
-        for item in key_fields:
-            assert isinstance(item, str), (
-                f"Persona '{persona}': each key_fields entry must be a string, got {type(item).__name__}: {item!r}"
-            )
-
-    @pytest.mark.parametrize("persona", EXPECTED_PERSONAS)
-    def test_extraction_style_is_non_empty_string(self, yaml_data, persona):
-        """extraction_style must be a non-empty string."""
-        style = yaml_data[persona]["extraction_style"]
-        # YAML block scalars (|, >) parse to str; strip to catch whitespace-only values
-        assert isinstance(style, str), (
-            f"Persona '{persona}': extraction_style must be a string, got {type(style).__name__}"
-        )
-        assert style.strip(), (
-            f"Persona '{persona}': extraction_style must not be empty or whitespace-only"
+    def test_overlay_vars_present(self, yaml_data, persona):
+        """Each stanza must have overlay_vars."""
+        stanza = yaml_data.get(persona, {})
+        assert "overlay_vars" in stanza, (
+            f"Persona '{persona}' missing 'overlay_vars' in persona_overlays.yaml"
         )
 
     @pytest.mark.parametrize("persona", EXPECTED_PERSONAS)
-    def test_few_shot_example_is_non_empty_string(self, yaml_data, persona):
-        """few_shot_example must be a non-empty string."""
-        example = yaml_data[persona]["few_shot_example"]
-        assert isinstance(example, str), (
-            f"Persona '{persona}': few_shot_example must be a string, got {type(example).__name__}"
+    @pytest.mark.parametrize("var_key", REQUIRED_OVERLAY_VARS)
+    def test_required_overlay_var_present(self, yaml_data, persona, var_key):
+        """Each persona overlay_vars must contain all three required vars."""
+        overlay_vars = yaml_data.get(persona, {}).get("overlay_vars", {})
+        assert var_key in overlay_vars, (
+            f"Persona '{persona}' overlay_vars missing '{var_key}' in persona_overlays.yaml. "
+            f"Present vars: {list(overlay_vars.keys())}"
         )
-        assert example.strip(), (
-            f"Persona '{persona}': few_shot_example must not be empty or whitespace-only"
+
+    @pytest.mark.parametrize("persona", EXPECTED_PERSONAS)
+    def test_persona_key_fields_nonempty(self, yaml_data, persona):
+        """persona_key_fields must be a non-empty string."""
+        val = yaml_data[persona]["overlay_vars"].get("persona_key_fields", "")
+        assert isinstance(val, str) and val.strip(), (
+            f"Persona '{persona}': persona_key_fields must be non-empty string"
+        )
+
+    @pytest.mark.parametrize("persona", EXPECTED_PERSONAS)
+    def test_persona_extraction_style_nonempty(self, yaml_data, persona):
+        """persona_extraction_style must be a non-empty string."""
+        val = yaml_data[persona]["overlay_vars"].get("persona_extraction_style", "")
+        assert isinstance(val, str) and val.strip(), (
+            f"Persona '{persona}': persona_extraction_style must be non-empty string"
+        )
+
+    @pytest.mark.parametrize("persona", EXPECTED_PERSONAS)
+    def test_persona_few_shot_example_nonempty(self, yaml_data, persona):
+        """persona_few_shot_example must be a non-empty string."""
+        val = yaml_data[persona]["overlay_vars"].get("persona_few_shot_example", "")
+        assert isinstance(val, str) and val.strip(), (
+            f"Persona '{persona}': persona_few_shot_example must be non-empty string"
+        )
+
+    @pytest.mark.parametrize("persona", EXPECTED_PERSONAS)
+    def test_persona_key_fields_has_at_least_three_comma_separated(self, yaml_data, persona):
+        """persona_key_fields should list at least 3 fields (comma-separated or newline-separated)."""
+        val = yaml_data[persona]["overlay_vars"].get("persona_key_fields", "")
+        # Count commas as field separators
+        count = len([f.strip() for f in val.split(",") if f.strip()])
+        assert count >= 3, (
+            f"Persona '{persona}': persona_key_fields has only {count} entries; "
+            "expected at least 3 for meaningful persona guidance."
         )
 
     def test_exactly_nine_personas_defined(self, yaml_data):
-        """The YAML must define exactly the 9 expected personas.
-
-        No extra personas, no missing ones.  Extra stanzas indicate drift
-        between the YAML and the expected set.
-        """
+        """The overlay YAML must define exactly the 9 expected personas."""
         yaml_personas = set(yaml_data.keys())
         expected_set = set(EXPECTED_PERSONAS)
         missing = expected_set - yaml_personas
         extra = yaml_personas - expected_set
-        assert not missing, f"Missing personas in YAML: {sorted(missing)}"
+        assert not missing, f"Missing personas in overlay YAML: {sorted(missing)}"
         assert not extra, (
-            f"Unexpected personas in YAML (not in EXPECTED_PERSONAS): {sorted(extra)}. "
-            "Add them to EXPECTED_PERSONAS in this test file if they are intentional."
+            f"Unexpected personas in overlay YAML: {sorted(extra)}. "
+            "Add them to EXPECTED_PERSONAS in this test file if intentional."
         )
 
-    @pytest.mark.parametrize("persona", EXPECTED_PERSONAS)
-    def test_key_fields_has_at_least_three_entries(self, yaml_data, persona):
-        """Each persona should declare at least 3 key fields (minimum useful guidance)."""
-        key_fields = yaml_data[persona]["key_fields"]
-        assert len(key_fields) >= 3, (
-            f"Persona '{persona}': key_fields has only {len(key_fields)} entries; "
-            "expected at least 3 for meaningful persona guidance."
-        )
-
-
-# ---------------------------------------------------------------------------
-# (B) Loader-function contract tests — WILL FAIL until Stream A S4 lands.
-#
-#     These tests target:
-#       framework.skill_builder.conversation._load_persona_prompt_fragments
-#
-#     The loader is specified in ADR-028-029-impl-plan.md §S4 as:
-#       def _load_persona_prompt_fragments(persona: str) -> dict
-#     returning a dict with keys: key_fields, extraction_style, few_shot_example.
-#     Unknown persona => empty-string defaults + logged warning (graceful degradation).
-#
-#     Status: AWAITING STREAM A S4
-# ---------------------------------------------------------------------------
-
-
-def _import_loader():
-    """Attempt to import the loader from its blueprint-specified location.
-
-    Returns the callable, or raises ImportError / AttributeError if S4 has
-    not landed yet.  Test functions call this so the failure is an
-    AttributeError or ImportError with a clear message, not a mysterious crash.
-    """
-    mod = importlib.import_module("framework.skill_builder.conversation")
-    loader = getattr(mod, "_load_persona_prompt_fragments", None)
-    if loader is None:
-        raise AttributeError(
-            "_load_persona_prompt_fragments is not yet defined in "
-            "framework.skill_builder.conversation — awaiting Stream A S4."
-        )
-    return loader
-
-
-class TestPersonaPromptFragmentsLoaderContract:
-    """Contract tests for _load_persona_prompt_fragments (Stream A S4).
-
-    ALL tests in this class will FAIL until S4 lands.  That is expected and
-    correct — they are the executable specification.
-
-    Blueprint contract (ADR-028-029-impl-plan.md §S4):
-      - Reads framework/config/persona_prompts.yaml
-      - Returns dict with keys: key_fields, extraction_style, few_shot_example
-      - Unknown persona => returns dict with empty-string defaults, logs a warning
-      - Must NOT raise for unknown personas
-    """
-
-    @pytest.mark.parametrize("persona", EXPECTED_PERSONAS)
-    def test_known_persona_returns_non_empty_key_fields(self, persona):
-        """Known persona: key_fields must be a non-empty list. AWAITING STREAM A S4."""
-        loader = _import_loader()
-        result = loader(persona)
-        assert isinstance(result, dict), (
-            f"loader('{persona}') must return a dict, got {type(result).__name__}"
-        )
-        key_fields = result.get("key_fields")
-        assert isinstance(key_fields, list) and len(key_fields) > 0, (
-            f"loader('{persona}')['key_fields'] must be a non-empty list, got: {key_fields!r}"
-        )
-
-    @pytest.mark.parametrize("persona", EXPECTED_PERSONAS)
-    def test_known_persona_returns_non_empty_extraction_style(self, persona):
-        """Known persona: extraction_style must be a non-empty string. AWAITING STREAM A S4."""
-        loader = _import_loader()
-        result = loader(persona)
-        style = result.get("extraction_style")
-        assert isinstance(style, str) and style.strip(), (
-            f"loader('{persona}')['extraction_style'] must be a non-empty string, got: {style!r}"
-        )
-
-    @pytest.mark.parametrize("persona", EXPECTED_PERSONAS)
-    def test_known_persona_returns_non_empty_few_shot_example(self, persona):
-        """Known persona: few_shot_example must be a non-empty string. AWAITING STREAM A S4."""
-        loader = _import_loader()
-        result = loader(persona)
-        example = result.get("few_shot_example")
-        assert isinstance(example, str) and example.strip(), (
-            f"loader('{persona}')['few_shot_example'] must be a non-empty string, got: {example!r}"
-        )
-
-    def test_unknown_persona_does_not_raise(self):
-        """Unknown persona must NOT raise any exception. AWAITING STREAM A S4.
-
-        Graceful-but-LOUD degradation: the loader returns empty-string defaults
-        and logs a warning.  It must never raise KeyError, ValueError, etc.
-        """
-        loader = _import_loader()
-        # Must not raise
-        result = loader("unknown_persona_xyzzy_12345")
-        assert isinstance(result, dict), (
-            "loader('unknown_persona_xyzzy_12345') must return a dict, not raise"
-        )
-
-    def test_unknown_persona_returns_empty_string_defaults(self):
-        """Unknown persona returns empty-string defaults for all three keys. AWAITING STREAM A S4.
-
-        The ADR specifies: 'the kwargs default to empty strings and a warning is logged
-        (the prompt degrades gracefully to the current static template).'
-        """
-        loader = _import_loader()
-        result = loader("unknown_persona_xyzzy_12345")
-        # All three keys must exist with falsy values (empty string or empty list)
-        for key in REQUIRED_KEYS:
-            assert key in result, (
-                f"Unknown persona result must contain key '{key}'; got keys: {list(result.keys())}"
-            )
-        # extraction_style and few_shot_example must be empty strings (or falsy)
-        assert not result.get("extraction_style", ""), (
-            f"Unknown persona: extraction_style must be empty string, got: {result.get('extraction_style')!r}"
-        )
-        assert not result.get("few_shot_example", ""), (
-            f"Unknown persona: few_shot_example must be empty string, got: {result.get('few_shot_example')!r}"
-        )
-        # key_fields must be empty list (or falsy)
-        kf = result.get("key_fields", [])
-        assert not kf, (
-            f"Unknown persona: key_fields must be empty list, got: {kf!r}"
-        )
-
-    def test_unknown_persona_logs_warning(self, caplog):
-        """Unknown persona must emit a logged warning. AWAITING STREAM A S4.
-
-        The ADR specifies: 'logs a warning' — the warning must be at WARNING
-        level or above and must mention the unknown persona name.
-        """
-        loader = _import_loader()
-        unknown = "unknown_persona_xyzzy_12345"
-        with caplog.at_level(logging.WARNING, logger="framework.skill_builder.conversation"):
-            loader(unknown)
-
-        # At least one warning record must mention the unknown persona
-        matching = [
-            r for r in caplog.records
-            if r.levelno >= logging.WARNING and unknown in r.getMessage()
-        ]
-        assert matching, (
-            f"Expected a WARNING-level log mentioning '{unknown}' when loading an "
-            f"unknown persona, but no matching log record was found. "
-            f"Log records: {[(r.levelname, r.getMessage()) for r in caplog.records]}"
-        )
-
-    def test_loader_returns_dict_with_all_three_required_keys(self):
-        """Return value must always have exactly (or at least) the three spec keys. AWAITING STREAM A S4."""
-        loader = _import_loader()
-        for persona in EXPECTED_PERSONAS:
-            result = loader(persona)
-            for key in REQUIRED_KEYS:
-                assert key in result, (
-                    f"loader('{persona}') result is missing required key '{key}'. "
-                    f"Returned keys: {list(result.keys())}"
-                )
-
-    def test_loader_is_idempotent_across_calls(self):
-        """Calling the loader twice for the same persona returns identical content. AWAITING STREAM A S4.
-
-        The loader may cache internally (module-level dict) or re-read each time;
-        either is acceptable, but the results must be identical.
-        """
-        loader = _import_loader()
-        result_a = loader("tpm")
-        result_b = loader("tpm")
-        assert result_a == result_b, (
-            "loader('tpm') returned different results on two consecutive calls — "
-            "must be deterministic (idempotent)."
-        )
-
-    def test_loader_tpm_extraction_style_contains_exec_safe(self):
-        """Spot-check: tpm extraction_style must mention exec-safe language. AWAITING STREAM A S4.
-
-        This is grounded in the actual YAML content (already committed).
-        The loader must faithfully return what the YAML says.
-        """
-        loader = _import_loader()
-        result = loader("tpm")
-        style = result.get("extraction_style", "")
+    def test_tpm_extraction_style_contains_exec_safe(self, yaml_data):
+        """Spot-check: tpm extraction_style must mention exec-safe language."""
+        style = yaml_data["tpm"]["overlay_vars"].get("persona_extraction_style", "")
         assert "exec-safe" in style.lower() or "exec safe" in style.lower(), (
-            f"tpm extraction_style must mention 'exec-safe' language "
-            f"(as defined in persona_prompts.yaml), got: {style[:200]!r}"
+            f"tpm persona_extraction_style must mention 'exec-safe' language, got: {style[:200]!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# (B) Registry integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestRegistryOverlayIntegration:
+    """Verify get_prompt() injects overlay vars for known personas.
+
+    These tests use the real registry against the committed YAML store.
+    They replace the old TestPersonaPromptFragmentsLoaderContract tests.
+    """
+
+    @pytest.mark.parametrize("persona", EXPECTED_PERSONAS)
+    def test_capture_intent_renders_without_error_for_known_persona(self, persona):
+        """get_prompt('capture_intent', persona=X, ...) must not raise for known personas."""
+        spec = get_registry().get_prompt("capture_intent", persona=persona, **_CAPTURE_INTENT_BASE)
+        assert spec.text, f"Rendered capture_intent text is empty for persona '{persona}'"
+
+    @pytest.mark.parametrize("persona", EXPECTED_PERSONAS)
+    def test_design_skill_renders_without_error_for_known_persona(self, persona):
+        """get_prompt('design_skill', persona=X, ...) must not raise for known personas."""
+        spec = get_registry().get_prompt("design_skill", persona=persona, **_DESIGN_SKILL_BASE)
+        assert spec.text, f"Rendered design_skill text is empty for persona '{persona}'"
+
+    @pytest.mark.parametrize("persona", EXPECTED_PERSONAS)
+    def test_overlay_vars_injected_into_capture_intent(self, persona):
+        """The persona overlay vars must actually appear in the rendered prompt (no raw placeholders)."""
+        spec = get_registry().get_prompt("capture_intent", persona=persona, **_CAPTURE_INTENT_BASE)
+        assert "{persona_key_fields}" not in spec.text, (
+            f"persona_key_fields placeholder not substituted in capture_intent for persona '{persona}'"
+        )
+
+    @pytest.mark.parametrize("persona", EXPECTED_PERSONAS)
+    def test_overlay_vars_injected_into_design_skill(self, persona):
+        """design_skill placeholders must all be substituted."""
+        spec = get_registry().get_prompt("design_skill", persona=persona, **_DESIGN_SKILL_BASE)
+        for placeholder in ("{persona_key_fields}", "{persona_extraction_style}", "{persona_few_shot_example}"):
+            assert placeholder not in spec.text, (
+                f"{placeholder} not substituted in design_skill for persona '{persona}'"
+            )
+
+    def test_tpm_key_fields_appear_in_capture_intent(self):
+        """tpm overlay must inject orm_status (first key field) into capture_intent text."""
+        spec = get_registry().get_prompt("capture_intent", persona="tpm", **_CAPTURE_INTENT_BASE)
+        assert "orm_status" in spec.text, (
+            "tpm persona_key_fields (including 'orm_status') not injected into capture_intent"
+        )
+
+    def test_tpm_extraction_style_appears_in_design_skill(self):
+        """tpm extraction_style ('exec-safe') must appear in design_skill rendered text."""
+        spec = get_registry().get_prompt("design_skill", persona="tpm", **_DESIGN_SKILL_BASE)
+        assert "exec-safe" in spec.text.lower() or "exec" in spec.text.lower(), (
+            "tpm extraction_style (exec-safe language) not injected into design_skill"
+        )
+
+    def test_unknown_persona_raises_missing_vars_error(self):
+        """Unknown persona has no overlay; registry raises MissingVarsError for required_vars."""
+        with pytest.raises(MissingVarsError):
+            get_registry().get_prompt("capture_intent", persona="unknown_persona_xyz",
+                                      **_CAPTURE_INTENT_BASE)
+
+    def test_unknown_persona_can_be_handled_with_explicit_defaults(self):
+        """Callers can supply empty-string defaults to avoid MissingVarsError for unknown persona."""
+        spec = get_registry().get_prompt(
+            "capture_intent",
+            persona="unknown_persona_xyz",
+            intent="weekly review",
+            persona_key_fields="(none specified)",
+            persona_extraction_style="",
+            persona_few_shot_example="",
+        )
+        assert spec.text, "Should render with explicit empty defaults"
+        assert "(none specified)" in spec.text
+
+    @pytest.mark.parametrize("persona", EXPECTED_PERSONAS)
+    def test_overlay_is_idempotent_across_calls(self, persona):
+        """Two get_prompt calls with the same args must return identical text."""
+        spec_a = get_registry().get_prompt("capture_intent", persona=persona, **_CAPTURE_INTENT_BASE)
+        spec_b = get_registry().get_prompt("capture_intent", persona=persona, **_CAPTURE_INTENT_BASE)
+        assert spec_a.text == spec_b.text, (
+            f"get_prompt('capture_intent', persona='{persona}') returned different text on two calls"
+        )
+
+    def test_caller_supplied_vars_override_overlay(self):
+        """Explicit caller vars win over overlay vars (registry merge rule)."""
+        custom_fields = "my_custom_field_only"
+        spec = get_registry().get_prompt(
+            "capture_intent",
+            persona="tpm",
+            intent="test",
+            persona_key_fields=custom_fields,
+        )
+        assert custom_fields in spec.text, (
+            "Caller-supplied persona_key_fields did not override tpm overlay"
+        )
+        assert "orm_status" not in spec.text, (
+            "tpm overlay persona_key_fields took precedence over caller-supplied value"
         )

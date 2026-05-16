@@ -284,15 +284,17 @@ ALL_VALID_CLASSES = frozenset({
 
 
 def _call_classifier(llm: Any, run_index: int) -> dict:
-    """Feed gold-case inputs to _FAILURE_CLASSIFIER_PROMPT and return parsed result.
+    """Feed gold-case inputs to the failure_classifier prompt and return parsed result.
 
+    ADR-030 C1: imports from registry instead of Python constant.
     Returns dict with keys: failure_class, confidence, evidence,
     alternative_class, why_not_alternative, raw_text.
     """
     sys.path.insert(0, str(REPO_ROOT))
-    from framework.skill_builder.conversation import _FAILURE_CLASSIFIER_PROMPT
+    from framework.skill_builder.prompt_registry import get_registry
 
-    prompt = _FAILURE_CLASSIFIER_PROMPT.format(
+    spec = get_registry().get_prompt(
+        "failure_classifier",
         normalised_intent=json.dumps(GOLD_NORMALISED_INTENT, indent=2),
         schema_properties=json.dumps(GOLD_SCHEMA_MISSING_FIELDS, indent=2),
         capability_inventory=json.dumps(GOLD_CAPABILITY_INVENTORY, indent=2),
@@ -300,14 +302,15 @@ def _call_classifier(llm: Any, run_index: int) -> dict:
         missing_sections=json.dumps(GOLD_MISSING_SECTIONS),
         thin_sections=json.dumps(GOLD_THIN_SECTIONS),
     )
+    prompt = spec.text
 
     log.info("Gate run %d: calling classifier via OCI GenAI...", run_index)
     t0 = time.time()
     result = llm.chat(
-        model="synthesis",
+        model=spec.model,
         messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"},
-        max_tokens=512,
+        response_format=spec.response_format,
+        max_tokens=spec.max_tokens,
     )
     elapsed = time.time() - t0
 
@@ -502,9 +505,14 @@ class TestClassifierPromptContract:
 
     @pytest.fixture(scope="class")
     def prompt_template(self):
+        """Return the raw (un-formatted) failure_classifier template from the YAML registry.
+
+        ADR-030 C1: uses registry._raw_template() instead of the deleted Python constant.
+        The raw template contains the {placeholder} strings needed for structural checks.
+        """
         sys.path.insert(0, str(REPO_ROOT))
-        from framework.skill_builder.conversation import _FAILURE_CLASSIFIER_PROMPT
-        return _FAILURE_CLASSIFIER_PROMPT
+        from framework.skill_builder.prompt_registry import get_registry
+        return get_registry()._raw_template("failure_classifier")
 
     def test_prompt_has_all_required_format_kwargs(self, prompt_template):
         """Prompt must contain all 6 mandatory input variables."""

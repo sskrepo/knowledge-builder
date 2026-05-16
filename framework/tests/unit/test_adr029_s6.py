@@ -33,8 +33,11 @@ from framework.skill_builder.conversation import (
     _EVAL_MAX_ITERATIONS,
     _EVAL_COST_CEILING_USD,
     _ROUTING_MAP,
-    _FAILURE_CLASSIFIER_PROMPT,
 )
+# ADR-030 C1: _FAILURE_CLASSIFIER_PROMPT moved to registry; access via _raw_template
+from framework.skill_builder.prompt_registry import get_registry as _get_registry
+
+_FAILURE_CLASSIFIER_PROMPT = _get_registry()._raw_template("failure_classifier")
 
 
 # ---------------------------------------------------------------------------

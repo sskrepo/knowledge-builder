@@ -2858,21 +2858,25 @@ class TestSynthesisableField:
         S1 extends the confidence taxonomy from three (high/medium/missing) to four
         by adding 'synthesisable'. AWAITING STREAM A S1.
         """
-        from framework.skill_builder.conversation import _INSPECT_SOURCES_PROMPT
-        assert "synthesisable" in _INSPECT_SOURCES_PROMPT, (
-            "'synthesisable' confidence level must be documented in _INSPECT_SOURCES_PROMPT. "
+        # ADR-030 C1: use registry instead of deleted constant
+        from framework.skill_builder.prompt_registry import get_registry
+        raw = get_registry()._raw_template("inspect_sources")
+        assert "synthesisable" in raw, (
+            "'synthesisable' confidence level must be documented in inspect_sources prompt. "
             "S1 must add it to the confidence taxonomy instruction."
         )
 
     def test_design_skill_prompt_allows_synthesisable_fields(self):
-        """_DESIGN_SKILL_PROMPT must include synthesisable in its inclusion rule.
+        """design_skill prompt must include synthesisable in its inclusion rule.
 
         Currently the rule says 'confidence high or medium'. S1 must update it to
         'high, medium, or synthesisable'. AWAITING STREAM A S1.
         """
-        from framework.skill_builder.conversation import _DESIGN_SKILL_PROMPT
-        assert "synthesisable" in _DESIGN_SKILL_PROMPT, (
-            "'synthesisable' must appear in _DESIGN_SKILL_PROMPT inclusion rules. "
+        # ADR-030 C1: use registry instead of deleted constant
+        from framework.skill_builder.prompt_registry import get_registry
+        raw = get_registry()._raw_template("design_skill")
+        assert "synthesisable" in raw, (
+            "'synthesisable' must appear in design_skill prompt inclusion rules. "
             "S1 must update the rule from 'high or medium' to 'high, medium, or synthesisable'."
         )
 
@@ -3159,19 +3163,16 @@ class TestClarifyState:
         return llm
 
     def _run_capture_intent_with_stub_prompt(self, conv):
-        """Call _advance_to_capture_intent with the S4 kwarg stubbed out.
+        """Call _advance_to_capture_intent with the S4 persona overlay fully wired.
 
-        _CAPTURE_INTENT_PROMPT already contains {persona_key_fields} (S4 partial),
-        but the call site hasn't been wired to pass it yet (S4 incomplete).
-        We patch the prompt constant to a simpler template so CLARIFY tests can
-        run independently of S4 completion status.
+        ADR-030 C1: the old approach patched _CAPTURE_INTENT_PROMPT (a module-level
+        constant) to avoid a KeyError from the {persona_key_fields} placeholder that
+        existed before S4 was wired. S4 is now fully wired through the PromptRegistry
+        (persona overlay supplies persona_key_fields automatically). No patching needed.
 
         Returns (turn, error) where error is non-None if _advance_to_clarify raised
         (S3 CLARIFY handler not yet implemented).
         """
-        import framework.skill_builder.conversation as _conv_mod
-        orig = _conv_mod._CAPTURE_INTENT_PROMPT
-        _conv_mod._CAPTURE_INTENT_PROMPT = self._STUB_CAPTURE_INTENT_PROMPT
         try:
             turn = conv._advance_to_capture_intent()
             return turn, None
@@ -3179,8 +3180,6 @@ class TestClarifyState:
             # _advance_to_clarify not yet implemented (S3 incomplete).
             # The state machine tried to route to CLARIFY but the handler is missing.
             return None, exc
-        finally:
-            _conv_mod._CAPTURE_INTENT_PROMPT = orig
 
     def test_clarify_state_constant_exists(self):
         """CLARIFY must be a recognised state in the conversation module. AWAITING STREAM A S3."""
@@ -3547,11 +3546,13 @@ class TestPersonaPromptInjection:
              (format() is not passed persona_key_fields), the call will raise KeyError —
              that is the expected RED state.
         """
-        from framework.skill_builder.conversation import _CAPTURE_INTENT_PROMPT
+        # ADR-030 C1: use registry instead of deleted constant
+        from framework.skill_builder.prompt_registry import get_registry
+        raw = get_registry()._raw_template("capture_intent")
 
-        # (1) Template already has the placeholder (S4 partially landed)
-        assert "{persona_key_fields}" in _CAPTURE_INTENT_PROMPT, (
-            "_CAPTURE_INTENT_PROMPT must contain {persona_key_fields} placeholder. "
+        # (1) Template has the placeholder (verified via registry raw template)
+        assert "{persona_key_fields}" in raw, (
+            "capture_intent prompt must contain {persona_key_fields} placeholder. "
             "S4 must extend the prompt template."
         )
 
