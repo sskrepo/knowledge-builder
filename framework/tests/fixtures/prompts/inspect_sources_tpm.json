@@ -1,0 +1,19 @@
+{
+  "fixture_id": "inspect_sources_tpm",
+  "prompt_id": "inspect_sources",
+  "description": "TPM persona — inspect_sources for the 26ai FA DB Upgrade Confluence project plan page (pageId=20030556732). Sample content is an abbreviated excerpt from the page showing the WBS table structure and metadata fields.",
+  "persona": "tpm",
+  "vars": {
+    "source_id": "confluence:20030556732",
+    "normalised_intent": {
+      "skill_name": "26ai_fa_db_upgrade_to_26ai_pptx",
+      "persona": "tpm",
+      "scope_domains": ["FA DB Upgrade", "26ai"],
+      "output_kind": "pptx",
+      "audience": "exec",
+      "layout_hint": "weekly_exec_review",
+      "description": "Weekly executive review PPTX for the FA DB Upgrade from 19c to 26ai project."
+    },
+    "sample_content": "# FAaaS Project Plan — FA DB Upgrade from 19c to 26ai\n\n## Section 1: Project Metadata\n| Field | Value |\n|---|---|\n| Project Name | FA DB Upgrade from 19c to 26ai |\n| Current Phase | Design and POC |\n| Overall Status | PLANNED |\n| Project Manager | R. Sharma |\n| Start Date | 2026-03-01 |\n| Target Completion | 2026-09-30 |\n\n## Section 3: Objectives and Scope\n**Executive Summary:** Provision new pods running 26ai DB on OCI Compute to replace the existing 19c infrastructure. Zero-downtime migration with rollback capability.\n\n**Business Outcome:** Reduce DB licensing cost by 40%, improve query performance by 2x for OLAP workloads, enable vector search for next-generation FA features.\n\n**Dependencies:** FRE (Repo, NGFABS etc)\n\n## Section 4: Milestones\n| Milestone | Status | Due Date |\n|---|---|---|\n| M1: Architecture design complete | PLANNED | 2026-04-15 |\n| M2: POC on dev environment | PLANNED | 2026-05-30 |\n| M3: SIT | PLANNED | 2026-07-15 |\n| M4: ORM approval | PLANNED | 2026-08-01 |\n| M5: Production cutover | PLANNED | 2026-09-20 |\n\n## Section 5: WBS (Work Breakdown Structure)\n| ID | Task | Status | Owner | Due | Update Notes |\n|---|---|---|---|---|---|\n| 1.0 | Project Initiation | GreenComplete | R. Sharma | 2026-03-15 | |\n| 2.0 | Architecture Design | BlueIN PROGRESS | Arch Team | 2026-04-15 | |\n| 2.3 | Design review sign-off | GreyNOT STARTED | Arch + PM | 2026-04-30 | |\n| 3.0 | Capacity provisioning | GreyNOT STARTED | Infra Ops | 2026-05-15 | OCI quota request filed |\n| 4.0 | ORM/CSSAP Phase | GreyNOT STARTED | TPM | 2026-08-01 | Depends on 2.3 |\n| 4.1 | File ORM/OCI Release Management | GreyNOT STARTED | TPM | 2026-07-15 | |\n| 4.2 | File official CSSAP Record | GreyNOT STARTED | Cloud Security | 2026-07-30 | |\n| 5.0 | External Dependencies (FRE) | BlueIN PROGRESS | FRE Team | 2026-05-31 | 4/29: FRE informed that this deliverable needs additional time. ETA to be finalized. |\n| 5.01 | NGFABS schema compatibility | BlueIN PROGRESS | FRE/Dev | 2026-05-31 | Blocked on FRE resource allocation |\n| 6.0 | ADP Development | BlueIN PROGRESS | Dev Team | 2026-07-01 | |\n| 6.04 | POC environment setup | GreenComplete | Dev Team | 2026-05-01 | POC Completed |\n| 6.04.1 | SUT environment | GreyNOT STARTED | Dev/Infra | 2026-06-01 | SUT will need to start from 05/16 to 06/01 |"
+  }
+}

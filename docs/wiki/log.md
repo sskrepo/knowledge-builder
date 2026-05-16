@@ -4,6 +4,37 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] backend-dev | ADR-030 P3+P4 — prompt_lab harness CLI + fixtures + docs generator
+
+**Task: P3 (harness CLI + fixtures + tests) + P4 (authorskill-prompts.md generator) — combined.**
+
+- Created `framework/tools/__init__.py` and `framework/tools/prompt_lab.py` (standalone CLI, ~380 lines).
+- Implemented all ADR-030-specified subcommands:
+  - `--list`: table of prompt_id, version, model, locked, description (from list_prompts()).
+  - `run <id> --fixture <path>`: live LLM call via OciGenAiLLMClient; prints raw + parsed JSON.
+  - `run ... --dry-run`: format prompt; no LLM call.
+  - `run ... --reload`: calls reg.reload() before run (hot-reload UX win).
+  - `run ... --runs N`: N live calls; stability summary (which keys/values stable vs vary).
+  - `run ... --persona <p>`: persona overlay resolution.
+  - `run ... --expected <path>`: PASS/DIFF vs saved expected JSON.
+  - `docs [--output <path>]`: generates authorskill-prompts.md from YAML store (P4).
+- No-stub policy enforced: LLM probe on every live run; exits code 2 with BLOCKED message if stub.
+- JSON parse via `framework.skill_builder.review._parse_llm_json_response` (shared helper).
+- Created `framework/tests/fixtures/prompts/` with 5 fixtures:
+  - `failure_classifier_gold.json` — verbatim gold case from test_failure_classifier_gate.py
+  - `design_skill_tpm_26ai.json` — realistic TPM 26ai design input with persona=tpm
+  - `capture_intent_tpm.json` — TPM capture intent input
+  - `inspect_sources_tpm.json` — TPM inspect sources for pageId=20030556732 with WBS excerpt
+  - `configure_sources_tpm.json` — TPM configure sources input
+- Created `framework/tests/unit/test_prompt_lab.py` — 19 tests across 8 classes (0 LLM calls).
+- Ran `python -m framework.tools.prompt_lab docs` → regenerated `docs/wiki/authorskill-prompts.md`
+  from YAML store (12 prompts, 9 personas); file now has DO-NOT-HAND-EDIT header + generated_at.
+- All tests: `pytest test_prompt_lab.py test_prompt_registry.py -q` → 74 passed, 0 failures.
+- Parallel-safe: touched only new files; did NOT modify conversation.py / synthesize_schema.py /
+  review.py / executor.py / prompt_registry.py / any YAML in config/prompts/.
+
+---
+
 ## [2026-05-16] backend-dev | ADR-030 P2 — YAML prompt store authored verbatim
 
 **Task: P2 — Author YAML prompt store (parallel stream, new files only).**

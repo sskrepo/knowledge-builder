@@ -1,0 +1,94 @@
+{
+  "fixture_id": "design_skill_tpm_26ai",
+  "prompt_id": "design_skill",
+  "description": "TPM persona — design_skill call for the 26ai FA DB Upgrade weekly exec PPTX. Includes source capability inventory from INSPECT_SOURCES with synthesisable fields for risks/milestones/ORM/next_steps. This is the canonical 26ai walkthrough input for DESIGN_SKILL.",
+  "persona": "tpm",
+  "vars": {
+    "normalised_intent": {
+      "skill_name": "26ai_fa_db_upgrade_to_26ai_pptx",
+      "persona": "tpm",
+      "scope_domains": ["FA DB Upgrade", "26ai"],
+      "output_kind": "pptx",
+      "audience": "exec",
+      "layout_hint": "weekly_exec_review",
+      "description": "Weekly executive review PPTX for the FA DB Upgrade from 19c to 26ai project. Covers status, key milestones, ORM, risks, and next steps for the FAaaS leadership."
+    },
+    "source_capability": [
+      {
+        "source_id": "confluence:20030556732",
+        "available_fields": [
+          {
+            "field": "project_name",
+            "type": "string",
+            "confidence": "high",
+            "evidence": "Project Name: FA DB Upgrade from 19c to 26ai (Section 1 metadata table)"
+          },
+          {
+            "field": "current_phase",
+            "type": "string",
+            "confidence": "high",
+            "evidence": "Current Phase: Design and POC (Section 1 metadata table)"
+          },
+          {
+            "field": "overall_status",
+            "type": "string",
+            "confidence": "high",
+            "evidence": "Overall Status: PLANNED (Section 1 metadata table)"
+          },
+          {
+            "field": "executive_summary",
+            "type": "string",
+            "confidence": "high",
+            "evidence": "Executive Summary: Provision new pods running 26ai DB... (Section 3)"
+          },
+          {
+            "field": "risks_and_mitigations",
+            "type": "array",
+            "confidence": "synthesisable",
+            "evidence": "WBS rows 5.0/5.01: '4/29: FRE informed that this deliverable needs additional time. ETA to be finalized.' External dependency risks scattered across WBS Update Notes column."
+          },
+          {
+            "field": "key_milestones",
+            "type": "array",
+            "confidence": "synthesisable",
+            "evidence": "WBS rows 1.0-6.x have Status column (GreenComplete, BlueIN PROGRESS, GreyNOT STARTED) and Due Date columns. Milestone M1-M5 table in Section 4."
+          },
+          {
+            "field": "next_steps",
+            "type": "array",
+            "confidence": "synthesisable",
+            "evidence": "WBS row 6.04.1: 'SUT will need to start from 05/16 to 06/01'. Open IN PROGRESS rows indicate pending work."
+          },
+          {
+            "field": "orm_items",
+            "type": "array",
+            "confidence": "synthesisable",
+            "evidence": "WBS rows 4.0 (ORM/CSSAP Phase), 4.1 (File ORM/OCI Release Management), 4.2 (File official CSSAP Record)."
+          },
+          {
+            "field": "dependencies",
+            "type": "string",
+            "confidence": "high",
+            "evidence": "Dependencies: FRE (Repo, NGFABS etc) (Section 3 Objectives table)"
+          }
+        ],
+        "missing_fields": [
+          {
+            "field": "real_time_jira_metrics",
+            "reason": "No Jira API integration in this source; only static Jira links present"
+          }
+        ],
+        "suggested_fields": [
+          {
+            "field": "workstream_status",
+            "type": "array",
+            "reason": "WBS table has rich per-area status data suitable for a workstream rollup"
+          }
+        ],
+        "summary": "FAaaS Project Plan for FA DB Upgrade from 19c to 26ai. Contains project metadata, objectives/scope, milestone table (M1-M5), and WBS with 50+ task rows. Risk and next-steps information present in synthesisable form."
+      }
+    ],
+    "artifact_layout": "weekly_exec_review_v1",
+    "existing_kb_cards": []
+  }
+}

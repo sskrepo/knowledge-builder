@@ -1,0 +1,9 @@
+{
+  "fixture_id": "capture_intent_tpm",
+  "prompt_id": "capture_intent",
+  "description": "TPM persona — capture_intent for the 26ai FA DB Upgrade weekly exec review PPTX request. Realistic intent text as entered by a TPM in the authorSkill CAPTURE_INTENT state.",
+  "persona": "tpm",
+  "vars": {
+    "intent": "I need a weekly exec PPTX for the 26ai FA DB Upgrade project. It should cover the overall status, key milestones, ORM status, any risks and next steps. The audience is the FAaaS VP leadership team. Source is the Confluence project plan page (pageId 20030556732)."
+  }
+}

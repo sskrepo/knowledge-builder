@@ -1,0 +1,130 @@
+{
+  "fixture_id": "failure_classifier_gold",
+  "prompt_id": "failure_classifier",
+  "description": "Gold case: tpm.26ai_fa_db_upgrade — WBS data exists, schema never asked for it. Ground truth: MISSING_FIELDS (NOT SOURCE_COVERAGE). Source: Confluence pageId=20030556732 (FA DB Upgrade project plan). The WBS table contains synthesisable evidence for risks, milestones, ORM, and next steps — the gap was that the original schema never included fields for them.",
+  "persona": null,
+  "vars": {
+    "normalised_intent": {
+      "skill_name": "26ai_fa_db_upgrade_to_26ai_pptx",
+      "persona": "tpm",
+      "scope_domains": ["FA DB Upgrade", "26ai"],
+      "output_kind": "pptx",
+      "audience": "exec",
+      "layout_hint": "weekly_exec_review",
+      "description": "Weekly executive review PPTX for the FA DB Upgrade from 19c to 26ai project. Covers status, key milestones, ORM, risks, and next steps for the FAaaS leadership."
+    },
+    "schema_properties": {
+      "project_name": {
+        "type": "string",
+        "description": "Extract the canonical project name from the Confluence metadata table.",
+        "maxLength": 200
+      },
+      "current_phase": {
+        "type": "string",
+        "description": "Extract the current project phase from the Confluence metadata.",
+        "maxLength": 200
+      },
+      "overall_status": {
+        "type": "string",
+        "description": "Extract the overall project status text from the Confluence metadata.",
+        "maxLength": 200
+      },
+      "executive_summary": {
+        "type": "string",
+        "description": "Extract the Executive Summary paragraph from the Confluence project plan.",
+        "maxLength": 500
+      },
+      "business_outcome": {
+        "type": "string",
+        "description": "Extract the Business Outcome statement from the Confluence project plan.",
+        "maxLength": 500
+      },
+      "in_scope": {
+        "type": "string",
+        "description": "Extract the In Scope text from the Objectives/Scope section.",
+        "maxLength": 500
+      },
+      "assumptions": {
+        "type": "string",
+        "description": "Extract the Assumptions text from the Objectives/Scope section.",
+        "maxLength": 2000
+      }
+    },
+    "capability_inventory": {
+      "source_id": "confluence:20030556732",
+      "available_fields": [
+        {
+          "field": "project_name",
+          "type": "string",
+          "confidence": "high",
+          "evidence": "Project Name: FA DB Upgrade from 19c to 26ai (Section 1 metadata table)"
+        },
+        {
+          "field": "current_phase",
+          "type": "string",
+          "confidence": "high",
+          "evidence": "Current Phase: Design and POC (Section 1 metadata table)"
+        },
+        {
+          "field": "overall_status",
+          "type": "string",
+          "confidence": "high",
+          "evidence": "Overall Status: PLANNED (Section 1 metadata table)"
+        },
+        {
+          "field": "executive_summary",
+          "type": "string",
+          "confidence": "high",
+          "evidence": "Executive Summary: Provision new pods running 26ai DB... (Section 3)"
+        },
+        {
+          "field": "risks_and_mitigations",
+          "type": "array",
+          "confidence": "synthesisable",
+          "evidence": "WBS rows 5.0/5.01: '4/29: FRE informed that this deliverable needs additional time. ETA to be finalized.' External dependency risks scattered across WBS Update Notes column."
+        },
+        {
+          "field": "key_milestones",
+          "type": "array",
+          "confidence": "synthesisable",
+          "evidence": "WBS rows 1.0-6.x have Status column (GreenComplete, BlueIN PROGRESS, GreyNOT STARTED) and Due Date columns. Milestone M1-M5 table in Section 4. POC Completed noted in row 6.04.1."
+        },
+        {
+          "field": "next_steps",
+          "type": "array",
+          "confidence": "synthesisable",
+          "evidence": "WBS row 6.04.1: 'SUT will need to start from 05/16 to 06/01'. WBS row 5.0: 'ETA to be finalized'. Open IN PROGRESS rows indicate pending work aggregatable as next steps."
+        },
+        {
+          "field": "orm_items",
+          "type": "array",
+          "confidence": "synthesisable",
+          "evidence": "WBS rows 4.0 (ORM/CSSAP Phase), 4.1 (File ORM/OCI Release Management), 4.2 (File official CSSAP Record) — ORM phase with dependency on 2.3."
+        },
+        {
+          "field": "dependencies",
+          "type": "string",
+          "confidence": "high",
+          "evidence": "Dependencies: FRE (Repo, NGFABS etc) (Section 3 Objectives table)"
+        }
+      ],
+      "missing_fields": [
+        {
+          "field": "real_time_jira_metrics",
+          "reason": "No Jira API integration in this source; only static Jira links present"
+        }
+      ],
+      "suggested_fields": [
+        {
+          "field": "workstream_status",
+          "type": "array",
+          "reason": "WBS table has rich per-area status data suitable for a workstream rollup"
+        }
+      ],
+      "summary": "This Confluence page is the FAaaS Project Plan for the FA DB Upgrade from 19c to 26ai. It contains project metadata, objectives/scope, a milestone table (M1-M5 all PLANNED), and a detailed WBS with 50+ task rows spanning areas: Project Initiation, Design, Capacity, ORM/CSSAP, External Dependencies (FRE), ADP Development. WBS rows contain status (GreenComplete/BlueIN PROGRESS/GreyNOT STARTED), owner assignments, and Update Notes with dated progress comments. Risk and next-steps information is present in synthesisable form across WBS Update Notes (e.g., FRE ETA delays, POC completion dates, SUT window notes)."
+    },
+    "gap_report": "Structure gap: The produced PPTX has 8 sections; the reference artifact had 12. Missing sections: Key Milestones, ORM Status, Risk Mitigation, Next Steps. Thin sections: Status (produced: 1 bullet; reference: 6 bullets). Structure score: 0.67. Density score: 0.45. The produced slide deck covers project metadata, scope, and assumptions well but is missing the operational sections that the reference exec review included.",
+    "missing_sections": ["Key Milestones", "ORM Status", "Risk Mitigation", "Next Steps"],
+    "thin_sections": ["Status"]
+  }
+}

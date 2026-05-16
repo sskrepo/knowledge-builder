@@ -1,0 +1,19 @@
+{
+  "fixture_id": "configure_sources_tpm",
+  "prompt_id": "configure_sources",
+  "description": "TPM persona — configure_sources for the 26ai FA DB Upgrade PPTX skill. The adapter list includes confluence and jira. Intent references pageId 20030556732 explicitly.",
+  "persona": "tpm",
+  "vars": {
+    "normalised_intent": {
+      "skill_name": "26ai_fa_db_upgrade_to_26ai_pptx",
+      "persona": "tpm",
+      "scope_domains": ["FA DB Upgrade", "26ai"],
+      "output_kind": "pptx",
+      "audience": "exec",
+      "layout_hint": "weekly_exec_review",
+      "description": "Weekly executive review PPTX for the FA DB Upgrade from 19c to 26ai project. Covers status, key milestones, ORM, risks, and next steps for the FAaaS leadership."
+    },
+    "adapter_list": ["confluence", "jira"],
+    "intent_text": "I need a weekly exec PPTX for the 26ai FA DB Upgrade project. Source is the Confluence project plan page (pageId 20030556732). Also check Jira for open blockers."
+  }
+}
