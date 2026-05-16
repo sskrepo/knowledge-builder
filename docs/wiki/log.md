@@ -4,6 +4,12 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-15] backend-dev | P2: ArtifactComparator module created (ADR-029 Stream B)
+
+framework/skill_builder/comparator.py: new standalone module implementing ArtifactComparator with is_image_only() (zero-text-shapes gate, mirrors analyze_artifact._analyze_pptx pattern) and compare() (structure + density scoring with synonym normalisation, deterministic — no LLM in scoring path). ComparatorResult dataclass exposes structure_score, density_score, missing_sections, thin_sections, gap_report. IMAGE_ONLY_MESSAGE constant matches ADR-029 §C.1 prescribed wording verbatim. Supports pptx/md/txt natively; docx handled with ImportError graceful degradation (python-docx not in requirements.txt). framework/tests/unit/test_comparator.py: 31 tests covering is_image_only (true/false/unsupported/edge cases), structure_score (perfect match, 3-of-7 missing, all missing), density_score (thin, adequate, capped-at-1), synonym normalisation (Next Steps≈Action Items, Key Milestones≈Timeline, Risks & Mitigations≈Risks), gap_report content, ComparatorResult.to_dict(), IMAGE_ONLY_MESSAGE contract. All 31 tests GREEN.
+
+---
+
 ## [2026-05-15] architect | ADR-028 & ADR-029 Accepted; persona playbook drafted; impl blueprint produced
 
 ADR-028 set to Accepted. Locked: Item1=Option A (persona YAML playbook injected into DESIGN_SKILL + CAPTURE_INTENT; concrete starter templates generated for all 9 personas in the fusion-apps cloud-platform domain), Item2=Option A (awaiting_user + must_show_human added to ConversationTurn; hard "do not auto-answer" added to authorSkill tool description), Item3=Option A (new CLARIFY state, 17th state; blocking_ambiguities vs nice_to_know split in CAPTURE_INTENT and DESIGN_SKILL prompts), Item4=Option A (synthesisable confidence level in INSPECT_SOURCES; DESIGN_SKILL allowed to include synthesisable fields with explicit aggregation instructions).
