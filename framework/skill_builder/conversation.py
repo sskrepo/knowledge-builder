@@ -59,6 +59,156 @@ from ..adapters.confluence.factory import build_confluence_adapter as _build_con
 
 
 # ---------------------------------------------------------------------------
+# ADR-032 P1-D: source_binding contract validation helpers
+# ---------------------------------------------------------------------------
+
+def _check_confluence_adapter_available(env: str, repo_root: "Path") -> bool:
+    """Return True if a Confluence adapter mode is configured for the given env.
+
+    Config-only check — does NOT make a live HTTP call.  Reads:
+      1. framework/config/adapters/confluence.yaml (base config)
+      2. framework/config/{env}.yaml → adapters_overrides.confluence (env override)
+
+    Returns True when a non-empty "mode" key is present in the merged config.
+    Returns False when mode is absent, empty, or the config files are missing.
+
+    This is used by the VALIDATE state (ADR-032 P1-D) to gate ask_parameterized
+    + ingest_on_demand:true skills — a skill that requires live Confluence access
+    cannot be promoted to a deployment environment with no adapter configured.
+    """
+    try:
+        import yaml as _yaml
+        base_path = repo_root / "framework" / "config" / "adapters" / "confluence.yaml"
+        base_cfg: dict = {}
+        if base_path.exists():
+            base_cfg = _yaml.safe_load(base_path.read_text()) or {}
+        env_path = repo_root / "framework" / "config" / f"{env}.yaml"
+        env_cfg: dict = {}
+        if env_path.exists():
+            env_cfg = _yaml.safe_load(env_path.read_text()) or {}
+        overrides = env_cfg.get("adapters_overrides", {}).get("confluence", {})
+        merged = {**base_cfg, **overrides}
+        return bool(merged.get("mode", ""))
+    except Exception as exc:
+        log.warning(
+            "_check_confluence_adapter_available: could not read adapter config "
+            "for env=%r (%s) — treating adapter as unavailable",
+            env, exc,
+        )
+        return False
+
+
+def _validate_source_binding_contract(
+    synthesized_yaml: dict,
+    session_binding_mode: str,
+) -> list[str]:
+    """Validate the source_binding contract for ADR-032 P1-D.
+
+    Returns a list of validation error strings.  An empty list means the
+    contract is satisfied (VALIDATE should pass for source_binding concerns).
+
+    Rules (from ADR-032 §D.4 and user task description):
+    - If session_binding_mode == "ask_parameterized":
+        * The YAML MUST have source_binding.mode == "ask_parameterized"
+        * source_binding.input_param must be present and non-empty
+        * input_param must match a declared trigger.on_request.inputs name
+        * source_binding.ingest_on_demand must be present (True or False)
+        * source_binding.source_type must be present and non-empty
+        * source_binding.space_allow_list must be a non-empty list
+        * source_binding.ephemeral_ttl_seconds must be present
+        * source_binding MUST NOT pin fixed page IDs (source_bindings dict
+          must not contain page_id references in the asks context — specifically
+          the YAML source_bindings dict values must not be a list of page IDs
+          when ask_parameterized; they should be dynamic)
+    - If session_binding_mode == "author_fixed":
+        * The YAML MUST NOT have source_binding.mode == "ask_parameterized"
+          (author_fixed skills must not declare ask_parameterized source binding)
+    - If the YAML has no source_binding block and session mode is "author_fixed":
+        * This is the correct default — no error.
+    """
+    errors: list[str] = []
+    sb = synthesized_yaml.get("source_binding") or {}
+    yaml_sb_mode = sb.get("mode", "author_fixed")
+
+    if session_binding_mode == "ask_parameterized":
+        # The committed YAML must declare ask_parameterized
+        if yaml_sb_mode != "ask_parameterized":
+            errors.append(
+                "source_binding.mode must be 'ask_parameterized' in the workflow skill YAML "
+                f"(session resolved mode is ask_parameterized, but YAML has mode={yaml_sb_mode!r}). "
+                "Re-author the skill or add the source_binding block to the YAML."
+            )
+            # Cannot validate further fields if mode is wrong
+            return errors
+
+        # input_param must be present and non-empty
+        input_param = sb.get("input_param", "")
+        if not input_param:
+            errors.append(
+                "source_binding.input_param is missing or empty. "
+                "It must name the trigger input that carries the consumer-supplied page reference "
+                "(e.g. input_param: page_id)."
+            )
+        else:
+            # input_param must match a declared trigger.on_request.inputs name
+            trigger_inputs = (
+                synthesized_yaml.get("trigger", {})
+                .get("on_request", {})
+                .get("inputs", [])
+            )
+            declared_names = [inp.get("name") for inp in trigger_inputs if inp.get("name")]
+            if declared_names and input_param not in declared_names:
+                errors.append(
+                    f"source_binding.input_param={input_param!r} does not match any declared "
+                    f"trigger.on_request.inputs name. Declared: {declared_names}. "
+                    "Add an input entry with the matching name to trigger.on_request.inputs."
+                )
+
+        # ingest_on_demand must be present
+        if "ingest_on_demand" not in sb:
+            errors.append(
+                "source_binding.ingest_on_demand is missing. "
+                "Set ingest_on_demand: true to enable ephemeral fetch "
+                "or ingest_on_demand: false to hard-fail on un-ingested pages."
+            )
+
+        # source_type must be present and non-empty
+        if not sb.get("source_type", ""):
+            errors.append(
+                "source_binding.source_type is missing or empty. "
+                "Set source_type: confluence_page (or confluence_space, jira_filter, git_ref)."
+            )
+
+        # space_allow_list must be a non-empty list
+        sal = sb.get("space_allow_list")
+        if not sal or not isinstance(sal, list) or len(sal) == 0:
+            errors.append(
+                "source_binding.space_allow_list is missing or empty. "
+                "Provide at least one Confluence space key to restrict ephemeral fetch "
+                "(e.g. space_allow_list: [FA, PROJ])."
+            )
+
+        # ephemeral_ttl_seconds must be present
+        if "ephemeral_ttl_seconds" not in sb:
+            errors.append(
+                "source_binding.ephemeral_ttl_seconds is missing. "
+                "Set ephemeral_ttl_seconds: 300 (default) or another positive integer."
+            )
+
+    elif session_binding_mode == "author_fixed":
+        # author_fixed skills must NOT have ask_parameterized source_binding
+        if yaml_sb_mode == "ask_parameterized":
+            errors.append(
+                "This session was resolved as author_fixed but the workflow skill YAML "
+                "declares source_binding.mode: ask_parameterized. "
+                "Either re-author the skill with the correct mode or remove the "
+                "source_binding block (absent = author_fixed per ADR-032 §H)."
+            )
+
+    return errors
+
+
+# ---------------------------------------------------------------------------
 # ADR-029 Phase 2 (S6): constrained routing map + guardrail constants
 # ---------------------------------------------------------------------------
 #
@@ -3324,6 +3474,71 @@ class SkillBuilderConversation:
                     shutil.rmtree(_tmp_pb_dir, ignore_errors=True)
                 except OSError:
                     pass
+
+        # ADR-032 P1-D: source_binding contract validation.
+        # Hard-fail discipline: an ask_parameterized skill that fails the contract
+        # MUST fail VALIDATE with a clear actionable message — never silently pass
+        # or downgrade to author_fixed.  Same discipline as the ADR-017 link check above.
+        import os as _os_validate
+        kbf_env_for_validate = _os_validate.environ.get("KBF_ENV", "laptop")
+        session_sb_mode = self._data.source_binding_mode
+
+        # Read the committed workflow skill YAML for source_binding inspection.
+        # Use synthesized_artifacts in-session dict when available (avoids re-reading
+        # a tempfile that may have already been cleaned up), then fall back to
+        # filesystem path.
+        _synthesized_wf: dict = {}
+        _wf_key = f"framework/workflow_skills/{self._data.persona}/{self._data.skill_name}.yaml"
+        _cached = self._data.synthesized_artifacts.get(_wf_key)
+        if isinstance(_cached, dict):
+            _synthesized_wf = _cached
+        else:
+            # Fall back: try the filesystem path
+            _fs_wf_path = (
+                REPO_ROOT / "framework" / "workflow_skills"
+                / self._data.persona / f"{self._data.skill_name}.yaml"
+            )
+            if _fs_wf_path.exists():
+                try:
+                    _synthesized_wf = yaml.safe_load(_fs_wf_path.read_text()) or {}
+                except Exception as _wf_exc:
+                    log.warning(
+                        "_run_validate: could not read workflow YAML for source_binding check (%s)",
+                        _wf_exc,
+                    )
+
+        sb_errors = _validate_source_binding_contract(_synthesized_wf, session_sb_mode)
+
+        # Additional check: adapter availability for ask_parameterized + ingest_on_demand.
+        # Per ADR-032 §D.4: if the skill requires live Confluence access at consumption
+        # time, the target environment MUST have a Confluence adapter configured.
+        _sb_block = _synthesized_wf.get("source_binding") or {}
+        if (
+            _sb_block.get("mode") == "ask_parameterized"
+            and _sb_block.get("ingest_on_demand", False)
+            and not sb_errors  # only check adapter if structural contract passes
+        ):
+            target_env = self._data.normalised_intent.get("target_env") or kbf_env_for_validate
+            adapter_ok = _check_confluence_adapter_available(target_env, REPO_ROOT)
+            if not adapter_ok:
+                sb_errors.append(
+                    f"This skill requires live Confluence access at consumption time "
+                    f"(source_binding.ingest_on_demand: true). The target deployment "
+                    f"environment '{target_env}' has no Confluence adapter configured. "
+                    f"Configure a Confluence adapter in "
+                    f"framework/config/adapters/confluence.yaml "
+                    f"for that environment, or set ingest_on_demand: false."
+                )
+
+        if sb_errors:
+            # Merge source_binding errors into the validation result — hard-fail.
+            all_errors = result.get("errors", []) + sb_errors
+            result = {"passed": False, "errors": all_errors}
+            log.warning(
+                "_run_validate: source_binding contract failed for skill=%s "
+                "session_mode=%s errors=%d",
+                self._data.skill_name, session_sb_mode, len(sb_errors),
+            )
 
         self._data.validation_result = result
         passed = result.get("passed", False)

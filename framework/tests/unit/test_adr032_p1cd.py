@@ -1,6 +1,5 @@
-"""ADR-032 Phase-2a tests — P1-C (source_binding_mode capture + CLARIFY).
-
-P1-D tests (VALIDATE source_binding contract) will be added in the P1-D commit.
+"""ADR-032 Phase-2a tests — P1-C (source_binding_mode capture + CLARIFY) and
+P1-D (VALIDATE source_binding contract check).
 
 Coverage (P1-C):
   _SessionData new fields:
@@ -24,6 +23,8 @@ import pytest
 from framework.skill_builder.conversation import (
     SkillBuilderConversation,
     _SessionData,
+    _check_confluence_adapter_available,
+    _validate_source_binding_contract,
 )
 
 
@@ -451,3 +452,396 @@ class TestClarifyResolvesSourceBindingMode:
         assert all(q.get("resolved") for q in c._data._clarify_questions), (
             "All clarify questions must be resolved after answering"
         )
+
+
+# ===========================================================================
+# P1-D — _validate_source_binding_contract (unit tests of the predicate)
+# ===========================================================================
+
+
+class TestValidateSourceBindingContract:
+    """ADR-032 P1-D: _validate_source_binding_contract must return correct error lists."""
+
+    def _well_formed_ask_parameterized_yaml(self, **overrides) -> dict:
+        """Return a well-formed ask_parameterized skill YAML dict."""
+        base = {
+            "source_binding": {
+                "mode": "ask_parameterized",
+                "input_param": "page_id",
+                "ingest_on_demand": True,
+                "source_type": "confluence_page",
+                "space_allow_list": ["FA", "PROJ"],
+                "ephemeral_ttl_seconds": 300,
+            },
+            "trigger": {
+                "on_request": {
+                    "enabled": True,
+                    "inputs": [
+                        {"name": "page_id", "type": "confluence_page_ref", "required": True}
+                    ],
+                    "output_format": "email",
+                }
+            },
+        }
+        sb = dict(base["source_binding"])
+        sb.update(overrides.get("source_binding", {}))
+        base["source_binding"] = sb
+        return base
+
+    def test_well_formed_ask_parameterized_passes(self):
+        yaml_dict = self._well_formed_ask_parameterized_yaml()
+        errors = _validate_source_binding_contract(yaml_dict, "ask_parameterized")
+        assert errors == [], f"Well-formed ask_parameterized should pass: {errors}"
+
+    def test_author_fixed_no_source_binding_passes(self):
+        yaml_dict = {}  # no source_binding block = author_fixed default
+        errors = _validate_source_binding_contract(yaml_dict, "author_fixed")
+        assert errors == [], f"author_fixed with no source_binding should pass: {errors}"
+
+    def test_ask_parameterized_missing_source_binding_block_fails(self):
+        """ask_parameterized session + no source_binding block in YAML -> FAIL."""
+        yaml_dict = {}  # no source_binding block
+        errors = _validate_source_binding_contract(yaml_dict, "ask_parameterized")
+        assert errors, "Missing source_binding block should fail validation"
+        # Error should mention mode
+        assert any("mode" in e for e in errors), (
+            f"Error should mention 'mode': {errors}"
+        )
+
+    def test_ask_parameterized_missing_input_param_fails(self):
+        yaml_dict = self._well_formed_ask_parameterized_yaml()
+        del yaml_dict["source_binding"]["input_param"]
+        errors = _validate_source_binding_contract(yaml_dict, "ask_parameterized")
+        assert any("input_param" in e for e in errors), (
+            f"Missing input_param should produce an error: {errors}"
+        )
+
+    def test_ask_parameterized_input_param_not_in_trigger_fails(self):
+        yaml_dict = self._well_formed_ask_parameterized_yaml()
+        yaml_dict["source_binding"]["input_param"] = "nonexistent_param"
+        errors = _validate_source_binding_contract(yaml_dict, "ask_parameterized")
+        assert any("input_param" in e or "nonexistent_param" in e for e in errors), (
+            f"Mismatched input_param should produce an error: {errors}"
+        )
+
+    def test_ask_parameterized_missing_ingest_on_demand_fails(self):
+        yaml_dict = self._well_formed_ask_parameterized_yaml()
+        del yaml_dict["source_binding"]["ingest_on_demand"]
+        errors = _validate_source_binding_contract(yaml_dict, "ask_parameterized")
+        assert any("ingest_on_demand" in e for e in errors), (
+            f"Missing ingest_on_demand should produce an error: {errors}"
+        )
+
+    def test_ask_parameterized_missing_source_type_fails(self):
+        yaml_dict = self._well_formed_ask_parameterized_yaml()
+        del yaml_dict["source_binding"]["source_type"]
+        errors = _validate_source_binding_contract(yaml_dict, "ask_parameterized")
+        assert any("source_type" in e for e in errors), (
+            f"Missing source_type should produce an error: {errors}"
+        )
+
+    def test_ask_parameterized_empty_space_allow_list_fails(self):
+        yaml_dict = self._well_formed_ask_parameterized_yaml()
+        yaml_dict["source_binding"]["space_allow_list"] = []
+        errors = _validate_source_binding_contract(yaml_dict, "ask_parameterized")
+        assert any("space_allow_list" in e for e in errors), (
+            f"Empty space_allow_list should produce an error: {errors}"
+        )
+
+    def test_ask_parameterized_missing_space_allow_list_fails(self):
+        yaml_dict = self._well_formed_ask_parameterized_yaml()
+        del yaml_dict["source_binding"]["space_allow_list"]
+        errors = _validate_source_binding_contract(yaml_dict, "ask_parameterized")
+        assert any("space_allow_list" in e for e in errors), (
+            f"Missing space_allow_list should produce an error: {errors}"
+        )
+
+    def test_ask_parameterized_missing_ephemeral_ttl_fails(self):
+        yaml_dict = self._well_formed_ask_parameterized_yaml()
+        del yaml_dict["source_binding"]["ephemeral_ttl_seconds"]
+        errors = _validate_source_binding_contract(yaml_dict, "ask_parameterized")
+        assert any("ephemeral_ttl_seconds" in e for e in errors), (
+            f"Missing ephemeral_ttl_seconds should produce an error: {errors}"
+        )
+
+    def test_author_fixed_with_ask_parameterized_yaml_fails(self):
+        """author_fixed session + YAML declares ask_parameterized -> FAIL."""
+        yaml_dict = self._well_formed_ask_parameterized_yaml()
+        errors = _validate_source_binding_contract(yaml_dict, "author_fixed")
+        assert errors, (
+            "author_fixed session + ask_parameterized YAML should fail validation"
+        )
+        assert any("author_fixed" in e or "ask_parameterized" in e for e in errors), (
+            f"Error should mention mode conflict: {errors}"
+        )
+
+
+# ===========================================================================
+# P1-D — _run_validate integration (source_binding check wired into VALIDATE)
+# ===========================================================================
+
+
+class TestRunValidateSourceBindingCheck:
+    """ADR-032 P1-D: _run_validate must hard-fail when source_binding contract is violated."""
+
+    def _make_conv_at_validate(
+        self,
+        skill_name="test_email",
+        session_sb_mode="ask_parameterized",
+        synthesized_yaml: dict | None = None,
+    ) -> SkillBuilderConversation:
+        """Build a conversation at the VALIDATE state with synthesized_artifacts set."""
+        c = _make_conv()
+        c._state = "COMMITTED"
+        c._data.skill_name = skill_name
+        c._data.source_binding_mode = session_sb_mode
+        c._data.normalised_intent = {}
+
+        # Inject the synthesized workflow skill YAML into synthesized_artifacts
+        wf_key = f"framework/workflow_skills/tpm/{skill_name}.yaml"
+        if synthesized_yaml is not None:
+            c._data.synthesized_artifacts = {wf_key: synthesized_yaml}
+        return c
+
+    def _well_formed_yaml(self) -> dict:
+        return {
+            "source_binding": {
+                "mode": "ask_parameterized",
+                "input_param": "page_id",
+                "ingest_on_demand": True,
+                "source_type": "confluence_page",
+                "space_allow_list": ["FA", "PROJ"],
+                "ephemeral_ttl_seconds": 300,
+            },
+            "trigger": {
+                "on_request": {
+                    "enabled": True,
+                    "inputs": [
+                        {"name": "page_id", "type": "confluence_page_ref", "required": True}
+                    ],
+                    "output_format": "email",
+                }
+            },
+            "requires_extractions": [{"kb": "tpm.test_email"}],
+        }
+
+    def _run_validate_with_mock_link_check(self, c, link_errors=None):
+        """Run _run_validate with a mocked validate_workflow_links call.
+
+        validate_workflow_links is imported locally inside _run_validate as:
+          from .validate_links import validate_workflow_links
+        so we patch it at the validate_links module level.
+        """
+        link_errors = link_errors or []
+        with patch("framework.skill_builder.validate_links.validate_workflow_links") as mock_val:
+            mock_val.return_value = link_errors
+            return c._run_validate()
+
+    def test_ask_parameterized_well_formed_passes(self):
+        """ask_parameterized + well-formed source_binding YAML -> VALIDATE PASSES."""
+        c = self._make_conv_at_validate(
+            session_sb_mode="ask_parameterized",
+            synthesized_yaml=self._well_formed_yaml(),
+        )
+        # Patch adapter check to return True (adapter present)
+        with patch(
+            "framework.skill_builder.conversation._check_confluence_adapter_available",
+            return_value=True,
+        ):
+            turn = self._run_validate_with_mock_link_check(c, link_errors=[])
+
+        assert "PASSED" in turn.message or turn.data.get("validation", {}).get("passed"), (
+            f"Well-formed ask_parameterized should pass VALIDATE: {turn.message!r}"
+        )
+
+    def test_ask_parameterized_missing_source_binding_block_fails(self):
+        """ask_parameterized session + YAML missing source_binding -> VALIDATE FAILS."""
+        c = self._make_conv_at_validate(
+            session_sb_mode="ask_parameterized",
+            synthesized_yaml={},  # no source_binding block
+        )
+        turn = self._run_validate_with_mock_link_check(c, link_errors=[])
+
+        assert "FAILED" in turn.message, (
+            f"Missing source_binding block should fail VALIDATE: {turn.message!r}"
+        )
+        assert turn.data.get("validation", {}).get("passed") is False
+
+    def test_ask_parameterized_empty_space_allow_list_fails(self):
+        """ask_parameterized + empty space_allow_list -> VALIDATE FAILS."""
+        bad_yaml = self._well_formed_yaml()
+        bad_yaml["source_binding"]["space_allow_list"] = []
+        c = self._make_conv_at_validate(
+            session_sb_mode="ask_parameterized",
+            synthesized_yaml=bad_yaml,
+        )
+        turn = self._run_validate_with_mock_link_check(c, link_errors=[])
+
+        assert "FAILED" in turn.message, (
+            f"Empty space_allow_list should fail VALIDATE: {turn.message!r}"
+        )
+
+    def test_ask_parameterized_missing_input_param_fails(self):
+        """ask_parameterized + missing input_param -> VALIDATE FAILS."""
+        bad_yaml = self._well_formed_yaml()
+        del bad_yaml["source_binding"]["input_param"]
+        c = self._make_conv_at_validate(
+            session_sb_mode="ask_parameterized",
+            synthesized_yaml=bad_yaml,
+        )
+        turn = self._run_validate_with_mock_link_check(c, link_errors=[])
+        assert "FAILED" in turn.message
+
+    def test_author_fixed_no_source_binding_passes(self):
+        """author_fixed + no source_binding block -> VALIDATE PASSES (no regression)."""
+        author_fixed_yaml = {
+            "trigger": {
+                "on_request": {
+                    "enabled": True,
+                    "inputs": [{"name": "input", "type": "string"}],
+                    "output_format": "pptx",
+                }
+            },
+            "requires_extractions": [{"kb": "tpm.weekly_exec_review"}],
+        }
+        c = self._make_conv_at_validate(
+            session_sb_mode="author_fixed",
+            synthesized_yaml=author_fixed_yaml,
+        )
+        turn = self._run_validate_with_mock_link_check(c, link_errors=[])
+
+        assert "PASSED" in turn.message or turn.data.get("validation", {}).get("passed"), (
+            f"author_fixed with no source_binding should pass VALIDATE: {turn.message!r}"
+        )
+
+    def test_author_fixed_with_ask_parameterized_yaml_fails(self):
+        """author_fixed session + YAML declares ask_parameterized -> VALIDATE FAILS."""
+        c = self._make_conv_at_validate(
+            session_sb_mode="author_fixed",
+            synthesized_yaml=self._well_formed_yaml(),  # declares ask_parameterized
+        )
+        turn = self._run_validate_with_mock_link_check(c, link_errors=[])
+        assert "FAILED" in turn.message, (
+            "author_fixed session + ask_parameterized YAML should fail VALIDATE"
+        )
+
+    def test_ask_parameterized_ingest_on_demand_no_adapter_fails(self):
+        """ask_parameterized + ingest_on_demand:true + no Confluence adapter -> VALIDATE FAILS."""
+        c = self._make_conv_at_validate(
+            session_sb_mode="ask_parameterized",
+            synthesized_yaml=self._well_formed_yaml(),
+        )
+        # Patch adapter check to return False (no adapter configured)
+        with patch(
+            "framework.skill_builder.conversation._check_confluence_adapter_available",
+            return_value=False,
+        ):
+            turn = self._run_validate_with_mock_link_check(c, link_errors=[])
+
+        assert "FAILED" in turn.message, (
+            "ask_parameterized + ingest_on_demand:true + no adapter should fail VALIDATE"
+        )
+        # Error message must be actionable
+        assert any(
+            kw in turn.message.lower()
+            for kw in ("confluence", "adapter", "ingest_on_demand")
+        ), (
+            f"Error message should mention Confluence/adapter/ingest_on_demand: {turn.message!r}"
+        )
+
+    def test_validate_hard_fail_cannot_be_skipped_silently(self):
+        """Source_binding contract violations MUST produce passed=False in validation_result."""
+        c = self._make_conv_at_validate(
+            session_sb_mode="ask_parameterized",
+            synthesized_yaml={},  # missing source_binding
+        )
+        self._run_validate_with_mock_link_check(c, link_errors=[])
+        assert c._data.validation_result is not None
+        assert c._data.validation_result.get("passed") is False, (
+            "Contract violation must set passed=False in validation_result"
+        )
+
+    def test_existing_link_check_errors_plus_sb_errors_both_reported(self):
+        """If ADR-017 link check fails AND source_binding fails, both errors appear."""
+        c = self._make_conv_at_validate(
+            session_sb_mode="ask_parameterized",
+            synthesized_yaml={},  # missing source_binding
+        )
+        turn = self._run_validate_with_mock_link_check(
+            c, link_errors=["unknown KB: tpm.test_email"]
+        )
+        assert "FAILED" in turn.message
+        # Both types of error must appear
+        all_errors = c._data.validation_result.get("errors", [])
+        link_errors_present = any("unknown KB" in e or "tpm.test_email" in e for e in all_errors)
+        sb_errors_present = any("source_binding" in e or "mode" in e for e in all_errors)
+        assert link_errors_present, f"Link check error missing from errors: {all_errors}"
+        assert sb_errors_present, f"Source_binding error missing from errors: {all_errors}"
+
+
+# ===========================================================================
+# P1-D — _check_confluence_adapter_available (unit tests)
+# ===========================================================================
+
+
+class TestCheckConfluenceAdapterAvailable:
+    """ADR-032 P1-D: _check_confluence_adapter_available config-only check."""
+
+    def test_returns_false_when_no_config_files(self, tmp_path):
+        """No config files -> adapter unavailable (returns False)."""
+        result = _check_confluence_adapter_available("laptop", tmp_path)
+        assert result is False
+
+    def test_returns_true_when_mode_configured(self, tmp_path):
+        """Adapter config with a non-empty mode -> returns True."""
+        import yaml
+        cfg_dir = tmp_path / "framework" / "config" / "adapters"
+        cfg_dir.mkdir(parents=True)
+        (cfg_dir / "confluence.yaml").write_text(
+            yaml.dump({"mode": "emcp_direct"}), encoding="utf-8"
+        )
+        result = _check_confluence_adapter_available("laptop", tmp_path)
+        assert result is True
+
+    def test_returns_false_when_mode_empty(self, tmp_path):
+        """Adapter config with mode='' -> returns False."""
+        import yaml
+        cfg_dir = tmp_path / "framework" / "config" / "adapters"
+        cfg_dir.mkdir(parents=True)
+        (cfg_dir / "confluence.yaml").write_text(
+            yaml.dump({"mode": ""}), encoding="utf-8"
+        )
+        result = _check_confluence_adapter_available("laptop", tmp_path)
+        assert result is False
+
+    def test_env_override_wins_over_base(self, tmp_path):
+        """Env-specific override takes precedence over base config."""
+        import yaml
+        # Base has no mode
+        cfg_dir = tmp_path / "framework" / "config" / "adapters"
+        cfg_dir.mkdir(parents=True)
+        (cfg_dir / "confluence.yaml").write_text(
+            yaml.dump({}), encoding="utf-8"
+        )
+        # Env override sets mode
+        env_cfg_dir = tmp_path / "framework" / "config"
+        (env_cfg_dir / "laptop.yaml").write_text(
+            yaml.dump({"adapters_overrides": {"confluence": {"mode": "codex_proxy"}}}),
+            encoding="utf-8",
+        )
+        result = _check_confluence_adapter_available("laptop", tmp_path)
+        assert result is True
+
+    def test_does_not_make_http_call(self, tmp_path):
+        """_check_confluence_adapter_available must be a config-only check — no HTTP calls."""
+        import yaml
+        cfg_dir = tmp_path / "framework" / "config" / "adapters"
+        cfg_dir.mkdir(parents=True)
+        (cfg_dir / "confluence.yaml").write_text(
+            yaml.dump({"mode": "native", "native": {"base_url": "https://confluence.example.com"}}),
+            encoding="utf-8",
+        )
+        # If this raises a connection error, the function makes HTTP calls — fail test
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            _check_confluence_adapter_available("laptop", tmp_path)
+            mock_urlopen.assert_not_called()
