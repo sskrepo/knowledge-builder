@@ -57,6 +57,7 @@ from ..adapters.confluence.factory import build_confluence_adapter as _build_con
 # ADR-030 C1: All prompt constants moved to framework/config/prompts/skill_builder.yaml.
 # Use get_registry().get_prompt(prompt_id, ...) at each call site.
 
+
 # ---------------------------------------------------------------------------
 # ADR-029 Phase 2 (S6): constrained routing map + guardrail constants
 # ---------------------------------------------------------------------------
@@ -251,6 +252,18 @@ class _SessionData:
     # Set when state machine enters EVAL_ROUTE_PENDING.
     # Not persisted (reconstructed from the routing turn if needed).
     _eval_pending_route: str = field(default="REVIEW_DESIGN")
+    # ADR-032 P1-C: source_binding_mode resolved from capture_intent LLM output
+    # and optionally confirmed via CLARIFY.
+    # "author_fixed"    — source pages fixed at author time (default for all pre-ADR-032
+    #                     sessions; absent = author_fixed per ADR-032 §H migration rule).
+    # "ask_parameterized" — consumer supplies source page at query time.
+    # "ambiguous"       — transient; cleared to author_fixed|ask_parameterized by CLARIFY.
+    # Persisted across ADB round-trips; backward-compat default "author_fixed" applied
+    # in from_dict() so pre-ADR-032 sessions load without error.
+    source_binding_mode: str = "author_fixed"
+    # One-line evidence text from the intent that drove the source_binding_mode
+    # classification.  Empty string when mode is "author_fixed" and no signal present.
+    source_binding_signal: str = ""
 
 
 class SkillBuilderConversation:
@@ -452,6 +465,11 @@ class SkillBuilderConversation:
         d["eval_iteration_count"] = self._data.eval_iteration_count
         d["eval_cumulative_cost_usd"] = self._data.eval_cumulative_cost_usd
         d["last_eval_failure_class"] = self._data.last_eval_failure_class
+        # ADR-032 P1-C: source_binding_mode resolved from capture_intent / CLARIFY.
+        # Backward-compat default "author_fixed" applied in from_dict() for pre-ADR-032
+        # sessions that lack this key (ADR-032 §H migration rule: absent = author_fixed).
+        d["source_binding_mode"] = self._data.source_binding_mode
+        d["source_binding_signal"] = self._data.source_binding_signal
         return d
 
     @classmethod
@@ -519,6 +537,11 @@ class SkillBuilderConversation:
             eval_iteration_count=int(d.get("eval_iteration_count", 0)),
             eval_cumulative_cost_usd=float(d.get("eval_cumulative_cost_usd", 0.0)),
             last_eval_failure_class=d.get("last_eval_failure_class"),
+            # ADR-032 P1-C: source_binding_mode.
+            # Backward-compat default "author_fixed" for pre-ADR-032 sessions
+            # (absent key = author_fixed per ADR-032 §H migration rule).
+            source_binding_mode=d.get("source_binding_mode", "author_fixed"),
+            source_binding_signal=d.get("source_binding_signal", ""),
         )
         return obj
 
@@ -698,6 +721,19 @@ class SkillBuilderConversation:
             normalised.get("scope_domains"),
         )
 
+        # ADR-032 P1-C: persist source_binding_mode + source_binding_signal from the
+        # capture_intent LLM output (v1.1 prompt emits both fields).
+        # Backward-compat default "author_fixed" when the key is absent (pre-v1.1 LLM
+        # output or sessions restored from pre-ADR-032 ADB state).
+        sb_mode = normalised.get("source_binding_mode", "author_fixed")
+        sb_signal = normalised.get("source_binding_signal", "")
+        self._data.source_binding_mode = sb_mode
+        self._data.source_binding_signal = sb_signal
+        log.info(
+            "_advance_to_capture_intent: source_binding_mode=%s signal=%r",
+            sb_mode, sb_signal[:60] if sb_signal else "",
+        )
+
         ambiguities = normalised.get("ambiguities", [])
         # ADR-028 S3: distinguish blocking from nice-to-know
         blocking_ambiguities = normalised.get("blocking_ambiguities", [])
@@ -708,12 +744,26 @@ class SkillBuilderConversation:
         if ambiguities and not blocking_ambiguities and not nice_to_know_ambiguities:
             blocking_ambiguities = ambiguities
 
-        # ADR-028 S3: route to CLARIFY when blocking ambiguities exist
+        # ADR-028 S3: route to CLARIFY when blocking ambiguities exist.
+        # ADR-032 P1-C: when source_binding_mode is ask_parameterized or ambiguous,
+        # the v1.1 prompt already adds the source-binding question to blocking_ambiguities
+        # ("Is the source page fixed at authoring time or supplied by the consumer at query
+        # time?").  We annotate that specific question with context="source_binding_mode"
+        # so _handle_clarify_response can resolve it to a definitive mode.
+        # We do NOT add the question again — the prompt already emitted it.
         if blocking_ambiguities:
-            self._data._clarify_questions = [
-                {"question": q, "resolved": False}
-                for q in blocking_ambiguities
-            ]
+            # Build question dicts; annotate the source-binding question if present.
+            _SB_QUESTION_FRAGMENT = "source page fixed at authoring time or supplied"
+            clarify_questions = []
+            for q in blocking_ambiguities:
+                q_dict: dict = {"question": q, "resolved": False}
+                # ADR-032 P1-C: annotate source-binding question so the clarify handler
+                # can resolve it to a definitive author_fixed | ask_parameterized mode.
+                if _SB_QUESTION_FRAGMENT in q:
+                    q_dict["context"] = "source_binding_mode"
+                    q_dict["options"] = {"A": "author_fixed", "B": "ask_parameterized"}
+                clarify_questions.append(q_dict)
+            self._data._clarify_questions = clarify_questions
             return self._advance_to_clarify(self._data._clarify_questions)
 
         # ADR-028 S3: nice_to_know_ambiguities are advisory — proceed with assumptions.
@@ -885,6 +935,55 @@ class SkillBuilderConversation:
 
                 q["resolved"] = True
                 q["answer"] = answer
+
+                # ADR-032 P1-C: if this is the source-binding clarification question,
+                # resolve source_binding_mode to a definitive author_fixed | ask_parameterized.
+                # Resolution rule (impl-plan P1-C): answer maps as follows —
+                #   "A", "fixed", "author_fixed", "same page every time",
+                #   "yes" (in context "always same") → author_fixed
+                #   "B", "parameterized", "ask_parameterized", "different page",
+                #   "dynamic", "at query time" → ask_parameterized
+                #   "skip" → default to author_fixed (safer; user acknowledged quality risk)
+                if q.get("context") == "source_binding_mode" and not lowered == "skip":
+                    _answer_lower = answer.strip().lower()
+                    if (
+                        _answer_lower in ("a", "author_fixed", "fixed", "author fixed")
+                        or "same page" in _answer_lower
+                        or "fixed" in _answer_lower
+                        or "always" in _answer_lower
+                        or "specific" in _answer_lower
+                    ):
+                        self._data.source_binding_mode = "author_fixed"
+                    elif (
+                        _answer_lower in ("b", "ask_parameterized", "parameterized",
+                                          "ask parameterized", "dynamic")
+                        or "different page" in _answer_lower
+                        or "query time" in _answer_lower
+                        or "at query" in _answer_lower
+                        or "consumer" in _answer_lower
+                        or "user passes" in _answer_lower
+                        or "supplied" in _answer_lower
+                        or "on request" in _answer_lower
+                    ):
+                        self._data.source_binding_mode = "ask_parameterized"
+                    else:
+                        # Ambiguous answer — default to ask_parameterized (the intent
+                        # already signalled parameterization; the user's ambiguous reply
+                        # doesn't override that signal).
+                        self._data.source_binding_mode = "ask_parameterized"
+                    log.info(
+                        "_handle_clarify_response: source_binding_mode resolved to %r "
+                        "from answer %r",
+                        self._data.source_binding_mode, answer[:80],
+                    )
+                elif q.get("context") == "source_binding_mode" and lowered == "skip":
+                    # User skipped — default to author_fixed (safer; no page-fetching
+                    # at query time without explicit confirmation).
+                    self._data.source_binding_mode = "author_fixed"
+                    log.warning(
+                        "_handle_clarify_response: source_binding_mode defaulted to "
+                        "author_fixed (user skipped clarification)"
+                    )
 
                 # Record in clarification_log for audit trail
                 self._data.clarification_log.append({
