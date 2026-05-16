@@ -3803,3 +3803,154 @@ class TestPersonaPromptInjection:
             f"S4 must log a warning in _load_persona_prompt_fragments for unknown personas. "
             f"Log records captured: {[(r.levelname, r.getMessage()) for r in caplog.records]}"
         )
+
+
+class TestClarifyStatePersistence:
+    """Regression tests for BUG-queue-f0591: CLARIFY state fields lost on ADB round-trip.
+
+    Root cause: _clarify_questions and _clarify_next_state were never written in
+    to_dict() nor read in from_dict(), causing DESIGN_SKILL→CLARIFY→REVIEW_DESIGN
+    to loop infinitely as _clarify_next_state reset to "CONFIGURE_SOURCES" on every
+    session resume.
+
+    Fix: to_dict() now emits clarify_questions + clarify_next_state; from_dict()
+    restores them with backward-compat defaults for pre-fix persisted sessions.
+    """
+
+    def _make_conv(self) -> SkillBuilderConversation:
+        """Create a minimal conversation in CLARIFY state with a skill_store mock."""
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._state = "CLARIFY"
+        return conv
+
+    def test_clarify_questions_round_trips_through_dict(self):
+        """_clarify_questions survives to_dict → from_dict intact.
+
+        The question text and resolved=False must be preserved exactly.
+        Before BUG-queue-f0591 fix, from_dict() silently reset _clarify_questions
+        to [] (the dataclass default), losing all pending questions.
+        """
+        conv = self._make_conv()
+        conv._data._clarify_questions = [
+            {"question": "q1", "resolved": False, "answer": ""},
+        ]
+
+        d = conv.to_dict()
+        assert "clarify_questions" in d, (
+            "to_dict() must emit 'clarify_questions' key (BUG-queue-f0591 fix)"
+        )
+        assert d["clarify_questions"] == [{"question": "q1", "resolved": False, "answer": ""}]
+
+        restored = SkillBuilderConversation.from_dict(d, skill_store=MagicMock())
+        assert len(restored._data._clarify_questions) == 1, (
+            "from_dict() must restore _clarify_questions; got [] — "
+            "the BUG-queue-f0591 infinite-loop regression"
+        )
+        q = restored._data._clarify_questions[0]
+        assert q["question"] == "q1"
+        assert q["resolved"] is False
+        assert q["answer"] == ""
+
+    def test_clarify_next_state_review_design_survives_round_trip(self):
+        """_clarify_next_state='REVIEW_DESIGN' must survive to_dict → from_dict.
+
+        This is the exact regression that caused the infinite loop: after
+        DESIGN_SKILL sets _clarify_next_state='REVIEW_DESIGN' and the session is
+        persisted to ADB, from_dict() was resetting it to 'CONFIGURE_SOURCES'
+        (the dataclass default), so _clarify_advance() sent the user back to
+        CONFIGURE_SOURCES instead of advancing to REVIEW_DESIGN.
+        """
+        conv = self._make_conv()
+        conv._data._clarify_next_state = "REVIEW_DESIGN"
+
+        d = conv.to_dict()
+        assert "clarify_next_state" in d, (
+            "to_dict() must emit 'clarify_next_state' key (BUG-queue-f0591 fix)"
+        )
+        assert d["clarify_next_state"] == "REVIEW_DESIGN"
+
+        restored = SkillBuilderConversation.from_dict(d, skill_store=MagicMock())
+        assert restored._data._clarify_next_state == "REVIEW_DESIGN", (
+            f"from_dict() reset _clarify_next_state to {restored._data._clarify_next_state!r} "
+            "instead of preserving 'REVIEW_DESIGN' — "
+            "this is the BUG-queue-f0591 infinite-loop regression"
+        )
+
+    def test_pre_fix_session_dict_defaults_gracefully(self):
+        """A session dict WITHOUT clarify_questions/clarify_next_state (pre-fix ADB record)
+        must restore without raising and apply backward-compat defaults.
+
+        This validates that old persisted sessions load cleanly after deploying the fix.
+        """
+        # Minimal dict that a pre-fix persisted session might contain.
+        # clarify_questions and clarify_next_state keys are intentionally absent.
+        old_session_dict = {
+            "state": "CLARIFY",
+            "persona": "tpm",
+            "synth_id": "synth-legacy-001",
+            "intent_description": "build weekly report skill",
+            "artifact_path": "",
+            "fields": [],
+            "field_specs": {},
+            "reuse": {"covered": {}, "gaps": []},
+            "sources": [],
+            "trigger": {"on_request": True},
+            "output_format": "markdown",
+            "skill_name": "weekly_report",
+            "user_id": "",
+            "committed_paths": [],
+            "validation_result": None,
+            "ingest_result": None,
+            "eval_result": None,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "synthesized_artifacts": {},
+            "clarification_log": [],
+            # NOTE: no "clarify_questions" key
+            # NOTE: no "clarify_next_state" key
+        }
+
+        # Must not raise
+        restored = SkillBuilderConversation.from_dict(
+            old_session_dict, skill_store=MagicMock()
+        )
+
+        # Backward-compat defaults must be applied
+        assert restored._data._clarify_questions == [], (
+            "Pre-fix session missing 'clarify_questions' must default to [] without raising"
+        )
+        assert restored._data._clarify_next_state == "CONFIGURE_SOURCES", (
+            "Pre-fix session missing 'clarify_next_state' must default to 'CONFIGURE_SOURCES'"
+        )
+
+    def test_hardening_guard_surfaces_error_when_design_set_and_questions_empty(self):
+        """Belt-and-suspenders: if CLARIFY state has design set but no questions,
+        _handle_clarify_response must return a must_show_human error turn rather
+        than silently advancing to _clarify_advance() which would rewind to
+        CONFIGURE_SOURCES.
+
+        This guards against any future persistence regression where _clarify_questions
+        is again lost between sessions while on the DESIGN_SKILL clarify path.
+        """
+        conv = self._make_conv()
+        # Simulate the DESIGN_SKILL clarify path: design is set, questions are empty
+        # (as they would be after a persistence regression drops them)
+        conv._data.design = {
+            "fields": [{"name": "status", "type": "str"}],
+            "summary": "Weekly report design",
+        }
+        conv._data._clarify_questions = []  # empty — simulates lost persistence
+        conv._data._clarify_next_state = "REVIEW_DESIGN"
+
+        turn = conv._handle_clarify_response("some user answer")
+
+        assert turn.must_show_human is True, (
+            "_handle_clarify_response must set must_show_human=True when design is set "
+            "but _clarify_questions is empty (persistence regression guard)"
+        )
+        assert turn.state == "CLARIFY", (
+            "State must remain CLARIFY when surfacing the persistence-regression error"
+        )
+        assert turn.data is not None and turn.data.get("error") == "clarify_questions_lost", (
+            "Turn data must include error='clarify_questions_lost' for observability"
+        )

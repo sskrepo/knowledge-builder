@@ -789,10 +789,15 @@ class _SessionData:
     # ADR-028 Item 3 (CLARIFY state) fields
     clarification_log: list = field(default_factory=list)
     # {"question": str, "answer": str, "resolved_at": str (ISO)}
-    # Internal: pending blocking questions for CLARIFY handler (not persisted between
-    # sessions — reconstructed from normalised_intent on resume if needed)
+    # Internal: pending blocking questions for CLARIFY handler.
+    # NOW persisted across ADB round-trips (BUG-queue-f0591 fix).
+    # Without persistence, the DESIGN_SKILL→CLARIFY→REVIEW_DESIGN path entered an
+    # infinite loop because _clarify_next_state reset to "CONFIGURE_SOURCES" on every
+    # session resume, rewinding the flow instead of advancing to REVIEW_DESIGN.
     _clarify_questions: list = field(default_factory=list)
-    # Context: which state CLARIFY should transition to after all questions are resolved
+    # Context: which state CLARIFY should transition to after all questions are resolved.
+    # Persisted across ADB round-trips (BUG-queue-f0591 fix); backward-compat default
+    # "CONFIGURE_SOURCES" is applied in from_dict() for pre-fix persisted sessions.
     _clarify_next_state: str = field(default="CONFIGURE_SOURCES")
     # ADR-029 Phase 1 (S5): reference artifact retention
     # artifact_reference_id: ArtifactStore key for the uploaded reference artifact.
@@ -1001,8 +1006,12 @@ class SkillBuilderConversation:
             d["artifact_layout"] = dict(self._data.artifact_layout)
         if self._data.design is not None:
             d["design"] = dict(self._data.design)
-        # ADR-028 Item 3: clarification_log persisted for session resumability
+        # ADR-028 Item 3: clarification_log persisted for session resumability.
+        # BUG-queue-f0591 fix: also persist _clarify_questions and _clarify_next_state
+        # so that the DESIGN_SKILL→CLARIFY→REVIEW_DESIGN path survives ADB round-trips.
         d["clarification_log"] = list(self._data.clarification_log)
+        d["clarify_questions"] = list(self._data._clarify_questions)
+        d["clarify_next_state"] = self._data._clarify_next_state
         # ADR-029 Phase 1 (S5): reference artifact retention — default None for
         # backward-compat; pre-S5 sessions will simply have no reference artifact.
         d["artifact_reference_id"] = self._data.artifact_reference_id
@@ -1061,8 +1070,13 @@ class SkillBuilderConversation:
             normalised_intent=dict(d.get("normalised_intent", {})),
             source_samples=dict(d.get("source_samples", {})),
             source_capability=list(d.get("source_capability", [])),
-            # ADR-028 Item 3
+            # ADR-028 Item 3: clarification_log for audit trail.
+            # BUG-queue-f0591 fix: restore _clarify_questions and _clarify_next_state
+            # so sessions resumed from ADB continue the CLARIFY flow correctly.
+            # Backward-compat defaults apply for pre-fix persisted sessions.
             clarification_log=list(d.get("clarification_log", [])),
+            _clarify_questions=list(d.get("clarify_questions", [])),
+            _clarify_next_state=d.get("clarify_next_state", "CONFIGURE_SOURCES"),
             artifact_layout=d.get("artifact_layout"),
             design=d.get("design"),
             # ADR-029 Phase 1 (S5): reference artifact retention.
@@ -1443,7 +1457,29 @@ class SkillBuilderConversation:
                 break
 
         if not resolved_any:
-            # No unresolved questions — this is unexpected; advance anyway
+            # No unresolved questions — this is unexpected.
+            # BUG-queue-f0591 hardening: if we are on the DESIGN_SKILL clarify path
+            # (design is set) and _clarify_questions is empty, this signals a
+            # persistence regression — the questions were lost between sessions.
+            # Surface a must_show_human error rather than silently misrouting to
+            # CONFIGURE_SOURCES (which would rewind the flow to the start).
+            if self._data.design is not None and not questions:
+                log.error(
+                    "_handle_clarify_response: CLARIFY state has no pending questions "
+                    "but design is set — likely a persistence regression. "
+                    "Surfacing error rather than silently rewinding to CONFIGURE_SOURCES."
+                )
+                return ConversationTurn(
+                    state="CLARIFY",
+                    message=(
+                        "I've lost track of the clarifying questions for this design. "
+                        "This is an internal inconsistency — please start the skill "
+                        "design step again by typing 'redesign' or 'continue'."
+                    ),
+                    data={"error": "clarify_questions_lost", "design_present": True},
+                    must_show_human=True,
+                    awaiting_user=True,
+                )
             log.warning("_handle_clarify_response: no unresolved questions found — advancing")
             return self._clarify_advance()
 

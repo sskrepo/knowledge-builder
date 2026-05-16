@@ -231,12 +231,30 @@ CLARIFY handler with the same per-question loop. The `_CLARIFY_PROMPT` emits
 a conversational message ("Before I proceed, I need to clarify one thing: ..."),
 not a JSON blob — plain prose the human can read and respond to.
 
-**New `_SessionData` field:**
+**`_SessionData` fields (persistence contract — BUG-queue-f0591 gap now closed):**
 ```python
 clarification_log: list[dict] = field(default_factory=list)
 # Each entry: {"question": str, "answer": str, "resolved_at": str (ISO)}
+_clarify_questions: list = field(default_factory=list)
+# Pending blocking questions for the active CLARIFY turn.
+_clarify_next_state: str = field(default="CONFIGURE_SOURCES")
+# Target state after all CLARIFY questions resolved.
 ```
-This field must be added to `to_dict()` and `from_dict()` for session persistence.
+
+All three fields are persisted in `to_dict()` / `from_dict()`.
+`to_dict()` emits: `clarification_log`, `clarify_questions`, `clarify_next_state`.
+`from_dict()` restores all three; backward-compat defaults `[]` and
+`"CONFIGURE_SOURCES"` are applied for pre-fix persisted sessions.
+
+**BUG-queue-f0591 (fixed 2026-05-16):** `_clarify_questions` and
+`_clarify_next_state` were originally NOT persisted (only `clarification_log`
+was). This caused DESIGN_SKILL→CLARIFY→REVIEW_DESIGN to loop infinitely: on
+every ADB round-trip `_clarify_next_state` reset to `"CONFIGURE_SOURCES"` and
+`_clarify_questions` reset to `[]`, rewinding the flow. Fix: both fields now
+round-trip through to_dict/from_dict. Additionally a hardening guard in
+`_handle_clarify_response` surfaces a `must_show_human=True` error turn if
+design is set but `_clarify_questions` is empty (belt-and-suspenders against
+future persistence regressions).
 
 **Test that must ship:**
 - Unit test: `test_clarify_state_entered_on_blocking_ambiguity` — mock
