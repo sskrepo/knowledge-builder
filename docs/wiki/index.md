@@ -63,7 +63,8 @@
 - [ADR-030 — authorSkill: Externalize LLM prompts to hot-reloadable versioned YAML + prompt-test harness](adr/ADR-030-prompt-externalization-and-harness.md) — **ACCEPTED 2026-05-16 — YAML store layout, PromptRegistry loader contract, gate-lock enforcement, prompt_lab harness design, persona_prompts.yaml folded in**
 - [ADR-030 — Implementation Blueprint](adr/ADR-030-impl-plan.md) — **ACTIVE — file-partitioned, serial-aware work breakdown: 4 parallel P-streams + 4-step serial cutover + gate task**
 - [ADR-031 — No Arbitrary Content Caps](adr/ADR-031-no-arbitrary-content-caps.md) — **ACCEPTED 2026-05-16 — synthesized schemas carry no arbitrary maxLength; source text sized to model context; all LLM-JSON parses detect truncation; last hard-coded prompt migrated to PromptRegistry**
-- [ADR-032 — Ask-time / Runtime Source Ingestion](adr/ADR-032-ask-time-source-ingestion.md) — **PROPOSED 2026-05-16 — source-parameterized skills; P3 silent wrong-page substitution fix (immediate); P1 author-time detection; P2 runtime ingestion (3 options, Option C recommended); DECISION-012 open**
+- [ADR-032 — Ask-time / Runtime Source Ingestion](adr/ADR-032-ask-time-source-ingestion.md) — **ACCEPTED 2026-05-16 — DECISION-012 resolved: Option C (ephemeral request-scoped ingestion); P3 shipped commit 8c947dc; P1+P2 blueprint ready for dispatch**
+- [ADR-032 — Implementation Blueprint](adr/ADR-032-impl-plan.md) — **ACTIVE — file-partitioned, serial-aware work breakdown: 3-stream parallel Phase 1 + 2-stream Phase 2 + sequential Phase 3/4**
 
 ## Skill builder
 - **[authorSkill flow — state-by-state LLM usage map](authorskill-flow.md)** — NEW 16-state machine (post-ADR-027): design-first, source inspection before schema design, real EVAL with auto-generated gold sets

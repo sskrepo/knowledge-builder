@@ -1,7 +1,8 @@
 ---
 title: DECISION-012 — Runtime Ingestion Option for Ask-Parameterized Skills
-status: open
+status: resolved
 created: 2026-05-16
+resolved: 2026-05-16
 owner: architect
 deciders: user
 tags: [decision, workflow-skills, ingestion, consumption]
@@ -12,107 +13,99 @@ related: [ADR-032, ADR-016, ADR-029]
 
 ## Status
 
-**Open — awaiting user decision.**
+**RESOLVED — 2026-05-16. User chose Option C (ephemeral request-scoped ingestion).**
 
 ---
 
-## Context
+## Decision
 
-ADR-032 (Proposed) documents a production failure where a TPM email-draft skill
-silently drew from the wrong Confluence page when the consumer-supplied page was not
-in the KB. The ADR defines three root causes (P1: design-contract gap, P2:
-runtime-capability gap, P3: silent wrong-page substitution) and proposes three
-implementation options for the runtime-ingestion mechanism.
+**Option C — Request-Scoped Ephemeral Ingestion** is the accepted approach for
+how ask-parameterized workflow skills obtain a user-supplied Confluence page at
+consumption time.
 
-P3 (silent substitution) will be fixed immediately as a standalone change, regardless
-of this decision. This decision governs P1 + P2: how ask-parameterized skills
-fetch the user-supplied source at consumption time.
+Key terms of the decision as accepted:
 
----
-
-## Options
-
-### Option A — Synchronous Ingest-on-Demand Inside the Ask Path
-
-When a skill is marked `source_binding.mode: ask_parameterized` and the requested
-page is not in the KB, the WorkflowExecutor calls `ConfluenceWikiIngestor.ingest_page()`
-synchronously inside the request handler, persists the content to the shared KB, then
-retrieves from it.
-
-**Pros:** seamless consumer UX; no retry; content is fresh.
-**Cons:** adds 5-30s latency; the shared KB accumulates one-off pages that no other skill
-uses; trust boundary is fully implicit (any consumer can trigger ingestion of any page
-the service credential can reach); fights the spec §2 ingest/retrieve separation.
-**Effort:** 3-5 days.
-
-### Option B — Ask Triggers Ingestion Pipeline; Hard-Fail with Retry Instruction
-
-When the requested page is not in the KB, the executor enqueues a background ingestion
-job and returns a hard-fail with "retry in 30-60 seconds." The ingestion pipeline runs
-asynchronously.
-
-**Pros:** architectural separation preserved; KB stays curated (only async-ingested pages).
-**Cons:** poor consumer UX (must retry manually); requires new IPC channel between MCP
-server and ingestion worker (Redis queue or HTTP); trust boundary is deferred, not solved.
-**Effort:** 5-8 days.
-
-### Option C — Request-Scoped Ephemeral Ingestion (Architect's Recommendation)
-
-When the requested page is not in the KB, the executor fetches the page content from
-Confluence via the existing adapter, runs LLM extraction using the skill's authored
-schema, uses the content for synthesis, and discards it — the content is never persisted
-to the shared KB. A short in-process TTL cache (default 300s) prevents redundant
-fetches within a session.
-
-**Pros:** seamless consumer UX; no retry; no shared KB pollution; citations are real
-Confluence URLs; adapter wiring is a focused non-breaking change; trust is an author-time
-grant (the author who promotes the skill grants the `ingest_on_demand` permission).
-**Cons:** adds 2-15s latency on cache miss (must be disclosed in API response); does not
-build up a persistent KB for future use; requires Confluence adapter in the MCP server
-lifespan; trust boundary still present but governed by author-time grant and space
-allow-list.
-**Effort:** 3-5 days.
+- Content is **never persisted** to the shared KB / WikiMetadataStore. The
+  ephemeral fetch is for the duration of a single request only.
+- An **in-process TTL cache** of approximately 300 seconds (keyed by
+  `page_id + content_hash`) prevents redundant fetches within a session window.
+  The cache is request-process-scoped, thread-safe, and never written to disk.
+- **Trust model:** the author-time grant. `ingest_on_demand: true` in a skill's
+  `source_binding` block is the author's explicit declaration that "this skill
+  may issue a live Confluence HTTP call on behalf of a consumer-supplied page
+  reference." The consuming identity's authorization scope is governed by the
+  `space_allow_list` declared in the skill's `source_binding` block, not by
+  per-consumer Confluence ACLs.
+- **Per-consumer OAuth (full Confluence ACL enforcement)** is explicitly v2 /
+  out-of-scope for this build. The architecture for it exists (ADR-020
+  codex_proxy / emcp_direct) but is deferred until the user decides to require
+  it. The space allow-list + rate limiter + audit log are the v1 mitigations.
+- **LLM extraction inside a retrieval request** is acceptable ONLY for
+  `ask_parameterized` skills whose schema was authored, reviewed, and promoted
+  by a persona team through the full `authorSkill` flow. Ephemeral extraction is
+  schema-bounded against that authored schema — it is not unconstrained autonomous
+  LLM extraction. This is the accepted caveat under spec §2 principle 2
+  ("LLM-in-ingestion != LLM-in-retrieval"): the extraction is schema-bounded
+  and the schema is author-time reviewed, making it materially different from
+  ad-hoc LLM extraction.
+- Extraction runs the **existing `_llm_extract_fields` method** with the skill's
+  authored schema. No new extraction code path is introduced; the ephemeral
+  path is a wrapper that substitutes the source text and skips the KB write.
+- **Adapter availability gate:** a skill with `source_binding.mode:
+  ask_parameterized` and `ingest_on_demand: true` MUST NOT be promoted to a
+  deployment that has no Confluence adapter configured. The VALIDATE state
+  (ADR-016 lifecycle) enforces this check before promotion.
 
 ---
 
-## Architect's Recommendation
+## Rationale
 
-**Option C.** It is the only option that:
-- Delivers the correct content without consumer retry.
-- Does not pollute the shared KB with one-off pages.
-- Keeps the trust boundary explicit (author-time grant, space allow-list, rate limiting).
-- Is architecturally consistent with the spec: ephemeral schema-bounded extraction at
-  ask time is not the same as unconstrained autonomous LLM extraction.
+Option C was chosen because it is the only option that simultaneously:
 
-Option A fails primarily on the trust boundary (implicit, fully open) and secondarily
-on spec §2 conflict. Option B fails on consumer UX and operational complexity.
+1. Delivers the correct content without consumer retry (unlike Option B).
+2. Does not permanently pollute the shared KB with one-off consumer-specific
+   pages (unlike Option A).
+3. Does not require a new IPC channel between the MCP server and the ingestion
+   worker (unlike Option B).
+4. Makes the trust boundary explicit via the author-time grant model (better
+   than Option A's fully implicit grant).
 
----
-
-## What needs to be decided
-
-Reply with: **DECISION-012: option A**, **option B**, or **option C**.
-
-If you have concerns about the trust boundary in Option C, specify which additional
-mitigations you want alongside it:
-- Space allow-list enforcement (restrict ephemeral fetch to spaces declared in skill)
-- Per-consumer OAuth (use the consumer's Confluence credentials, not the service token)
-- Disable feature entirely for skills deployed to production until OAuth is available
+Options A and B remain documented in ADR-032 as alternatives considered.
 
 ---
 
-## Impact
+## Spec §2 Caveat (accepted on record)
 
-| If you choose | What happens next |
-|---|---|
-| Option A | ADR-032 updated to Accepted. Backend Dev implements sync ingest-on-demand in WorkflowExecutor. Trust boundary mitigation is a separate story. |
-| Option B | ADR-032 updated to Accepted. Dev team designs IPC channel + ingestion queue before implementation begins. Longer lead time. |
-| Option C | ADR-032 updated to Accepted. Backend Dev wires Confluence adapter into mcp_server.py lifespan (conditional on any promoted skill declaring ask_parameterized). WorkflowExecutor gains ephemeral fetch path. |
-| No decision yet | P3 hard-fail fix ships immediately (it is independent). P1+P2 deferred. New TPM email skills cannot use ask-parameterized mode. |
+The user has accepted the following architectural caveat:
+
+> Schema-bounded LLM extraction inside a retrieval request is acceptable ONLY
+> for `ask_parameterized` skills whose schema was authored, reviewed, and
+> promoted through the `authorSkill` flow. The skill author's act of promoting
+> the skill with `ingest_on_demand: true` is the explicit architectural grant
+> that this LLM extraction step may occur at retrieval time. This is categorically
+> different from unconstrained autonomous LLM extraction: the schema is fixed
+> and authored before the first consumer ever supplies a page.
+
+This caveat is recorded in ADR-032 §F and in the implementation blueprint.
+
+---
+
+## Implementation
+
+P3 (silent wrong-page substitution guard) shipped standalone in commit 8c947dc
+before this decision was reached, using a regex heuristic on the input string.
+That heuristic is explicitly temporary; it will be replaced by the schema field
+`source_binding.input_param` when P1 ships, as described in ADR-032 §C.
+
+P1 (author-time source-binding contract) and P2 (Option C ephemeral runtime
+ingestion) will be implemented per the implementation blueprint at:
+`docs/wiki/adr/ADR-032-impl-plan.md`
 
 ---
 
 ## References
 
-- [ADR-032 — Ask-time source ingestion (Proposed)](../../docs/wiki/adr/ADR-032-ask-time-source-ingestion.md)
-- [ADR-016 — Workflow skills](../../docs/wiki/adr/ADR-016-workflow-skills.md)
+- [ADR-032 — Ask-time source ingestion (Accepted)](../../docs/wiki/adr/ADR-032-ask-time-source-ingestion.md)
+- [ADR-032 — Implementation Blueprint](../../docs/wiki/adr/ADR-032-impl-plan.md)
+- [ADR-016 — Workflow skills schema](../../docs/wiki/adr/ADR-016-workflow-skills.md)
+- Commit 8c947dc — P3 standalone guard (ConfluencePageNotInKBError + 19 tests)

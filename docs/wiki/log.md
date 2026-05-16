@@ -4,6 +4,25 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] architect | ADR-032 DECISION-012 locked — Option C accepted; ADR-032 Accepted; impl blueprint authored
+
+**DECISION-012 resolved: Option C (ephemeral request-scoped ingestion). ADR-032 status Proposed → Accepted. Implementation blueprint filed.**
+
+- `pmo/decisions/DECISION-012-ask-time-source-ingestion-option.md` — status: open → RESOLVED. Option C terms locked: ephemeral only, no KB persistence, ~300s in-process TTL cache, author-time grant (ingest_on_demand:true in skill YAML), space allow-list enforcement, per-consumer OAuth explicitly v2/deferred. Spec §2 caveat accepted on record: schema-bounded LLM extraction at retrieval time acceptable only for ask_parameterized skills with authored/promoted schema.
+- `docs/wiki/adr/ADR-032-ask-time-source-ingestion.md` — status: proposed → accepted. Options section collapsed to "Decided: Option C" with A/B in alternatives. Design section made implementation-grade: source_binding YAML schema (§D.1), capture_intent prompt v1.1 delta (§D.3), design_skill prompt v1.1 delta (§D.2), CLARIFY blocking surface (§D.3), VALIDATE gate amendment (§D.4), ephemeral path pseudocode (§E.2), mcp_server lifespan wiring (§E.3), P3-R guard rewire (§E.4), TTL cache spec (§E.5), API disclosure field (§E.6), EVAL interaction (§F).
+- `docs/wiki/adr/ADR-032-impl-plan.md` — NEW. File-partitioned, dependency-ordered task table (10 tasks). Highest-risk item resolved: Confluence adapter IS reachable from mcp_server process (evidence: INGEST state of authorSkill already calls emcp_direct.fetch() server-side). Recommended fan-out: 3 parallel Phase 1 agents (A: prompts, B: adapter factory, C: TPM skill YAMLs) → 2 Phase 2 (D: conversation.py serial, E: executor.py) → Phase 3 sequential P3-R + P2-API → Phase 4 tests.
+- `docs/wiki/index.md` — ADR-032 and ADR-032-impl-plan indexed.
+
+Key design pins in blueprint:
+- source_binding schema shape: mode/input_param/ingest_on_demand/source_type/space_allow_list/ephemeral_ttl_seconds
+- capture_intent v1.1: adds source_binding_mode + source_binding_signal output fields
+- design_skill v1.1: adds source_binding_mode output field; max_tokens 8192 unchanged (sufficient headroom)
+- Confluence adapter factory.py: relocate _build_confluence_adapter from conversation.py → shared utility
+- executor.py ephemeral path: _retrieve_ask_parameterized() never calls WikiMetadataStore.add() or any persistent store
+- P3-R: regex heuristic fully retired; ConfluencePageNotInKBError class retained for P2 use
+
+---
+
 ## [2026-05-16] backend-dev | ADR-032 P3 guard landed standalone — ConfluencePageNotInKBError hard-fail
 
 **Fixed the silent wrong-page substitution in WorkflowExecutor._retrieve_for_inputs.**

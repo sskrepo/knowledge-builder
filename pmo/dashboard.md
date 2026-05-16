@@ -10,19 +10,30 @@ status: current
 
 # Knowledgebase — Dashboard
 
-**Current phase:** Phase 1-3 + V3 + laptop mode — ADR-032 proposed (ask-time source ingestion); DECISION-012 open
-**Updated:** 2026-05-16 by architect (ADR-032 Proposed; DECISION-012 open — runtime ingestion option needed)
+**Current phase:** Phase 1-3 + V3 + laptop mode — ADR-032 ACCEPTED (DECISION-012 resolved: Option C); implementation blueprint active
+**Updated:** 2026-05-16 by architect (ADR-032 Accepted; DECISION-012 resolved; ADR-032-impl-plan.md filed; P1+P2 ready for dev dispatch)
 
-## Session update — 2026-05-16 (ADR-032 Proposed — ask-time source ingestion)
+## Session update — 2026-05-16 (ADR-032 Accepted — DECISION-012 locked; impl blueprint)
 
-**ADR-032 proposed. Production failure analyzed: TPM email-draft skill silently drew from wrong page. Three root causes documented. DECISION-012 open.**
+**DECISION-012 resolved: Option C (ephemeral request-scoped ingestion). ADR-032 Accepted. Implementation blueprint ready for dispatch.**
 
-- `docs/wiki/adr/ADR-032-ask-time-source-ingestion.md` — Proposed
-- `pmo/decisions/DECISION-012-ask-time-source-ingestion-option.md` — open (choose Option A/B/C)
-- P3 (silent wrong-page substitution) recommended for immediate fix independent of decision.
-- Architect recommends Option C (ephemeral request-scoped ingestion).
+- `pmo/decisions/DECISION-012-ask-time-source-ingestion-option.md` — RESOLVED (Option C, ephemeral, no KB persistence, author-time grant, space allow-list, per-consumer OAuth deferred to v2)
+- `docs/wiki/adr/ADR-032-ask-time-source-ingestion.md` — ACCEPTED (design section implementation-grade; options section collapsed)
+- `docs/wiki/adr/ADR-032-impl-plan.md` — ACTIVE blueprint (10 tasks; 4-phase fan-out; Confluence adapter reachability confirmed YES)
+- P3 (silent wrong-page guard) already shipped in commit 8c947dc.
 
-**Open decisions: DECISION-012** (reply "DECISION-012: option C" to accept recommendation).
+**Confluence adapter reachability verdict:** YES — emcp_direct and codex_proxy are already invoked server-side in the mcp_server process (INGEST state of authorSkill). Adapter factory relocation to framework/adapters/confluence/factory.py is the only infra change needed.
+
+**No open decisions.**
+
+**Implementation fan-out (ready to dispatch):**
+- Agent A (parallel): P1-A (capture_intent prompt v1.1) + P1-B (design_skill prompt v1.1) — YAML only, no .py
+- Agent B (parallel): P2-Infra — adapter factory.py + mcp_server lifespan wiring
+- Agent C (parallel): P1-E — re-author 4 affected TPM skill YAMLs
+- Agent D (serial, after Phase 1): P1-C → P1-D (conversation.py: CLARIFY + VALIDATE)
+- Agent E (parallel with D): P2-Exec (executor.py: ephemeral path + _EphemeralCache + WorkflowExecutor constructor)
+- Agent F (serial, after E): P3-R (retire regex heuristic) + Agent G: P2-API (openapi.yaml)
+- Agent H+I (after Phase 3): Tests-P1 + Tests-P2
 
 ---
 
@@ -263,11 +274,7 @@ python -m framework.cli.kb_cli promote framework/persona_builders/ops-eng.yaml -
 
 ## 🔴 Decisions awaiting your review
 
-| # | Decision | Options | Recommendation |
-|---|---|---|---|
-| [DECISION-012](decisions/DECISION-012-ask-time-source-ingestion-option.md) | Runtime ingestion mechanism for ask-parameterized skills (ADR-032) | A (sync ingest in ask) / B (queue + retry) / C (ephemeral, recommended) | **Option C** |
-
-Reply: `DECISION-012: option C` (or A/B with any caveats on trust boundary mitigations).
+(none — DECISION-012 resolved 2026-05-16)
 
 ## 🟡 In-flight work
 
