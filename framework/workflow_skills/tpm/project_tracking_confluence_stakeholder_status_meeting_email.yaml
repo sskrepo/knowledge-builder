@@ -7,8 +7,7 @@ source_binding:
   ingest_on_demand: true
   source_type: confluence_page
   space_allow_list:
-    - FA
-    - PROJ
+    - OCIFACP
   ephemeral_ttl_seconds: 300
 trigger:
   on_request:
