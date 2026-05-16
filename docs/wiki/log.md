@@ -4,6 +4,26 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] backend-dev | ADR-030 C-stream C1–C4 — all authorSkill prompts cut to PromptRegistry
+
+**Task: ADR-030 SERIAL C-stream: C1 conversation.py → C2 synthesize_schema.py → C3 review.py → C4 executor.py.**
+
+All 9 hard-coded prompt constants in conversation.py, 1 in synthesize_schema.py, 1 in review.py,
+and the inline f-string prompt in executor._llm_extract_fields are now served by PromptRegistry.
+persona_prompts.yaml deleted — content already in persona_overlays.yaml (P2).
+
+Bugs fixed during C-stream:
+- prompt_registry.py: _DEFAULT_PROMPTS_DIR parents[2]→parents[1] (wrong path; registry loaded 0 prompts)
+- skill_builder.yaml: description_synthesis backslash line-continuation → single line (SHA mismatch)
+- executor.yaml: template: | → template: |- (trailing newline byte-identity for executor_extract)
+
+Test files updated: test_adr028_stream_a.py, test_persona_prompts_loader.py (full rewrite),
+test_adr029_s6.py, test_failure_classifier_gate.py, test_skill_builder_conversation.py.
+New: test_adr030_cutover.py (25 structural tests verifying C1–C4 cutover).
+
+4 commits: 0661b79 (C1), 17cf699 (C2), 6c13d3b (C3), 199e5c1 (C4).
+1124 tests pass; 8 pre-existing failures unrelated to prompt work.
+
 ## [2026-05-16] backend-dev | ADR-030 P3+P4 — prompt_lab harness CLI + fixtures + docs generator
 
 **Task: P3 (harness CLI + fixtures + tests) + P4 (authorskill-prompts.md generator) — combined.**
