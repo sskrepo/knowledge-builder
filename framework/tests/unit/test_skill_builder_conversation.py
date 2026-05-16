@@ -1828,8 +1828,11 @@ class TestCaptureIntentState:
         }
         conv._state = "CAPTURE_INTENT"
         turn = conv._handle_capture_intent("weekly, every Friday")
-        # After clarification it re-ran CAPTURE_INTENT; should be at CAPTURE_INTENT or CONFIGURE_SOURCES
-        assert turn.state in ("CAPTURE_INTENT", "CONFIGURE_SOURCES")
+        # Non-ok input amends the intent and re-runs CAPTURE_INTENT. Under ADR-028 S3
+        # the re-run surfaces the blocking ambiguity as a CLARIFY turn (legacy
+        # 'ambiguities' key is treated as blocking); pre-S3 it stayed at
+        # CAPTURE_INTENT / advanced to CONFIGURE_SOURCES.
+        assert turn.state in ("CAPTURE_INTENT", "CONFIGURE_SOURCES", "CLARIFY")
         # The intent was amended
         assert "Additional context" in conv._data.intent_description or "Friday" in conv._data.intent_description
 
@@ -1888,7 +1891,7 @@ class TestConfigureSourcesV2:
         llm = MagicMock()
         inspect_sources_called = []
 
-        def fake_inspect(self_conv):
+        def fake_inspect(*args, **kwargs):
             inspect_sources_called.append(True)
             return MagicMock(state="INSPECT_SOURCES", message="ok")
 
@@ -2056,7 +2059,7 @@ class TestDesignSkill:
         llm = _make_mock_llm_json(self._design_response())
         conv = self._make_conv(llm)
 
-        with patch("framework.skill_builder.conversation.ShimKb") as mock_shim_cls:
+        with patch("framework.orchestrator.shim_kb.ShimKb") as mock_shim_cls:
             mock_shim = MagicMock()
             mock_shim.cards_visible_to.return_value = []
             mock_shim_cls.return_value = mock_shim
@@ -2070,7 +2073,7 @@ class TestDesignSkill:
         llm = _make_mock_llm_json(self._design_response())
         conv = self._make_conv(llm)
 
-        with patch("framework.skill_builder.conversation.ShimKb") as mock_shim_cls:
+        with patch("framework.orchestrator.shim_kb.ShimKb") as mock_shim_cls:
             mock_shim_cls.return_value.cards_visible_to.return_value = []
             conv._run_design_skill()
 
@@ -2081,7 +2084,7 @@ class TestDesignSkill:
         llm = _make_mock_llm_json(self._design_response())
         conv = self._make_conv(llm)
 
-        with patch("framework.skill_builder.conversation.ShimKb") as mock_shim_cls:
+        with patch("framework.orchestrator.shim_kb.ShimKb") as mock_shim_cls:
             mock_shim_cls.return_value.cards_visible_to.return_value = []
             conv._run_design_skill()
 
@@ -2100,7 +2103,7 @@ class TestDesignSkill:
         llm = _make_mock_llm_json({"schema": {"title": "broken"}})  # missing properties
         conv = self._make_conv(llm)
 
-        with patch("framework.skill_builder.conversation.ShimKb") as mock_shim_cls:
+        with patch("framework.orchestrator.shim_kb.ShimKb") as mock_shim_cls:
             mock_shim_cls.return_value.cards_visible_to.return_value = []
             with pytest.raises(RuntimeError, match="DESIGN_SKILL: LLM returned an invalid design"):
                 conv._run_design_skill()
