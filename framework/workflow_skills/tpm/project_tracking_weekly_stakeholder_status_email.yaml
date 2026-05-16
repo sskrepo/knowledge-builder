@@ -1,0 +1,127 @@
+workflow_skill: project_tracking_weekly_stakeholder_status_email
+persona: tpm
+status: draft
+source_binding:
+  mode: ask_parameterized
+  input_param: page_id
+  ingest_on_demand: true
+  source_type: confluence_page
+  space_allow_list:
+    - FA
+    - PROJ
+  ephemeral_ttl_seconds: 300
+trigger:
+  on_request:
+    enabled: true
+    inputs:
+    - name: page_id
+      type: confluence_page_ref
+      description: "Confluence pageId or full page URL of the project tracking page to use"
+      required: true
+    output_format: email
+    response_mode: artifact_url
+skill_card:
+  summary: Read a project tracking Confluence page and generate a weekly program status
+    email to stakeholders covering RAG summary, schedule health, ORM status, agenda,
+    blockers, next steps, exec asks, and a complete RFC 5322 .eml draft.
+  use_when: 'User asks for: generate a weekly stakeholder status email from a project
+    tracking Confluence page; weekly program status email for stakeholders (produces
+    email / .eml output)'
+  example_invocations:
+  - 'Generate the weekly stakeholder status email from the project Confluence page.
+    Include RAG summary, milestones, agenda, blockers, next steps. Output: email.'
+  do_not_use_for: Single-fact lookups (use vector_search). Live operational data (use
+    query_fleet).
+requires_extractions:
+- kb: tpm.project_tracking_weekly_stakeholder_status_email
+  required_fields:
+  - email_subject
+  - email_to_recipients
+  - meeting_datetime_timezone
+  - project_name
+  - phase_and_status
+  - tpm_owner
+  - primary_jira_keys
+  - project_links
+  - scope_summary
+  - orm_status
+  - schedule_health
+  - rag_summary
+  - agenda_overview
+  - blocking_issues
+  - next_steps
+  - exec_asks
+  - closing_requests
+  - stakeholder_team_pocs
+  - output_eml
+synthesis:
+  output_format: email
+  template: synthesis/templates/project_tracking_weekly_stakeholder_status_email.email
+  slide_mapping: synthesis/mappings/project_tracking_weekly_stakeholder_status_email.yaml
+  layout: default
+  field_mapping:
+    email_subject:
+      section: Email Subject
+      source_field: email_subject
+    email_to_recipients:
+      section: Email To Recipients
+      source_field: email_to_recipients
+    meeting_datetime_timezone:
+      section: Meeting Datetime Timezone
+      source_field: meeting_datetime_timezone
+    project_name:
+      section: Project Name
+      source_field: project_name
+    phase_and_status:
+      section: Phase And Status
+      source_field: phase_and_status
+    tpm_owner:
+      section: Tpm Owner
+      source_field: tpm_owner
+    primary_jira_keys:
+      section: Primary Jira Keys
+      source_field: primary_jira_keys
+    project_links:
+      section: Project Links
+      source_field: project_links
+    scope_summary:
+      section: Scope Summary
+      source_field: scope_summary
+    orm_status:
+      section: Orm Status
+      source_field: orm_status
+    schedule_health:
+      section: Schedule Health
+      source_field: schedule_health
+    rag_summary:
+      section: Rag Summary
+      source_field: rag_summary
+    agenda_overview:
+      section: Agenda Overview
+      source_field: agenda_overview
+    blocking_issues:
+      section: Blocking Issues
+      source_field: blocking_issues
+    next_steps:
+      section: Next Steps
+      source_field: next_steps
+    exec_asks:
+      section: Exec Asks
+      source_field: exec_asks
+    closing_requests:
+      section: Closing Requests
+      source_field: closing_requests
+    stakeholder_team_pocs:
+      section: Stakeholder Team Pocs
+      source_field: stakeholder_team_pocs
+    output_eml:
+      section: Output Eml
+      source_field: output_eml
+delivery:
+  kind: filesystem
+  path: ~/.kbf/outputs/project_tracking_weekly_stakeholder_status_email.email
+eval:
+  gold_set: eval/gold_sets/tpm-project_tracking_weekly_stakeholder_status_email-workflow.jsonl
+  exit_criteria:
+    field_accuracy: 0.85
+    delivery_success_rate: 0.99

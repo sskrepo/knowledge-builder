@@ -1,0 +1,96 @@
+workflow_skill: project_tracking_stakeholder_status_email
+persona: tpm
+status: draft
+source_binding:
+  mode: ask_parameterized
+  input_param: page_id
+  ingest_on_demand: true
+  source_type: confluence_page
+  space_allow_list:
+    - FA
+    - PROJ
+  ephemeral_ttl_seconds: 300
+trigger:
+  on_request:
+    enabled: true
+    inputs:
+    - name: page_id
+      type: confluence_page_ref
+      description: "Confluence pageId or full page URL of the project tracking page to use"
+      required: true
+    output_format: email
+    response_mode: artifact_url
+skill_card:
+  summary: Create a new skill using Knowledgebase MCP. I want to create a skill for
+    tpm persona that needs to look at https://confluence.oraclecorp.com/confluence/pages/viewpage.action?pageId=18625350641
+    project
+  use_when: 'User asks for: Create a new skill using Knowledgebase MCP. I want to
+    create a skill for tpm persona that needs to look at https://confluence.oraclecorp.com/confluence/pages/viewpage.action?pageId=18625350641
+    project (produces email output)'
+  example_invocations:
+  - 'Create a new skill using Knowledgebase MCP. I want to create a skill for tpm
+    persona that needs to look at https://confluence.oraclecorp.com/confluence/pages/viewpage.action?pageId=18625350641
+    project tracking page, prepare an agenda for my weekly tracking meeting where
+    I meet all the stakeholder te Output: email.'
+  do_not_use_for: Single-fact lookups (use vector_search). Live operational data (use
+    query_fleet).
+requires_extractions:
+- kb: tpm.project_tracking_stakeholder_status_email
+  required_fields:
+  - meeting_context
+  - orm_status
+  - rag_summary
+  - schedule_health
+  - blocking_issues
+  - next_steps
+  - stakeholders_and_teams
+  - agenda_topics
+  - links_and_artifacts
+  - email_draft
+- kb: tpm.tpm_weekly_ops
+  required_fields:
+  - exec_asks
+synthesis:
+  output_format: email
+  template: synthesis/templates/project_tracking_stakeholder_status_email.email
+  slide_mapping: synthesis/mappings/project_tracking_stakeholder_status_email.yaml
+  layout: default
+  field_mapping:
+    meeting_context:
+      section: Meeting Context
+      source_field: meeting_context
+    orm_status:
+      section: Orm Status
+      source_field: orm_status
+    rag_summary:
+      section: Rag Summary
+      source_field: rag_summary
+    schedule_health:
+      section: Schedule Health
+      source_field: schedule_health
+    blocking_issues:
+      section: Blocking Issues
+      source_field: blocking_issues
+    next_steps:
+      section: Next Steps
+      source_field: next_steps
+    stakeholders_and_teams:
+      section: Stakeholders And Teams
+      source_field: stakeholders_and_teams
+    agenda_topics:
+      section: Agenda Topics
+      source_field: agenda_topics
+    links_and_artifacts:
+      section: Links And Artifacts
+      source_field: links_and_artifacts
+    email_draft:
+      section: Email Draft
+      source_field: email_draft
+delivery:
+  kind: filesystem
+  path: ~/.kbf/outputs/project_tracking_stakeholder_status_email.email
+eval:
+  gold_set: eval/gold_sets/tpm-project_tracking_stakeholder_status_email-workflow.jsonl
+  exit_criteria:
+    field_accuracy: 0.85
+    delivery_success_rate: 0.99

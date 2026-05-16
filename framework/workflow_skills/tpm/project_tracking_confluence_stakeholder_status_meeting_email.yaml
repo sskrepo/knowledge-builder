@@ -1,0 +1,119 @@
+workflow_skill: project_tracking_confluence_stakeholder_status_meeting_email
+persona: tpm
+status: draft
+source_binding:
+  mode: ask_parameterized
+  input_param: page_id
+  ingest_on_demand: true
+  source_type: confluence_page
+  space_allow_list:
+    - FA
+    - PROJ
+  ephemeral_ttl_seconds: 300
+trigger:
+  on_request:
+    enabled: true
+    inputs:
+    - name: page_id
+      type: confluence_page_ref
+      description: "Confluence pageId or full page URL of the project tracking page to use"
+      required: true
+    output_format: email
+    response_mode: artifact_url
+skill_card:
+  summary: Read a project tracking Confluence page and generate a ready-to-send weekly
+    stakeholder tracking-meeting AGENDA email so each stakeholder-team POC arrives
+    prepared with confirmed status and next actions.
+  use_when: 'User asks for: read a project tracking Confluence page and generate a
+    ready-to-send weekly stakeholder tracking-meeting AGENDA email so each stakeholder-team
+    POC arrives prepared with confirmed status and next actions (produces email output)'
+  example_invocations:
+  - 'Read a project tracking Confluence page and generate a ready-to-send weekly stakeholder
+    tracking-meeting AGENDA email so each stakeholder-team POC arrives prepared with
+    confirmed status and next actions. Required fields only: project_name, rag_summary,
+    schedule_health, next_deliverables, email_subject. Output: email.'
+  do_not_use_for: Single-fact lookups (use vector_search). Live operational data (use
+    query_fleet).
+requires_extractions:
+- kb: tpm.project_tracking_confluence_stakeholder_status_meeting_email
+  required_fields:
+  - meeting_datetime_pt
+  - project_name
+  - email_to
+  - email_cc
+  - meeting_series_title
+  - rag_summary
+  - schedule_health
+  - next_deliverables
+  - orm_status
+  - reference_links
+  - project_scope_summary
+  - slack_info
+  - email_subject
+  - email_body
+  - confluence_page_link
+- kb: tpm.tpm_dependencies
+  required_fields:
+  - risks_dependencies_decisions
+synthesis:
+  output_format: email
+  template: synthesis/templates/project_tracking_confluence_stakeholder_status_meeting_email.email
+  slide_mapping: synthesis/mappings/project_tracking_confluence_stakeholder_status_meeting_email.yaml
+  layout: default
+  field_mapping:
+    meeting_datetime_pt:
+      section: Meeting Datetime Pt
+      source_field: meeting_datetime_pt
+    project_name:
+      section: Project Name
+      source_field: project_name
+    email_to:
+      section: Email To
+      source_field: email_to
+    email_cc:
+      section: Email Cc
+      source_field: email_cc
+    meeting_series_title:
+      section: Meeting Series Title
+      source_field: meeting_series_title
+    rag_summary:
+      section: Rag Summary
+      source_field: rag_summary
+    schedule_health:
+      section: Schedule Health
+      source_field: schedule_health
+    next_deliverables:
+      section: Next Deliverables
+      source_field: next_deliverables
+    risks_dependencies_decisions:
+      section: Risks Dependencies Decisions
+      source_field: risks_dependencies_decisions
+    orm_status:
+      section: Orm Status
+      source_field: orm_status
+    reference_links:
+      section: Reference Links
+      source_field: reference_links
+    project_scope_summary:
+      section: Project Scope Summary
+      source_field: project_scope_summary
+    slack_info:
+      section: Slack Info
+      source_field: slack_info
+    email_subject:
+      section: Email Subject
+      source_field: email_subject
+    email_body:
+      section: Email Body
+      source_field: email_body
+    confluence_page_link:
+      section: Confluence Page Link
+      source_field: confluence_page_link
+delivery:
+  kind: filesystem
+  path: ~/.kbf/outputs/project_tracking_confluence_stakeholder_status_meeting_email.email
+eval:
+  gold_set: eval/gold_sets/tpm-project_tracking_confluence_stakeholder_status_meeting_email-workflow.jsonl
+  exit_criteria:
+    field_accuracy: 0.85
+    delivery_success_rate: 0.99

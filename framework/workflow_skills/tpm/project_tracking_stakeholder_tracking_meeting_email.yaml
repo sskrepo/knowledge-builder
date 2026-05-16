@@ -1,0 +1,88 @@
+workflow_skill: project_tracking_stakeholder_tracking_meeting_email
+persona: tpm
+status: draft
+source_binding:
+  mode: ask_parameterized
+  input_param: page_id
+  ingest_on_demand: true
+  source_type: confluence_page
+  space_allow_list:
+    - FA
+    - PROJ
+  ephemeral_ttl_seconds: 300
+trigger:
+  on_request:
+    enabled: true
+    inputs:
+    - name: page_id
+      type: confluence_page_ref
+      description: "Confluence pageId or full page URL of the project tracking page to use"
+      required: true
+    output_format: email
+    response_mode: artifact_url
+skill_card:
+  summary: Read a project tracking Confluence page and generate a ready-to-send weekly
+    stakeholder tracking-meeting agenda email with pre-reads so each POC arrives prepared
+    with confirmed status, dated next actions, blockers, and cross-team dependencies.
+  use_when: 'User asks for: generate a stakeholder tracking meeting agenda email from
+    a project tracking Confluence page; pre-read email for weekly tracking meeting
+    (produces email output)'
+  example_invocations:
+  - 'Generate the weekly stakeholder tracking-meeting agenda email from the project
+    Confluence page. Include pre-reads, RAG summary, next deliverables by team, and
+    risks. Output: email.'
+  do_not_use_for: Single-fact lookups (use vector_search). Live operational data (use
+    query_fleet).
+requires_extractions:
+- kb: tpm.project_tracking_stakeholder_tracking_meeting_email
+  required_fields:
+  - subject
+  - to_recipients
+  - cc_recipients
+  - rag_summary
+  - blocking_issues
+  - next_steps
+  - eml_rfc822_draft
+  - meeting_datetime_pdt
+  - rsvp_datetime_pdt
+synthesis:
+  output_format: email
+  template: synthesis/templates/project_tracking_stakeholder_tracking_meeting_email.email
+  slide_mapping: synthesis/mappings/project_tracking_stakeholder_tracking_meeting_email.yaml
+  layout: default
+  field_mapping:
+    subject:
+      section: Subject
+      source_field: subject
+    to_recipients:
+      section: To Recipients
+      source_field: to_recipients
+    cc_recipients:
+      section: Cc Recipients
+      source_field: cc_recipients
+    rag_summary:
+      section: Rag Summary
+      source_field: rag_summary
+    blocking_issues:
+      section: Blocking Issues
+      source_field: blocking_issues
+    next_steps:
+      section: Next Steps
+      source_field: next_steps
+    eml_rfc822_draft:
+      section: Eml Rfc822 Draft
+      source_field: eml_rfc822_draft
+    meeting_datetime_pdt:
+      section: Meeting Datetime Pdt
+      source_field: meeting_datetime_pdt
+    rsvp_datetime_pdt:
+      section: Rsvp Datetime Pdt
+      source_field: rsvp_datetime_pdt
+delivery:
+  kind: filesystem
+  path: ~/.kbf/outputs/project_tracking_stakeholder_tracking_meeting_email.email
+eval:
+  gold_set: eval/gold_sets/tpm-project_tracking_stakeholder_tracking_meeting_email-workflow.jsonl
+  exit_criteria:
+    field_accuracy: 0.85
+    delivery_success_rate: 0.99

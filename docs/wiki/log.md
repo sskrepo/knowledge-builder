@@ -4,6 +4,19 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] backend-dev | ADR-032 P1-E — 4 TPM email skills promoted to ask_parameterized with typed page_id input + space allow-list
+
+**P1-E complete.**
+
+- `framework/workflow_skills/tpm/project_tracking_stakeholder_status_email.yaml` — UPDATED: added `source_binding` block (mode: ask_parameterized, input_param: page_id, ingest_on_demand: true, source_type: confluence_page, space_allow_list: [FA, PROJ], ephemeral_ttl_seconds: 300); replaced generic `{name:input, type:string}` trigger input with typed `{name:page_id, type:confluence_page_ref, required:true}`.
+- `framework/workflow_skills/tpm/project_tracking_confluence_stakeholder_status_meeting_email.yaml` — CREATED: full skill YAML with source_binding block + typed page_id trigger input + fields from parser schema v1.
+- `framework/workflow_skills/tpm/project_tracking_stakeholder_tracking_meeting_email.yaml` — CREATED: full skill YAML with source_binding block + typed page_id trigger input + fields from parser schema v1.
+- `framework/workflow_skills/tpm/project_tracking_weekly_stakeholder_status_email.yaml` — CREATED: full skill YAML with source_binding block + typed page_id trigger input + fields from parser schema v1.
+- `framework/tests/unit/test_source_binding_yaml.py` — NEW: 36 tests asserting source_binding.mode=ask_parameterized + ingest_on_demand=true + input_param matches declared trigger input + space_allow_list non-empty for all 4 email skills; and asserting NO source_binding on the 3 non-email skills (26ai_confluence_pptx, 26ai_fa_db_upgrade_pptx, weekly_exec_review). All 36 pass.
+- Non-email TPM skills (26ai_confluence_pptx, 26ai_fa_db_upgrade_pptx, weekly_exec_review) left untouched — author_fixed default.
+- space_allow_list: [FA, PROJ] per impl-plan P1-E task spec (the plan explicitly states this value; it covers both the FA/FAAAS space where 26ai project lives and the PROJ general space).
+- Note: these are on-disk authoring YAML edits only. A re-promote/re-ingest cycle is needed for full runtime effect.
+
 ## [2026-05-16] backend-dev | ADR-032 P1-A + P1-B — capture_intent/design_skill prompts bumped to v1.1; 4 fixtures added
 
 **P1-A + P1-B (parallel-safe YAML-only tasks) complete.**
