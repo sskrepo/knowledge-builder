@@ -146,6 +146,23 @@ _SQL_LIST_PB_PERSONA_STATUS = """
     ORDER BY updated_at DESC
 """
 
+_SQL_LIST_PROMOTED_WF_ALL = """
+    SELECT DISTINCT persona, skill_name
+    FROM KB_SHIM.KBF_SKILL_ARTIFACTS
+    WHERE artifact_type = 'workflow_skill'
+      AND status IN ('promoted', 'production')
+    ORDER BY persona, skill_name
+"""
+
+_SQL_LIST_PROMOTED_WF_PERSONA = """
+    SELECT DISTINCT persona, skill_name
+    FROM KB_SHIM.KBF_SKILL_ARTIFACTS
+    WHERE artifact_type = 'workflow_skill'
+      AND status IN ('promoted', 'production')
+      AND persona = :persona
+    ORDER BY skill_name
+"""
+
 # Maps artifact_type → relative path template.
 # MUST cover every entry in ARTIFACT_TYPES (framework/deploy/skill_store/_base.py)
 # and the chk_ksa_artifact_type DB constraint (framework/db/migrations/006_*.sql).
@@ -496,3 +513,36 @@ class AdbSkillStore(SkillStore):
                 "updated_at":   str(row["updated_at"]) if row["updated_at"] else "",
             })
         return results
+
+    def list_promoted_workflow_skills(
+        self,
+        persona: str | None = None,
+    ) -> set[tuple[str, str]]:
+        """Return (persona, skill_name) pairs for promoted/production workflow skills.
+
+        Queries KBF_SKILL_ARTIFACTS WHERE artifact_type='workflow_skill' AND
+        status IN ('promoted', 'production').  Uses DISTINCT so multiple artifact
+        rows per skill collapse to one entry.
+        """
+        if persona:
+            sql = _SQL_LIST_PROMOTED_WF_PERSONA
+            params: dict = {"persona": persona}
+        else:
+            sql = _SQL_LIST_PROMOTED_WF_ALL
+            params = {}
+
+        with self._pool.acquire() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                self._install_dict_rowfactory(cur)
+                rows = cur.fetchall()
+
+        result: set[tuple[str, str]] = set()
+        for row in rows:
+            result.add((row["persona"], row["skill_name"]))
+
+        log.debug(
+            "AdbSkillStore.list_promoted_workflow_skills: persona=%s found=%d",
+            persona, len(result),
+        )
+        return result

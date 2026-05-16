@@ -166,3 +166,22 @@ class SkillStore(ABC):
             List of dicts, each with keys:
               persona, kb_name, content_yaml, status, updated_at
         """
+
+    @abstractmethod
+    def list_promoted_workflow_skills(
+        self,
+        persona: str | None = None,
+    ) -> set[tuple[str, str]]:
+        """Return (persona, skill_name) pairs for promoted/production workflow skills.
+
+        Queries KBF_SKILL_ARTIFACTS for rows where artifact_type='workflow_skill'
+        and status IN ('promoted', 'production').  The result is used by
+        ShimWorkflows to filter out draft skills from the Tier-1 LLM router.
+
+        Args:
+            persona: Optional filter by persona slug.
+
+        Returns:
+            Set of (persona, skill_name) tuples.  Empty set = no promoted skills
+            (not an error).
+        """

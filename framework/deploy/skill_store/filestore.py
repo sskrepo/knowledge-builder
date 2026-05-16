@@ -55,8 +55,18 @@ def _rel_path(persona: str, skill_name: str, artifact_type: str) -> str:
 class FilestoreSkillStore(SkillStore):
     """Filesystem-backed skill store — laptop / CI fallback."""
 
-    def __init__(self, repo_root: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        repo_root: Path | str | None = None,
+        wf_promo_root: Path | str | None = None,
+    ) -> None:
         self._root = Path(repo_root) if repo_root else REPO_ROOT
+        # Root for workflow promotion markers — defaults to ~/.kbf/workflow_promotions/
+        # Can be overridden in tests to avoid touching the real home directory.
+        self._wf_promo_root = (
+            Path(wf_promo_root) if wf_promo_root
+            else Path.home() / ".kbf" / "workflow_promotions"
+        )
 
     # ------------------------------------------------------------------
     # SkillStore interface
@@ -249,3 +259,56 @@ class FilestoreSkillStore(SkillStore):
                     "updated_at":   wrapper.get("updated_at", ""),
                 })
         return results
+
+    def list_promoted_workflow_skills(
+        self,
+        persona: str | None = None,
+    ) -> set[tuple[str, str]]:
+        """Return (persona, skill_name) pairs for promoted/production workflow skills.
+
+        FilestoreSkillStore reads the per-persona ~/.kbf/persona_builders/ store for
+        workflow skill status entries written by upsert_persona_builder_kb when
+        artifact_type='workflow_skill'.  In practice, the filestore is used only in
+        tests; the authoritative implementation is AdbSkillStore.
+
+        For the filestore we scan list_skills() and return those that have a
+        status file in ~./kbf/persona_builders indicating 'promoted' or 'production'.
+        Since the filestore promote() is a no-op, this always returns an empty set
+        unless tests explicitly prime the store.
+        """
+        result: set[tuple[str, str]] = set()
+
+        # Scan self._wf_promo_root/{persona}/{skill_name}.yaml for promotion markers.
+        # This root defaults to ~/.kbf/workflow_promotions/ but can be overridden
+        # at construction time for tests to avoid touching the real home directory.
+        if not self._wf_promo_root.exists():
+            return result
+
+        search_dirs = (
+            [self._wf_promo_root / persona] if persona
+            else [d for d in self._wf_promo_root.iterdir() if d.is_dir()]
+        )
+
+        for persona_dir in search_dirs:
+            if not persona_dir.is_dir():
+                continue
+            p_name = persona_dir.name
+            for entry_file in sorted(persona_dir.glob("*.yaml")):
+                try:
+                    entry = yaml.safe_load(entry_file.read_text(encoding="utf-8")) or {}
+                except Exception as exc:
+                    log.warning(
+                        "FilestoreSkillStore.list_promoted_workflow_skills: "
+                        "could not read %s: %s", entry_file, exc
+                    )
+                    continue
+                entry_status = entry.get("status", "draft")
+                if entry_status in ("promoted", "production"):
+                    skill_name = entry.get("skill_name", entry_file.stem)
+                    result.add((p_name, skill_name))
+
+        log.debug(
+            "FilestoreSkillStore.list_promoted_workflow_skills: persona=%s found=%d",
+            persona, len(result),
+        )
+        return result

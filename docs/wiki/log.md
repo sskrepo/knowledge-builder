@@ -4,6 +4,25 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] backend-dev | BUG-queue-2ad9a — ShimWorkflows ADB-aware (drafts no longer reach Tier-1 router)
+
+**Fix: HIGH-severity silent-wrong-output. A promoted .eml skill silently returned another skill's .pptx because ShimWorkflows.all_cards() was disk-only and fed drafts to the Tier-1 LLM classifier.**
+
+Changes:
+- `framework/orchestrator/shim_workflows.py`: Added `skill_store=None` param (mirrors `ShimKb`). `all_cards()` now filters to ADB-promoted skills when store is wired. `all_cards_including_draft()` added for tooling. Laptop-mode (no store) explicitly INFO-logged. Store failure → WARNING + empty list (no drafts to classifier). `reload()` added.
+- `framework/deploy/skill_store/_base.py`: New abstract method `list_promoted_workflow_skills(persona=None) -> set[tuple[str,str]]`.
+- `framework/deploy/skill_store/adb.py`: `AdbSkillStore.list_promoted_workflow_skills()` — queries `KBF_SKILL_ARTIFACTS` WHERE `artifact_type='workflow_skill' AND status IN ('promoted','production')`. SQL: `_SQL_LIST_PROMOTED_WF_ALL` + `_SQL_LIST_PROMOTED_WF_PERSONA`.
+- `framework/deploy/skill_store/filestore.py`: `FilestoreSkillStore.list_promoted_workflow_skills()` — reads `~/.kbf/workflow_promotions/` (injectable `wf_promo_root` for tests). Constructor gains `wf_promo_root` param.
+- `framework/deploy/mcp_server.py`: `ShimWorkflows` now constructed with `skill_store=app.state.skill_store` (same instance as ShimKb).
+- `framework/skill_builder/synthesize_workflow.py`: FIX 2 — `_build_skill_card` produces `example_invocations[0] = f"{task[:300]} Output: {output_format}."` (was `task[:100]`). `use_when` also carries output_format. Differentiates .eml from .pptx skill cards for the Tier-1 classifier.
+- `docs/wiki/adr/ADR-016-workflow-skills.md`: Amendment documenting ADB as single source of truth for workflow promotion, shim_workflows mirrors shim_kb pattern, disk YAML is authoring artifact only, Tier-1 classifier only sees promoted skills.
+
+New tests (0 pre-existing regressions):
+- `framework/tests/unit/test_shim_workflows_adb.py`: 18 tests (8 ShimWorkflows scenarios + 7 FilestoreSkillStore.list_promoted_workflow_skills).
+- `framework/tests/unit/test_synthesize_workflow_skillcard.py`: 10 tests (7 _build_skill_card + 3 synthesize_workflow_skill integration).
+
+Full suite (excl. 8 known baseline failures): 258 passed, 0 failures.
+
 ## [2026-05-16] backend-dev | ADR-030 C-stream C1–C4 — all authorSkill prompts cut to PromptRegistry
 
 **Task: ADR-030 SERIAL C-stream: C1 conversation.py → C2 synthesize_schema.py → C3 review.py → C4 executor.py.**

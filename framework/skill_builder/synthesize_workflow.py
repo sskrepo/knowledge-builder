@@ -44,7 +44,7 @@ def synthesize_workflow_skill(
         "persona": persona,
         "status": "draft",
         "trigger": _build_trigger(trigger_cfg, output_format, skill_name),
-        "skill_card": _build_skill_card(task, skill_name),
+        "skill_card": _build_skill_card(task, skill_name, output_format),
         "requires_extractions": _build_requires_extractions(
             requires_extractions, fields, persona, skill_name, intent
         ),
@@ -92,12 +92,18 @@ def _build_trigger(trigger_cfg: dict, output_format: str, skill_name: str) -> di
                                        "response_mode": "artifact_url"}}
 
 
-def _build_skill_card(task: str, skill_name: str) -> dict:
+def _build_skill_card(task: str, skill_name: str, output_format: str = "markdown") -> dict:
     summary = task[:200]
+    # Include the output format token in the example invocation so the Tier-1
+    # LLM router can distinguish skill cards by their artifact type (e.g. 'pptx'
+    # vs 'eml') even when the task descriptions are similar.
+    # BUG-queue-2ad9a FIX 2: task[:100] was too short to carry the output_format
+    # context, causing the router to pick the wrong skill for .eml vs .pptx.
+    example_invocation = f"{task[:300]} Output: {output_format}."
     return {
         "summary": summary,
-        "use_when": f"User asks for: {summary}",
-        "example_invocations": [task[:100]],
+        "use_when": f"User asks for: {summary} (produces {output_format} output)",
+        "example_invocations": [example_invocation],
         "do_not_use_for": (
             "Single-fact lookups (use vector_search). "
             "Live operational data (use query_fleet)."

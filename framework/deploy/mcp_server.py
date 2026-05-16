@@ -297,7 +297,10 @@ def _load_app():
         from ..persona_skills.tpm import TpmSkill
         from ..orchestrator.shim_workflows import ShimWorkflows
 
-        shim_workflows = ShimWorkflows(WORKFLOW_SKILLS_DIR)
+        shim_workflows = ShimWorkflows(
+            WORKFLOW_SKILLS_DIR,
+            skill_store=app.state.skill_store,
+        )
         state["shim_workflows"] = shim_workflows
 
         ops_eng_skill = OpsEngSkill(

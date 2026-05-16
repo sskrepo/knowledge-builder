@@ -158,6 +158,55 @@ executor.execute(skill_name, inputs):
 - **Global workflow skills (not persona-owned)**: rejected; persona ownership keeps each team's prompt scope manageable and aligns workflow authoring with persona-team accountability
 - **Single trigger model**: rejected; cron-only loses on-request convenience; on-request-only loses autonomous delivery
 
+## Amendment — ADB as single source of truth for workflow promotion (2026-05-16)
+
+**BUG-queue-2ad9a** revealed a HIGH-severity silent-wrong-output bug: a promoted
+`.eml` skill silently returned another skill's `.pptx` because the Tier-1 LLM
+router was fed draft skills it should never see.
+
+**Root cause**: `ShimWorkflows.__init__(workflow_skills_dir)` was disk-only.
+It read `cfg.get("status", "draft")` from on-disk YAML; that disk status is
+never updated on promote. `all_cards()` returned ALL cards (including drafts and
+never-promoted skills). The Tier-1 classifier received draft + promoted skills
+indistinguishably and picked the wrong artifact type.
+
+**Fix — ShimWorkflows is now ADB-aware (mirrors ShimKb precisely):**
+
+- `ShimWorkflows.__init__` gains a `skill_store=None` parameter (same shape as `ShimKb.__init__`).
+- Disk YAMLs are read for card bodies (name, use_when, example_invocations, etc.) only.
+- **Promotion status is resolved from `skill_store.list_promoted_workflow_skills()`** — a new method added to the `SkillStore` ABC, `AdbSkillStore`, and `FilestoreSkillStore`.
+- `all_cards()` returns **ONLY** skills whose `(persona, skill_name)` pair appears in the promoted set from ADB. Draft skills never reach the Tier-1 LLM classifier.
+- `all_cards_including_draft()` added for tooling/CLI introspection (not used by the classifier).
+- When `skill_store=None` (pure laptop/no-ADB): `all_cards()` serves all on-disk cards **with an explicit INFO log** ("laptop mode") — this is a documented decision, not a silent fallback.
+- When `skill_store` raises during `list_promoted_workflow_skills()`: WARNING logged, `all_cards()` returns `[]` — no unknown-status drafts reach the classifier while the store is recovering.
+- `ShimWorkflows` is wired with `skill_store=app.state.skill_store` in `mcp_server.py` lifespan, the same instance passed to `ShimKb`.
+
+**Disk YAML is the authoring artifact only.** The `status:` field in
+`framework/workflow_skills/**/*.yaml` files is informational metadata from the
+synthesis run. It is never written back at runtime and is never relied upon for
+routing decisions. ADB (`KBF_SKILL_ARTIFACTS`) is the single source of truth for
+whether a workflow skill is promoted.
+
+**This is the identical discipline as ADR-015 Option B** (ADB as source of truth
+for KB promotion in ShimKb), now applied to workflow skills. The e685d drift class
+(dual source of truth where disk and ADB diverge) is closed for workflow skills.
+
+**`list_promoted_workflow_skills` signature:**
+```python
+def list_promoted_workflow_skills(
+    self,
+    persona: str | None = None,
+) -> set[tuple[str, str]]:
+    """Return (persona, skill_name) pairs where artifact_type='workflow_skill'
+    AND status IN ('promoted', 'production') in KBF_SKILL_ARTIFACTS."""
+```
+
+**FIX 2 (orthogonal, same commit):** `_build_skill_card` in `synthesize_workflow.py`
+now produces `example_invocations[0] = f"{task[:300]} Output: {output_format}."` instead
+of `task[:100]`. The `output_format` token (e.g. 'pptx', 'eml') is now always present in
+the example invocation and `use_when`, so the Tier-1 classifier can distinguish workflow
+skills by artifact type even when task descriptions are similar.
+
 ## Consequences
 
 - New module: `framework/workflow_runtime/` (~500 LOC for v1)
@@ -166,6 +215,7 @@ executor.execute(skill_name, inputs):
 - MCP server registers workflow skills as tools at startup
 - Eval extends to workflow output quality (per ADR-005 amend 4)
 - Cost telemetry adds a new operation kind: `workflow_execute`
+- (Amendment 2026-05-16) `ShimWorkflows` is ADB-aware; `SkillStore` ABC gains `list_promoted_workflow_skills()`
 
 ## References
 - [PDD V2 §4 — Workflow skills](../pdd/PDD-Knowledge-Builder-Framework-v2.md)
