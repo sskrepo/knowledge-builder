@@ -9,28 +9,12 @@ from __future__ import annotations
 import json
 import logging
 
+from .prompt_registry import get_registry  # noqa: E402
+
 log = logging.getLogger(__name__)
 
-_DESCRIPTION_SYNTHESIS_PROMPT = """\
-You are a Knowledge Builder Framework schema engineer. Your job is to write
-precise extraction instructions for each field in an extraction schema.
-
-The schema will be used by an LLM parser to extract structured data from
-{artifact_type} documents for persona "{persona}".
-
-User intent: "{intent}"
-
-For each field below, write a single concise extraction instruction (1-2 sentences)
-that tells the LLM parser exactly what content to look for and how to format it.
-Be specific — reference the section/slide title and describe the expected format.
-
-Fields (with source location in the artifact):
-{field_contexts}
-
-Return ONLY a JSON object mapping field_name → extraction_instruction string.
-Example: {{"schedule_health": "RAG status (Red/Amber/Green) for the schedule, \
-with a 1-2 sentence justification citing specific milestone dates or blockers."}}
-"""
+# ADR-030 C2: _DESCRIPTION_SYNTHESIS_PROMPT deleted; prompt served by PromptRegistry.
+# Use get_registry().get_prompt("description_synthesis", ...) at call sites.
 
 
 def synthesize_field_descriptions(
@@ -107,7 +91,9 @@ def _llm_synthesize_descriptions(
             ctx += f"\n  Sample content: {body[:200]}"
         context_lines.append(ctx)
 
-    prompt = _DESCRIPTION_SYNTHESIS_PROMPT.format(
+    # ADR-030 C2: prompt via PromptRegistry.
+    spec = get_registry().get_prompt(
+        "description_synthesis",
         artifact_type=artifact_type,
         persona=persona,
         intent=intent,
@@ -115,10 +101,10 @@ def _llm_synthesize_descriptions(
     )
 
     result = llm.chat(
-        model="synthesis",
-        messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"},
-        max_tokens=2048,
+        model=spec.model,
+        messages=[{"role": "user", "content": spec.text}],
+        response_format=spec.response_format,
+        max_tokens=spec.max_tokens,
     )
     raw = result["text"] if isinstance(result, dict) else str(result)
 
