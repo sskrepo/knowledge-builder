@@ -1,21 +1,24 @@
 ---
 title: "DECISION-010 — EVAL gold sets: auto-generated vs human-curated"
-status: decided
+status: superseded
 created: 2026-05-14
+superseded: 2026-05-15
 owner: architect
 deciders: user
 outcome: "Option A — auto-generate gold rows from live samples; surface to user with kind=auto_generated"
+superseded_by: "ADR-029 (Accepted, 2026-05-15) — terminal gate function only"
 tags: [eval, gold-sets, quality]
 related: [ADR-027, ADR-029]
 ---
 
-> **NOTE (2026-05-15) — Partially superseded by ADR-029 (proposed).**
-> ADR-029 proposes replacing the numeric recall@k + faithfulness TERMINAL GATE
-> with user-acceptance as the gate. The auto-generated gold rows are RETAINED
-> and continue to be computed — they are demoted from "gate" to "diagnostic
-> signal." If ADR-029 is accepted, DECISION-010's Option A outcome survives for
-> gold-row generation but its pass/fail gating function is superseded.
-> Do NOT delete this file. Read ADR-029 section E for the full disposition.
+> **SUPERSEDED (2026-05-15) — ADR-029 Accepted.**
+> ADR-029 (Accepted) replaces the numeric recall@k + faithfulness TERMINAL GATE
+> with user-acceptance as the gate. DECISION-010's Option A outcome survives for
+> gold-row generation: auto-generated gold rows are RETAINED and continue to be
+> computed, but they are demoted from "terminal gate" to "diagnostic signal" shown
+> alongside the gap report in the EVAL turn. No code deletion — only the PROMOTE
+> guard logic changes. Do NOT delete this file. See ADR-029 "Accepted decision"
+> block for the full disposition.
 
 # DECISION-010 — EVAL gold sets: auto-generated vs human-curated
 

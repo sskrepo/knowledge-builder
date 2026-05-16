@@ -57,8 +57,9 @@
 - [ADR-025 — Vector index INMEMORY rebuild on first production deploy ⚠️ prod gate](adr/ADR-025-vector-index-inmemory-prod-rebuild.md)
 - [ADR-026 — Source-grounded schema review + layout-aware PPTX rendering](adr/ADR-026-source-grounded-schema-review-and-layout-aware-pptx.md)
 - [ADR-027 — Design-first authorSkill — 16-state machine](adr/ADR-027-design-first-authorskill.md)
-- [ADR-028 — authorSkill: prompt investment, human-loop enforcement, and conversational clarification](adr/ADR-028-authorskill-prompt-investment-human-loop-conversation.md) — **PROPOSED — awaiting user direction (DECISION-011)**
-- [ADR-029 — Outcome-based EVAL: demonstration-artifact acceptance loop](adr/ADR-029-outcome-based-eval-acceptance-loop.md) — **PROPOSED — supersedes DECISION-010 terminal gate; reconciles DECISION-011; awaiting user direction**
+- [ADR-028 — authorSkill: prompt investment, human-loop enforcement, and conversational clarification](adr/ADR-028-authorskill-prompt-investment-human-loop-conversation.md) — **ACCEPTED 2026-05-15 — Item1=A (persona playbook), Item2=A (must_show_human), Item3=A (CLARIFY state), Item4=A (synthesisable)**
+- [ADR-029 — Outcome-based EVAL: demonstration-artifact acceptance loop](adr/ADR-029-outcome-based-eval-acceptance-loop.md) — **ACCEPTED 2026-05-15 — Option A + text-only comparator + image-only hard-reject; supersedes DECISION-010 terminal gate**
+- [ADR-028 + ADR-029 — Implementation Blueprint](adr/ADR-028-029-impl-plan.md) — **ACTIVE — file-partitioned, dependency-ordered work breakdown for 3-stream parallel dev team**
 
 ## Skill builder
 - **[authorSkill flow — state-by-state LLM usage map](authorskill-flow.md)** — NEW 16-state machine (post-ADR-027): design-first, source inspection before schema design, real EVAL with auto-generated gold sets

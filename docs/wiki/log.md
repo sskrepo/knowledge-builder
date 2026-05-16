@@ -4,6 +4,22 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-15] architect | ADR-028 & ADR-029 Accepted; persona playbook drafted; impl blueprint produced
+
+ADR-028 set to Accepted. Locked: Item1=Option A (persona YAML playbook injected into DESIGN_SKILL + CAPTURE_INTENT; concrete starter templates generated for all 9 personas in the fusion-apps cloud-platform domain), Item2=Option A (awaiting_user + must_show_human added to ConversationTurn; hard "do not auto-answer" added to authorSkill tool description), Item3=Option A (new CLARIFY state, 17th state; blocking_ambiguities vs nice_to_know split in CAPTURE_INTENT and DESIGN_SKILL prompts), Item4=Option A (synthesisable confidence level in INSPECT_SOURCES; DESIGN_SKILL allowed to include synthesisable fields with explicit aggregation instructions).
+
+ADR-029 set to Accepted. Locked: Option A (full outcome-based acceptance loop) with one explicit modification — NO vision-LLM; text comparator only; image-only references hard-rejected with user-facing message and re-upload prompt (not silent fallback). All 6 steps, constrained routing map, loop guardrails (max 3 iterations / $2.00 ceiling / consecutive-same-class detector / ship-as-draft escape), user acceptance as terminal gate. DECISION-010 superseded as terminal gate; auto-gold rows retained as diagnostic signal.
+
+DECISION-011 marked Resolved (all items Option A). DECISION-010 marked Superseded by ADR-029.
+
+framework/config/persona_prompts.yaml created with 9 persona stanzas (tpm, pm, architect, eng_mgr, developer, ops_eng, ops_mgr, service_owner, kbf_ops), each with key_fields, extraction_style, and one concrete few_shot_example grounded in the fusion-apps cloud-platform domain. Marked STARTER DRAFT.
+
+docs/wiki/adr/ADR-028-029-impl-plan.md created: file-partitioned, dependency-ordered blueprint for 3-stream parallel dev team. Serial stream: S1 (synthesisable) → S2 (must_show_human) → S3 (CLARIFY state) → S4 (persona injection) → S5 (ADR-029 Phase 1) → classifier validation gate → S6 (ADR-029 Phase 2). Parallel streams: P1 (persona_prompts loader tests), P2 (ArtifactComparator module), P3 (test suite expansion for S1-S4). Critical risk flagged: classifier must receive source capability inventory (not just diff), must emit structured evidence, and must be validated against the known 26ai PPT case before routing is enabled.
+
+dashboard.md, docs/wiki/index.md updated.
+
+---
+
 ## [2026-05-15] architect | ADR-029 proposed: outcome-based EVAL + DECISION-011 reconciliation
 
 Filed ADR-029 (proposed, NOT accepted). Proposes replacing the ADR-027 intrinsic EVAL (recall@k + faithfulness numeric gate) with an outcome-based, demonstration-artifact acceptance loop: (1) extract, (2) run full workflow to produce artifact, (3) compare produced artifact against user's reference using a semantic comparator (structure/density/layout/fidelity rubric), (4) surface gap report + CHANGE PROPOSAL, (5) route back to the appropriate prior state via a constrained failure-class → target-state map, (6) loop until user explicitly accepts. User acceptance is the terminal gate, not a numeric threshold. Root cause of the failure: reference artifact uploaded at UPLOAD_ARTIFACT_EXAMPLE is parsed into a layout dict then discarded — `_run_eval` (conversation.py:3180-3563) never reads `_data.artifact_layout` and never compares the produced PPTX against the reference. Feasibility analysis covers image-only reference problem (vision-LLM recommended, OCI constraint flagged), semantic rubric design, constrained routing map with loop guardrails (max 3 iterations, $2 cost ceiling, pathological-loop detector), and per-iteration cost (~$0.03-0.07). Three options presented (full loop, scoring-only, hybrid phased) with Option C recommended. DECISION-011 reconciliation: Items 2 + 4 are prerequisites for ADR-029; Item 3 is complementary; Item 1 is independent. DECISION-010 auto-gold rows retained as diagnostic signal, superseded only as terminal gate. Single recommended decision path provided. DECISION-010 marked with superseded-by note. dashboard.md + index.md updated. No code changes.

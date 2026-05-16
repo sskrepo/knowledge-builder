@@ -11,7 +11,7 @@ status: current
 # Knowledgebase — Dashboard
 
 **Current phase:** Phase 1-3 + V3 + laptop mode — ADR-027 design-first authorSkill live
-**Updated:** 2026-05-15 by architect (ADR-029 proposed: outcome-based EVAL + DECISION-011 reconciliation)
+**Updated:** 2026-05-15 by architect (ADR-028 + ADR-029 Accepted; DECISION-010 Superseded; DECISION-011 Resolved; persona_prompts.yaml committed; impl blueprint at docs/wiki/adr/ADR-028-029-impl-plan.md)
 
 ## Session update — 2026-05-14 (ADR-027 design-first authorSkill + DECISION-010)
 
@@ -218,15 +218,15 @@ python -m framework.cli.kb_cli promote framework/persona_builders/ops-eng.yaml -
 
 ## 🔴 Decisions awaiting your review
 
-| # | Title | Why | Options |
-|---|-------|-----|---------|
-| [DECISION-011](decisions/DECISION-011-authorskill-prompt-and-human-loop-direction.md) | authorSkill: prompt investment, human-loop enforcement, clarification strategy | ADR-028 audit found: static prompts, no human-loop signal, "ok" steamrolls ambiguities. 4 items to decide. | See DECISION-011 — reply "DECISION-011: Item1=A, Item2=A, Item3=A, Item4=A" |
-| [ADR-029](../docs/wiki/adr/ADR-029-outcome-based-eval-acceptance-loop.md) | Outcome-based EVAL — demonstration-artifact acceptance loop | EVAL passes while artifact is wrong; reference artifact discarded at UPLOAD_ARTIFACT_EXAMPLE; intrinsic scoring measures consistency not correctness. ADR-029 proposes outcome scoring + user-acceptance gate + constrained replan-routing. Supersedes DECISION-010 terminal gate. Reconciles DECISION-011 items. | Read ADR-029 sections D + E. Reply with chosen option (A/B/C) and DECISION-011 reconciliation path. |
+(None — all open decisions resolved as of 2026-05-15.)
 
 ## 🟡 In-flight work
 
 | Story | Module | Status | Owner | Blocked by |
 |-------|--------|--------|-------|-----------|
+| ADR-028/029 implementation — Stream A (serial: S1→S2→S3→S4→S5→gate→S6) | skill_builder/conversation.py | ⏳ ready to start | backend-dev (senior) | nothing |
+| ADR-028/029 implementation — Stream B (ArtifactComparator module) | skill_builder/comparator.py | ⏳ ready to start | backend-dev | nothing |
+| ADR-028/029 implementation — Stream C (tests: P1+P3) | tests/unit/ | ⏳ ready to start | qa-engineer | nothing |
 | Integration testing | all | ⏳ awaiting provisioning | dev-team | ADB + API keys |
 | Persona authoring workshops | workshops | ⏳ ready to schedule | pm | persona team availability |
 

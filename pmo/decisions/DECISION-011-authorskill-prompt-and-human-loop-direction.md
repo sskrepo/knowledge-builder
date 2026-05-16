@@ -1,103 +1,46 @@
 ---
 title: "DECISION-011 — authorSkill: prompt investment, human-loop enforcement, and clarification strategy"
-status: open
+status: resolved
 created: 2026-05-15
+decided: 2026-05-15
 owner: architect
 deciders: user
+outcome: "Item1=A, Item2=A, Item3=A, Item4=A — all items Option A. See ADR-028 (Accepted) and ADR-029 (Accepted)."
 tags: [skill-builder, prompts, ux, conversation]
 related_adr: ADR-028
 ---
 
 # DECISION-011 — authorSkill: Prompt & Human Loop Direction
 
-**Awaiting user decision.**
+**Resolved — 2026-05-15. All items Option A.**
 
-ADR-028 documents the audit findings and options. This decision file asks the
-user to choose one option per item so the Dev Manager can pick up implementation.
+See ADR-028 (Accepted) for full decision rationale, implementation contract, and consequences.
+See ADR-029 (Accepted) for the outcome-based EVAL acceptance loop that depends on Items 2 and 4.
 
----
+## Locked choices
 
-## What to decide
+- **Item 1 = Option A** — per-persona prompt fragments in `framework/config/persona_prompts.yaml`.
+  Concrete starter templates generated for all 9 personas (tpm, pm, architect, eng_mgr, developer,
+  ops_eng, ops_mgr, service_owner, kbf_ops) framed in the fusion-apps cloud-platform domain.
+  File committed for user review and editing.
+- **Item 2 = Option A** — `awaiting_user` + `must_show_human` added to `ConversationTurn`.
+  `authorSkill` tool description updated with hard "do not auto-answer" instruction.
+- **Item 3 = Option A** — new `CLARIFY` state (17th). Does not advance while blocking questions
+  are open. Prompts distinguish `blocking_ambiguities` from `nice_to_know`.
+- **Item 4 = Option A** — `confidence=synthesisable` added to INSPECT_SOURCES capability
+  inventory. DESIGN_SKILL may include synthesisable fields with explicit aggregation instructions.
 
-### Item 1 — Persona-aware prompts
+## Implementation sequencing
 
-Every LLM call in the authorSkill flow uses a static template. Persona is a
-label string only. It does not shape instructions.
+Per ADR-028 recommended sequencing (and ADR-029 dependency graph):
 
-Choose one:
-
-- **Option A (recommended)**: per-persona prompt fragments in a central YAML
-  playbook (`framework/config/persona_prompts.yaml`). Key fields, extraction
-  style, and few-shot guidance per persona, injected into DESIGN_SKILL and
-  CAPTURE_INTENT. ~2-3 days.
-
-- **Option B**: few-shot exemplars attached to each persona builder YAML. Persona
-  teams own the examples. ~3-4 days (requires persona team input).
-
-- **Option C**: dynamic wiki retrieval — DESIGN_SKILL queries the framework's own
-  wiki KB for persona-specific extraction guidance. ~1 day to wire + ongoing
-  wiki authoring by persona teams. Has bootstrapping problem.
-
-### Item 2 — Client-side human review
-
-The MCP `authorSkill` tool has no instruction to show turns to the actual human,
-and `ConversationTurn` has no machine-readable field that tells the client "this
-turn must block on a human response."
-
-Choose one:
-
-- **Option A (recommended)**: add `awaiting_user: bool` and `must_show_human: bool`
-  to `ConversationTurn`. Update tool description with explicit instruction not to
-  auto-answer `must_show_human=true` turns. ~0.5 days.
-
-- **Option B**: add a `turn_type` enum (informational / decision / review /
-  confirmation) to ConversationTurn. Review and decision turns are non-skippable.
-  ~1 day.
-
-- **Option C**: confirmation token — the server includes a random token on
-  must-show-human turns; the client must echo it in the next call. Hard
-  enforcement at the server level. ~1.5 days. Disruptive to CLI UX.
-
-### Item 3 — Clarification loop
-
-The current flow lets "ok" steamroll past ambiguities at CAPTURE_INTENT and past
-open_questions at REVIEW_DESIGN. No prompt instructs the LLM to refuse to
-proceed when the requirement is structurally ambiguous.
-
-Choose one:
-
-- **Option A (recommended)**: add a `CLARIFY` state (17th state) after CAPTURE_INTENT
-  (and optionally after DESIGN_SKILL). The state will not advance while blocking
-  questions are unresolved. Prompts updated to distinguish blocking vs nice-to-know
-  ambiguities. ~2-3 days.
-
-- **Option B**: prompt-level instruction — update CAPTURE_INTENT and DESIGN_SKILL
-  to return `schema=null` when requirements are ambiguous. The existing states
-  loop in question-asking mode rather than advancing. ~1-1.5 days. Lower
-  implementation cost but relies on LLM reliably refusing to guess.
-
-- **Option C**: prose conversation flow — replace the REVIEW_DESIGN JSON dump with
-  a question-by-question dialogue. Higher UX quality; 4-5 days. Significant
-  rework.
-
-### Item 4 (architect-surfaced) — Synthesisable fields
-
-DESIGN_SKILL only includes fields whose source can provide them verbatim.
-"Synthesisable" fields (e.g. risks derived from WBS status cells) are excluded
-as if unavailable. This was the root cause of the PPT thinness regression.
-
-Choose one:
-
-- **Option A (recommended)**: add `confidence=synthesisable` to the capability
-  inventory. DESIGN_SKILL allowed to include synthesisable fields with explicit
-  aggregation instructions. ~1 day.
-
-- **Option B**: separate "synthesis hints" LLM call before DESIGN_SKILL. ~1.5 days.
+1. Item 4 + Item 2 (parallel, ~1.5 days total) — independent, unblock everything else
+2. Item 3 CLARIFY state (~2-3 days) — depends on Item 2; Item 1 persona prompts can run in
+   parallel as a side stream
+3. ADR-029 Phase 1 (artifact retention + text comparator + image-only hard-reject + gap report)
+   — depends on Items 2 + 4
+4. ADR-029 Phase 2 (constrained routing + guardrails) — depends on Phase 1
 
 ---
 
-## How to decide
-
-Reply: "DECISION-011: Item1=A, Item2=A, Item3=A, Item4=A" (or choose different
-options per item). Once decided, the architect updates ADR-028 status to
-`accepted` and the Dev Manager picks up implementation tasks.
+(Decision closed. See locked choices above.)

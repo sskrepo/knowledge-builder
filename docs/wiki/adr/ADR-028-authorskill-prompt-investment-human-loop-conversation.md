@@ -1,7 +1,8 @@
 ---
 title: "ADR-028 — authorSkill: Prompt Investment, Human-in-the-Loop Enforcement, and Conversational Clarification"
-status: proposed
+status: accepted
 created: 2026-05-15
+decided: 2026-05-15
 owner: architect
 deciders: user, tpm
 supersedes: ~
@@ -214,11 +215,29 @@ consulted.
 
 ## Decision
 
-Status: **Proposed — pending user direction.**
+Status: **Accepted — 2026-05-15.**
 
-This ADR does not pre-commit an implementation. It captures the three (plus one)
-structural problems and presents options for each. The user will choose the
-options to implement before the Dev Manager picks up tasks.
+All four items accepted by the user. Decisions locked:
+
+- **Item 1 = Option A** — per-persona prompt fragments in `framework/config/persona_prompts.yaml`.
+  Key fields, extraction style, and few-shot guidance per persona, injected into DESIGN_SKILL
+  and CAPTURE_INTENT. ADDITIONALLY: persona-specific prompt templates are generated as concrete
+  starter content (see `framework/config/persona_prompts.yaml`). Every persona is framed in the
+  context of a cloud-based software company building a cloud platform for Fusion Applications
+  (an OCI-style platform that provisions and operates Oracle Fusion SaaS). Each stanza covers:
+  `key_fields`, `extraction_style`, and `few_shot_example`. All entries are marked
+  "STARTER DRAFT — review and edit before relying on."
+- **Item 2 = Option A** — add `awaiting_user: bool` and `must_show_human: bool` to
+  `ConversationTurn`. Hard "do not auto-answer must_show_human turns" instruction added to the
+  `authorSkill` tool description.
+- **Item 3 = Option A** — new `CLARIFY` state (17th state). Will not advance while
+  `blocking_questions` are open. `_CAPTURE_INTENT_PROMPT` and `_DESIGN_SKILL_PROMPT` extended to
+  distinguish `blocking_ambiguities` (must resolve) from `nice_to_know` (proceed with
+  assumption). CLARIFY sets `must_show_human=true` and emits a conversational message, not a
+  JSON blob.
+- **Item 4 = Option A** — add `confidence=synthesisable` to INSPECT_SOURCES capability
+  inventory. DESIGN_SKILL may include synthesisable fields with explicit aggregation instructions
+  in the field description. Fixes the root cause of the ADR-027 PPT thinness regression.
 
 ---
 

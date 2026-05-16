@@ -1,10 +1,11 @@
 ---
 title: "ADR-029 — Outcome-based EVAL: demonstration-artifact acceptance loop"
-status: proposed
+status: accepted
 created: 2026-05-15
+decided: 2026-05-15
 owner: architect
 deciders: user, tpm
-supersedes: DECISION-010 (Option A auto-generated gold — see section E)
+supersedes: DECISION-010 (Option A auto-generated gold — terminal gate function only; gold rows retained as diagnostic signal)
 tags: [adr, eval, skill-builder, acceptance-loop, adr-027, adr-028, adr-015]
 related: [ADR-015, ADR-027, ADR-028, DECISION-010, DECISION-011]
 ---
@@ -13,7 +14,52 @@ related: [ADR-015, ADR-027, ADR-028, DECISION-010, DECISION-011]
 
 ## Status
 
-**Proposed** — awaiting user direction. Do NOT implement until the user accepts one of the options in section D and resolves the reconciliation questions in section E.
+**Accepted — 2026-05-15.**
+
+**Decision: Option A (full outcome-based acceptance loop) with one explicit modification.**
+
+The modification overrides the image-only reference handling described in section C.1.
+See the "Accepted decision" block immediately below before reading the rest of this ADR.
+
+---
+
+## Accepted decision — what is locked
+
+**Option A — full outcome-based acceptance loop.** All 6 steps: extract, run full workflow to
+produce artifact, compare against reference, surface gap report + CHANGE PROPOSAL, route back to
+the appropriate state via constrained failure-class map, loop until user explicitly accepts.
+
+**Locked details from Option A:**
+- Run workflow end-to-end; compare produced artifact vs reference.
+- Text comparator only (no vision-LLM — see image-only handling below).
+- Failure-class classification: `MISSING_FIELDS`, `THIN_FIELDS`, `WRONG_LAYOUT`,
+  `SOURCE_COVERAGE`, `WRONG_SOURCE`, `UNSUPPORTABLE`.
+- Constrained routing map (code, not LLM choice): `MISSING_FIELDS`/`THIN_FIELDS`/`WRONG_LAYOUT`
+  → `REVIEW_DESIGN`; `SOURCE_COVERAGE` → `CONFIGURE_SOURCES`; `WRONG_SOURCE` →
+  `INSPECT_SOURCES`; `UNSUPPORTABLE` → `DONE as draft`.
+- Loop guardrails: `max_eval_iterations: 3` / cost ceiling `$2.00` / "ship as draft" escape hatch
+  / consecutive-same-class loop detector.
+- User acceptance is the terminal gate, not a numeric threshold.
+
+**Image-only reference handling — the modification (overrides section C.1):**
+
+NO vision-LLM. Text comparator only. The comparator/flow MUST explicitly detect when the
+uploaded reference artifact is image-only / not text-extractable (detector pattern: zero text
+shapes, same logic as `_analyze_pptx` already uses). Instead of silently degrading, the flow
+HARD-STOPS with a clear user-facing message:
+
+> "Image-based reference artifacts are not supported yet (no Vision-LLM backend). Please
+> upload a text-bearing reference (text-extractable PPTX/DOCX/MD). The current reference
+> will be discarded."
+
+The user is routed back to re-upload. This replaces the "structure-spec fallback / vision
+option" table in section C.1. The decision is: text comparator + explicit unsupported-image
+rejection. The vision-LLM path and structure-spec fallback are deferred indefinitely.
+
+**DECISION-010 disposition:** auto-generated gold rows are retained and continue to be computed.
+They are demoted from "terminal gate" to "diagnostic signal" shown alongside the gap report.
+The `exit_criteria.passed` boolean is no longer the PROMOTE gate — user acceptance is. No
+gold row code deleted; only the PROMOTE guard logic changes.
 
 ---
 
@@ -200,7 +246,7 @@ returned from the `/api/v1/ask` call, rather than only recording the URL.
 
 ## C. Feasibility — the hard parts
 
-### C.1 Image-only reference problem
+### C.1 Image-only reference problem (DECIDED — see "Accepted decision" block above)
 
 **The observed case:** `faaas-slide15-reference.pptx` is an image-only PPTX (one
 picture shape per slide, zero text runs) — verified this session. `analyze_artifact`
@@ -208,52 +254,34 @@ raises `ValueError` at `_handle_upload_artifact_example:1258-1268` and the file
 is hard-rejected. `_data.artifact_layout = None` is silently set. EVAL receives
 no reference.
 
-**Why this matters for the proposed model:** The entire outcome-based comparator
-depends on being able to read the reference. With an image-only reference, a
-text/structure diff is impossible.
+**Decided handling (not an open option):**
 
-**Options for image-only references:**
+Text comparator only. No vision-LLM. When the uploaded reference is image-only
+(detected by the zero-text-shapes pattern already used in `_analyze_pptx`), the
+flow HARD-STOPS at UPLOAD_ARTIFACT_EXAMPLE with the following user-facing message:
 
-| Option | Mechanism | Accuracy | Cost | Recommendation |
-|---|---|---|---|---|
-| **(i) Vision-LLM comparator** | Send reference image slide(s) and produced PPTX rendered slide(s) to a multimodal LLM. Ask it to compare sections, content density, and layout. | High (sees what the user sees) | Medium-high: ~$0.01-0.05 per comparison call on GPT-4V / OCI vision model | **Recommended** — aligns with the user's expectation (they're comparing visually) |
-| **(ii) Require text-bearing reference** | Hard-reject image-only PPTX at UPLOAD_ARTIFACT_EXAMPLE with a clear message. User must provide a text-bearing file. | N/A (prevents the comparison entirely) | Zero | Acceptable only if the no-silent-degradation rule is satisfied — a clear rejection is not silent. But it breaks the common case where users only have a screenshot or a scanned PPT. |
-| **(iii) Score against structure-spec derived at UPLOAD_ARTIFACT_EXAMPLE** | Extract the structure spec from the reference during UPLOAD_ARTIFACT_EXAMPLE (what sections should appear, what density each should have) and save it as a structured spec. EVAL scores the produced artifact against the spec, not the reference bytes. | Medium — misses visual layout but captures section/content requirements | Low | Valid fallback when the reference is image-only but a structure spec can be extracted. Requires a vision-LLM pass at UPLOAD_ARTIFACT_EXAMPLE to produce the spec — same cost as option (i), but happens earlier. |
-| **(iv) Graceful fallback to intrinsic EVAL** | When no usable reference exists (image-only, no reference uploaded, or reference parse failed), fall back silently to the current ADR-027 intrinsic EVAL. | Low (same as current) | Zero | **Hard no.** The user has a no-silent-degradation rule. A skill authored without a reference must be told explicitly that its EVAL is intrinsic-only and therefore has weaker guarantees. Fallback is acceptable if and only if it announces loudly what it is doing and why. |
+> "Image-based reference artifacts are not supported yet (no Vision-LLM backend).
+> Please upload a text-bearing reference (text-extractable PPTX/DOCX/MD). The
+> current reference will be discarded."
 
-**Recommended handling:** Option (i) — vision-LLM comparator — as the primary
-path. A multimodal model receives the reference image slide(s) (rendered via
-`python-pptx` → `Pillow` PNG export, or passed as the PPTX bytes directly to a
-vision-capable model) and the produced PPTX rendered slide(s), and scores the
-comparison. This is the only option that handles image-only references without
-requiring the user to provide a text-bearing alternative.
+The user is prompted to re-upload. The state machine does not advance until a
+text-bearing reference is provided OR the user explicitly skips the reference step.
 
-**Cost/accuracy tradeoff for option (i):** A vision-LLM comparison call runs
-once per EVAL iteration, not per extraction. At estimated $0.02-0.05 per call
-(GPT-4V or OCI vision, two images), the per-iteration cost is dominated by the
-extraction calls, not the comparator. Accuracy depends on the model's visual
-reasoning quality; multimodal models at the frontier (GPT-4V, Claude 3.5 Sonnet)
-are reliable for structural comparison (sections present/absent, density, layout)
-but less reliable for fine-grained content verification. This is acceptable for
-the purpose: the comparator is a signal, not a theorem prover, and the user
-makes the final call.
+If the user skips the reference (types "skip" / "no artifact"), the EVAL operates
+in intrinsic-only mode with the following non-silent disclosure:
 
-**OCI constraint:** OCI GenAI Inference (current LLM backend per ADR-014) does
-not expose a vision-capable model as of this writing. This means vision comparison
-requires either (a) a second LLM provider (OpenAI, Anthropic) for comparator
-calls only, or (b) an OCI vision model when one becomes available. This is a
-real feasibility risk — see section F.
+> "No usable reference artifact. EVAL is intrinsic-only (consistency check, not
+> correctness check — the same LLM that designed the extraction also grades it).
+> This skill should be validated manually before fleet promotion."
 
-**Fallback chain (required, non-silent):**
+**Active comparator chain (decided):**
 ```
-reference_available AND text-bearing → text/structure diff comparator
-reference_available AND image-only → vision-LLM comparator [if OCI vision available]
-reference_available AND image-only AND no vision model → structure-spec comparator (option iii)
-reference_not_available OR all comparators unavailable → intrinsic EVAL ONLY
-  → MUST display: "No usable reference artifact. EVAL is intrinsic-only (consistency
-    check, not correctness check). This skill should be validated manually before
-    fleet promotion."
+reference_available AND text-bearing → text/structure diff comparator  [SUPPORTED]
+reference_available AND image-only   → HARD STOP + re-upload prompt    [DECIDED]
+reference_not_available (user skip)  → intrinsic EVAL ONLY             [non-silent disclosure]
 ```
+
+The vision-LLM path and structure-spec fallback are deferred indefinitely.
 
 ### C.2 Semantic artifact comparator — the rubric
 
