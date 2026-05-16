@@ -2097,6 +2097,12 @@ class SkillBuilderConversation:
         # KBs the framework actually knows about.
         reuse_plan = design.get("reuse_plan", {"covered": {}, "gaps": list(self._data.fields)})
         known_kbs: set[str] = set()
+        # Map every resolvable KB key → its provides_fields set, so we can
+        # reject reuse claims where the LLM attributes a field to a KB that
+        # does NOT actually provide it (ADR-017 validate would otherwise fail
+        # with "workflow requires fields not provided by '<kb>'"). Keyed by
+        # both bare name and persona.name.
+        kb_provides: dict[str, set] = {}
         try:
             from ..orchestrator.shim_kb import ShimKb
             shim = ShimKb(REPO_ROOT / "framework" / "persona_builders")
@@ -2104,24 +2110,42 @@ class SkillBuilderConversation:
                 # Cards are keyed as 'persona.kb_name'; also accept the short form
                 name = card.get("name") or ""
                 persona_owner = card.get("persona") or ""
+                pf = set(card.get("provides_fields") or [])
                 if name:
                     known_kbs.add(name)
+                    kb_provides.setdefault(name, set()).update(pf)
                     if persona_owner:
-                        known_kbs.add(f"{persona_owner}.{name}")
+                        q = f"{persona_owner}.{name}"
+                        known_kbs.add(q)
+                        kb_provides.setdefault(q, set()).update(pf)
         except Exception as exc:  # noqa: BLE001
             log.warning("_run_design_skill: could not load ShimKb to validate reuse_plan: %s", exc)
         if known_kbs:
             filtered_covered: dict = {}
             dropped: list[str] = []
             for fld, kb in (reuse_plan.get("covered") or {}).items():
-                if kb in known_kbs:
+                # Keep the reuse claim only if the KB exists AND actually
+                # provides this field. Bare/qualified both checked. A claim
+                # that survives existence but fails field-provision is a
+                # DESIGN_SKILL hallucination — drop it so the field flows
+                # into the new skill's own KB (which provides it via the
+                # synthesized extraction schema).
+                provides = (
+                    kb_provides.get(kb)
+                    or kb_provides.get(kb.split(".")[-1])
+                    or set()
+                )
+                if kb in known_kbs and fld in provides:
                     filtered_covered[fld] = kb
+                elif kb in known_kbs:
+                    dropped.append(f"{fld}→{kb}(field-not-provided)")
                 else:
-                    dropped.append(f"{fld}→{kb}")
+                    dropped.append(f"{fld}→{kb}(unknown-kb)")
             if dropped:
                 log.warning(
-                    "_run_design_skill: dropping %d reuse claims referencing unknown KBs: %s",
-                    len(dropped), dropped[:5],
+                    "_run_design_skill: dropping %d invalid reuse claims "
+                    "(unknown KB or field-not-provided): %s",
+                    len(dropped), dropped[:8],
                 )
             # Any field whose claimed KB was dropped now flows into the new
             # skill's KB (the workflow synthesizer handles this automatically
