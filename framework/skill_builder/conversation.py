@@ -634,6 +634,14 @@ class _SessionData:
     _clarify_questions: list = field(default_factory=list)
     # Context: which state CLARIFY should transition to after all questions are resolved
     _clarify_next_state: str = field(default="CONFIGURE_SOURCES")
+    # ADR-029 Phase 1 (S5): reference artifact retention
+    # artifact_reference_id: ArtifactStore key for the uploaded reference artifact.
+    # Retained from UPLOAD_ARTIFACT_EXAMPLE through EVAL for comparator.compare().
+    # None when the user skipped artifact upload or upload was image-only rejected.
+    artifact_reference_id: str | None = None
+    # artifact_reference_type: "pptx" | "docx" | "md" | "txt" — needed to dispatch
+    # the right ArtifactComparator extractor at EVAL time.
+    artifact_reference_type: str | None = None
 
 
 class SkillBuilderConversation:
@@ -821,6 +829,10 @@ class SkillBuilderConversation:
             d["design"] = dict(self._data.design)
         # ADR-028 Item 3: clarification_log persisted for session resumability
         d["clarification_log"] = list(self._data.clarification_log)
+        # ADR-029 Phase 1 (S5): reference artifact retention — default None for
+        # backward-compat; pre-S5 sessions will simply have no reference artifact.
+        d["artifact_reference_id"] = self._data.artifact_reference_id
+        d["artifact_reference_type"] = self._data.artifact_reference_type
         return d
 
     @classmethod
@@ -874,6 +886,10 @@ class SkillBuilderConversation:
             clarification_log=list(d.get("clarification_log", [])),
             artifact_layout=d.get("artifact_layout"),
             design=d.get("design"),
+            # ADR-029 Phase 1 (S5): reference artifact retention.
+            # Backward-compat default None — pre-S5 sessions have no reference.
+            artifact_reference_id=d.get("artifact_reference_id"),
+            artifact_reference_type=d.get("artifact_reference_type"),
         )
         return obj
 
@@ -1587,71 +1603,178 @@ class SkillBuilderConversation:
         )
 
     def _handle_upload_artifact_example(self, user_input: str) -> ConversationTurn:
-        """Handle user input at UPLOAD_ARTIFACT_EXAMPLE state (ADR-027).
+        """Handle user input at UPLOAD_ARTIFACT_EXAMPLE state (ADR-027 + ADR-029 S5).
 
         Performs structural parse only — output is a layout hint, NOT field names.
         Field names come from DESIGN_SKILL.
+
+        ADR-029 Phase 1 (S5) additions:
+          1. IMAGE HARD-REJECT: before calling analyze_artifact, call
+             ArtifactComparator.is_image_only() on the artifact bytes.  If
+             image-only, surface the verbatim IMAGE_ONLY_MESSAGE with
+             must_show_human=True and do NOT advance the state.
+          2. ARTIFACT RETENTION: after a successful structural parse, store the
+             artifact bytes' ArtifactStore ID (or a sentinel for filesystem paths)
+             in _data.artifact_reference_id so _run_eval can read the reference
+             bytes to call comparator.compare().
         """
         from .analyze_artifact import analyze_artifact
+        from .comparator import ArtifactComparator, IMAGE_ONLY_MESSAGE, SUPPORTED_TYPES
 
         lowered = user_input.lower().strip()
         if lowered in ("skip", "no", "none", "later"):
             self._data.artifact_layout = None
             self._data.artifact_path = ""
+            self._data.artifact_reference_id = None
+            self._data.artifact_reference_type = None
             return self._run_design_skill()
 
         path = user_input.strip()
+        resolved_path: Path | None = None
+        artifact_id_for_retention: str | None = None
 
         # Handle artifact: prefix (ADR-021 uploaded artifacts)
         if path.startswith("artifact:"):
             import re as _re
             m = _re.match(r"^artifact:(\S+)\s+id:(\S+)$", path)
             if m and self._artifact_store is not None:
-                artifact_id = m.group(2)
-                local_path = self._artifact_store.resolve(artifact_id)
+                artifact_id_for_retention = m.group(2)
+                local_path = self._artifact_store.resolve(artifact_id_for_retention)
                 if local_path:
-                    path = str(local_path)
-                    self._data.artifact_path = path
+                    resolved_path = Path(local_path)
+                    self._data.artifact_path = str(resolved_path)
                 else:
-                    log.warning("UPLOAD_ARTIFACT_EXAMPLE: artifact_id=%s not found", artifact_id)
+                    log.warning(
+                        "UPLOAD_ARTIFACT_EXAMPLE: artifact_id=%s not found in store — "
+                        "proceeding without reference artifact",
+                        artifact_id_for_retention,
+                    )
+                    self._data.artifact_reference_id = None
+                    self._data.artifact_reference_type = None
                     return self._run_design_skill()
             else:
+                self._data.artifact_reference_id = None
+                self._data.artifact_reference_type = None
+                return self._run_design_skill()
+        else:
+            # Local filesystem path
+            p = Path(path)
+            if p.exists() and p.suffix in (".pptx", ".docx", ".md", ".txt"):
+                resolved_path = p
+                # For local filesystem paths there is no artifact_id — we store
+                # the absolute path as the reference identifier so _run_eval can
+                # read the bytes back. Format: "file:<abs_path>"
+                artifact_id_for_retention = f"file:{p.resolve()}"
+            else:
+                log.warning(
+                    "UPLOAD_ARTIFACT_EXAMPLE: path %r not found or unsupported — skipping",
+                    path,
+                )
+                self._data.artifact_layout = None
+                self._data.artifact_reference_id = None
+                self._data.artifact_reference_type = None
                 return self._run_design_skill()
 
-        # Local filesystem path
-        p = Path(path)
-        if p.exists() and p.suffix in (".pptx", ".docx", ".md", ".txt"):
-            try:
-                _fields, mapping = analyze_artifact(str(p))
-                # Build layout hint from the mapping (section order, headings)
-                layout = {
-                    "sections": _fields,
-                    "slide_count": len({v.get("slide", 0) for v in (mapping or {}).values()}),
-                    "mapping": mapping or {},
-                }
-                self._data.artifact_layout = layout
-                self._data.artifact_path = str(p)
-                log.info(
-                    "UPLOAD_ARTIFACT_EXAMPLE: parsed layout sections=%d from %s",
-                    len(_fields), p,
-                )
-            except ValueError as exc:
-                # Image-only PPTX: hard-fail (ADR-026 Fix 1 still applies)
-                return ConversationTurn(
-                    state="UPLOAD_ARTIFACT_EXAMPLE",
-                    message=(
-                        f"Cannot parse artifact: {exc}\n\n"
-                        "Please provide a text-bearing PPTX/DOCX/Markdown, "
-                        "or type 'skip' to proceed without an artifact."
-                    ),
-                    options=["skip"],
-                )
-        else:
+        # We have a resolved local path — read bytes for image-only check.
+        try:
+            artifact_bytes = resolved_path.read_bytes()
+        except Exception as exc:
             log.warning(
-                "UPLOAD_ARTIFACT_EXAMPLE: path %r not found or unsupported — skipping",
-                path,
+                "UPLOAD_ARTIFACT_EXAMPLE: could not read artifact bytes from %s: %s — skipping",
+                resolved_path, exc,
             )
             self._data.artifact_layout = None
+            self._data.artifact_reference_id = None
+            self._data.artifact_reference_type = None
+            return self._run_design_skill()
+
+        artifact_type = resolved_path.suffix.lstrip(".").lower()
+
+        # --- ADR-029 Phase 1 (S5): IMAGE HARD-REJECT ---
+        # Check image-only BEFORE calling analyze_artifact. If image-only, stop here.
+        comparator = ArtifactComparator(llm=None)
+        if artifact_type not in SUPPORTED_TYPES:
+            # Unsupported type (e.g. PDF) — surface as type-unsupported error.
+            log.warning(
+                "UPLOAD_ARTIFACT_EXAMPLE: unsupported artifact_type=%r — hard-reject",
+                artifact_type,
+            )
+            return ConversationTurn(
+                state="UPLOAD_ARTIFACT_EXAMPLE",
+                message=(
+                    f"Artifact type '.{artifact_type}' is not supported for comparison. "
+                    f"Supported types: {sorted(SUPPORTED_TYPES)}. "
+                    "Please upload a text-bearing PPTX, DOCX, or Markdown file, "
+                    "or type 'skip' to proceed without a reference artifact."
+                ),
+                options=["skip"],
+                must_show_human=True,
+            )
+
+        try:
+            is_image = comparator.is_image_only(artifact_bytes, artifact_type)
+        except Exception as exc:
+            log.warning(
+                "UPLOAD_ARTIFACT_EXAMPLE: is_image_only check failed (%s) — "
+                "treating as non-image-only (conservative)",
+                exc,
+            )
+            is_image = False
+
+        if is_image:
+            # ADR-029 hard-reject: surface verbatim IMAGE_ONLY_MESSAGE.
+            # Do NOT advance state — user must re-upload a text-bearing artifact.
+            log.warning(
+                "UPLOAD_ARTIFACT_EXAMPLE: image-only artifact detected — "
+                "hard-rejecting, state stays at UPLOAD_ARTIFACT_EXAMPLE. path=%s",
+                resolved_path,
+            )
+            self._data.artifact_reference_id = None
+            self._data.artifact_reference_type = None
+            return ConversationTurn(
+                state="UPLOAD_ARTIFACT_EXAMPLE",
+                message=IMAGE_ONLY_MESSAGE,
+                options=["skip", "upload a text-bearing PPTX/DOCX/MD"],
+                must_show_human=True,
+                awaiting_user=True,
+            )
+
+        # --- Text-bearing artifact: structural parse + retention ---
+        try:
+            _fields, mapping = analyze_artifact(str(resolved_path))
+            layout = {
+                "sections": _fields,
+                "slide_count": len({v.get("slide", 0) for v in (mapping or {}).values()}),
+                "mapping": mapping or {},
+            }
+            self._data.artifact_layout = layout
+            self._data.artifact_path = str(resolved_path)
+            # ADR-029 S5: store the artifact reference identifier and type
+            # so _run_eval can retrieve the bytes later for comparator.compare().
+            self._data.artifact_reference_id = artifact_id_for_retention
+            self._data.artifact_reference_type = artifact_type
+            log.info(
+                "UPLOAD_ARTIFACT_EXAMPLE: parsed layout sections=%d type=%s ref_id=%s",
+                len(_fields), artifact_type, artifact_id_for_retention,
+            )
+        except ValueError as exc:
+            # analyze_artifact may raise for malformed files; surface clearly.
+            log.warning(
+                "UPLOAD_ARTIFACT_EXAMPLE: analyze_artifact failed (%s) — "
+                "clearing artifact reference",
+                exc,
+            )
+            self._data.artifact_reference_id = None
+            self._data.artifact_reference_type = None
+            return ConversationTurn(
+                state="UPLOAD_ARTIFACT_EXAMPLE",
+                message=(
+                    f"Cannot parse artifact: {exc}\n\n"
+                    "Please provide a text-bearing PPTX/DOCX/Markdown, "
+                    "or type 'skip' to proceed without an artifact."
+                ),
+                options=["skip"],
+            )
 
         return self._run_design_skill()
 
@@ -3874,7 +3997,12 @@ Rules:
         except Exception as exc:
             log.warning("_run_eval: ADB gold set write failed: %s", exc)
 
-        # Step 8: load exit criteria from workflow YAML or use defaults
+        # Step 8: load exit criteria from workflow YAML or use defaults.
+        # ADR-029 Phase 1 (S5): exit_criteria.passed is NOW DIAGNOSTIC ONLY —
+        # it is no longer the gate for PROMOTE. The gate is explicit user
+        # acceptance ("accept") at the EVAL gap-report turn.
+        # DECISION-010 (auto-gold gate) is superseded; the comparator gap-report
+        # + user-accept is the new terminal signal.
         recall_threshold = 0.85
         faithfulness_threshold = 0.85
         try:
@@ -3889,8 +4017,109 @@ Rules:
         except Exception as exc:
             log.debug("_run_eval: could not read exit_criteria from workflow YAML: %s", exc)
 
-        passed = recall_at_k >= recall_threshold and faithfulness >= faithfulness_threshold
+        # Diagnostic-only: still computed for audit trail, but does NOT gate PROMOTE.
+        passed_diagnostic = (
+            recall_at_k >= recall_threshold and faithfulness >= faithfulness_threshold
+        )
         total_cost_est = faithfulness_total * 0.002  # rough estimate at $0.002/call
+
+        # Step 9: ADR-029 Phase 1 — run ArtifactComparator if a reference artifact
+        # is available.  The comparator result REPLACES exit_criteria.passed as the
+        # terminal signal at EVAL.  The gap report is surfaced with must_show_human=True.
+        comparator_result = None
+        comparator_error: str | None = None
+        produced_artifact_bytes: bytes | None = None
+
+        if wf_artifact_url:
+            # Try to read produced artifact bytes from the delivered path
+            try:
+                produced_path = Path(wf_artifact_url) if not wf_artifact_url.startswith("http") else None
+                if produced_path and produced_path.exists():
+                    produced_artifact_bytes = produced_path.read_bytes()
+                    log.info(
+                        "_run_eval: read produced artifact bytes (%d bytes) from %s",
+                        len(produced_artifact_bytes), produced_path,
+                    )
+                else:
+                    log.info(
+                        "_run_eval: produced artifact URL %r is remote or not found "
+                        "on filesystem — comparator skipped",
+                        wf_artifact_url,
+                    )
+            except Exception as exc:
+                log.warning("_run_eval: could not read produced artifact bytes: %s", exc)
+
+        ref_id = self._data.artifact_reference_id
+        ref_type = self._data.artifact_reference_type
+        ref_bytes: bytes | None = None
+
+        if ref_id:
+            # Retrieve reference artifact bytes from the store
+            try:
+                if ref_id.startswith("file:"):
+                    ref_path = Path(ref_id[len("file:"):])
+                    if ref_path.exists():
+                        ref_bytes = ref_path.read_bytes()
+                    else:
+                        log.warning(
+                            "_run_eval: reference artifact path %s not found — "
+                            "comparator skipped",
+                            ref_path,
+                        )
+                elif self._artifact_store is not None:
+                    local = self._artifact_store.resolve(ref_id)
+                    if local:
+                        ref_bytes = Path(local).read_bytes()
+                    else:
+                        log.warning(
+                            "_run_eval: artifact_store.resolve(%r) returned None — "
+                            "comparator skipped",
+                            ref_id,
+                        )
+                else:
+                    log.warning(
+                        "_run_eval: artifact_reference_id=%r but artifact_store is None — "
+                        "comparator skipped (no artifact store wired)",
+                        ref_id,
+                    )
+            except Exception as exc:
+                log.warning(
+                    "_run_eval: could not retrieve reference artifact bytes: %s", exc
+                )
+
+        if ref_bytes is not None and produced_artifact_bytes is not None and ref_type:
+            try:
+                from .comparator import ArtifactComparator
+                _cmp = ArtifactComparator(llm=None)
+                comparator_result = _cmp.compare(ref_bytes, produced_artifact_bytes, ref_type)
+                log.info(
+                    "_run_eval: comparator structure_score=%.3f density_score=%.3f "
+                    "missing=%d thin=%d",
+                    comparator_result.structure_score,
+                    comparator_result.density_score,
+                    len(comparator_result.missing_sections),
+                    len(comparator_result.thin_sections),
+                )
+            except Exception as exc:
+                comparator_error = str(exc)
+                log.warning("_run_eval: comparator.compare() failed: %s", exc)
+        elif ref_bytes is not None and ref_type:
+            log.info(
+                "_run_eval: reference artifact available but no produced artifact bytes "
+                "(wf_artifact_url=%r) — comparator skipped for this run",
+                wf_artifact_url,
+            )
+        elif ref_id:
+            log.info(
+                "_run_eval: reference artifact_reference_id=%r but bytes unavailable — "
+                "comparator skipped",
+                ref_id,
+            )
+        else:
+            log.info(
+                "_run_eval: no reference artifact uploaded — comparator skipped "
+                "(user did not upload a reference at UPLOAD_ARTIFACT_EXAMPLE)"
+            )
 
         self._data.eval_result = {
             "status": "completed",
@@ -3903,10 +4132,17 @@ Rules:
                 "ask_latency_ms": ask_latency_ms,
                 "estimated_cost_usd": round(total_cost_est, 4),
             },
+            # ADR-029 S5: exit_criteria.passed is DIAGNOSTIC ONLY — not the PROMOTE gate.
+            # The gate is user's explicit "accept" response at the EVAL gap-report turn.
+            # DECISION-010 auto-gold gate is superseded.
             "exit_criteria": {
                 "recall_threshold": recall_threshold,
                 "faithfulness_threshold": faithfulness_threshold,
-                "passed": passed,
+                "passed": passed_diagnostic,
+                "_note": (
+                    "diagnostic-only (ADR-029 Phase 1): exit_criteria.passed no longer "
+                    "gates PROMOTE. User explicit accept at EVAL gap-report is the gate."
+                ),
             },
             "workflow_score": {
                 "tier_used": wf_tier,
@@ -3914,15 +4150,56 @@ Rules:
                 "expected_skill": expected_skill,
                 "skill_matched": wf_tier == 1,
             },
+            # ADR-029 Phase 1: comparator result (None when no reference was uploaded)
+            "comparator": comparator_result.to_dict() if comparator_result else None,
         }
 
-        # Build user message
-        lines = [
-            f"Eval results (ADR-027 — kind=auto_generated):\n",
-            f"  Extraction samples: {len(extraction_gold_rows)}",
-            f"  Recall@k: {recall_at_k:.1%} (threshold: {recall_threshold:.0%})",
-            f"  Faithfulness: {faithfulness:.1%} (threshold: {faithfulness_threshold:.0%})",
-        ]
+        # Build user message — ADR-029 Phase 1 EVAL turn.
+        # Comparator gap report is the PRIMARY signal; diagnostic metrics are shown
+        # below it but do NOT control the PROMOTE gate.
+        lines: list[str] = []
+
+        if comparator_result:
+            # PRIMARY: gap report from the comparator (must_show_human=True)
+            lines.append("=== ADR-029 EVAL Gap Report ===\n")
+            lines.append(comparator_result.gap_report)
+            lines.append("")
+            lines.append(
+                "Review the gap report above. "
+                "If the produced artifact meets your quality bar, type 'accept' to promote. "
+                "If it needs changes, review the guidance below and choose an option."
+            )
+        elif comparator_error:
+            lines.append(
+                f"Note: artifact comparison failed ({comparator_error}). "
+                "Falling back to diagnostic metrics only."
+            )
+        elif ref_id and not produced_artifact_bytes:
+            lines.append(
+                "Note: reference artifact was uploaded but the workflow did not deliver "
+                "a local artifact file this run — comparator skipped. "
+                "Showing diagnostic metrics only."
+            )
+        else:
+            lines.append(
+                "No reference artifact was uploaded at UPLOAD_ARTIFACT_EXAMPLE — "
+                "structural comparison is not available. "
+                "Showing diagnostic metrics only."
+            )
+
+        lines.append("")
+        lines.append(
+            "=== Diagnostic Metrics (informational — not the PROMOTE gate) ==="
+        )
+        lines.append(f"  Extraction samples: {len(extraction_gold_rows)}")
+        lines.append(
+            f"  Recall@k: {recall_at_k:.1%} (threshold: {recall_threshold:.0%}) "
+            f"[DIAGNOSTIC ONLY — ADR-029 superseded DECISION-010]"
+        )
+        lines.append(
+            f"  Faithfulness: {faithfulness:.1%} (threshold: {faithfulness_threshold:.0%}) "
+            f"[DIAGNOSTIC ONLY]"
+        )
         if ask_latency_ms is not None:
             lines.append(f"  /api/v1/ask latency: {ask_latency_ms}ms, tier={wf_tier}")
         else:
@@ -3930,77 +4207,176 @@ Rules:
 
         lines.append("")
         lines.append(
-            "Note: kind=auto_generated — these gold rows were created from the same LLM "
-            "that did the extraction. They measure consistency, not correctness. "
-            "Human review encouraged before promoting to production fleet-wide."
+            "Note: kind=auto_generated — diagnostic gold rows were created from the same "
+            "LLM that did the extraction. They measure consistency, not correctness."
         )
         lines.append("")
 
-        if passed:
+        if comparator_result:
             lines.append(
-                f"Exit criteria met. "
-                f"Proceed to promote ({persona}.{skill_name} → production)?"
+                "Comparator scores:\n"
+                f"  Structure: {comparator_result.structure_score:.0%} "
+                f"({len(comparator_result.missing_sections)} sections missing)\n"
+                f"  Density:   {comparator_result.density_score:.0%} "
+                f"({len(comparator_result.thin_sections)} thin sections)"
             )
-            options = ["yes, promote", "stop here"]
-        else:
-            failing = []
-            if recall_at_k < recall_threshold:
-                failing.append(
-                    f"recall@k {recall_at_k:.1%} < threshold {recall_threshold:.0%}"
-                )
-            if faithfulness < faithfulness_threshold:
-                failing.append(
-                    f"faithfulness {faithfulness:.1%} < threshold {faithfulness_threshold:.0%}"
-                )
-            lines.append(
-                f"Exit criteria NOT met: {'; '.join(failing)}.\n"
-                f"The skill cannot be promoted until metrics meet thresholds.\n"
-                f"Options:\n"
-                f"  • Revise extraction descriptions at REVIEW_DESIGN and re-author\n"
-                f"  • Improve source data (add more Confluence pages)\n"
-                f"  • Lower thresholds in the workflow YAML (synthesis.exit_criteria)\n"
-                f"  • Type 'force promote' to override (not recommended)"
-            )
-            options = ["force promote", "stop here"]
+            if comparator_result.missing_sections:
+                lines.append(f"  Missing: {', '.join(comparator_result.missing_sections)}")
+            if comparator_result.thin_sections:
+                lines.append(f"  Thin:    {', '.join(comparator_result.thin_sections)}")
+            lines.append("")
+
+        lines.append(
+            "Options:\n"
+            "  'accept'           — the produced artifact meets your quality bar → PROMOTE\n"
+            "  'ship as draft'    — save as draft without promoting\n"
+            "  'review design'    — go back to REVIEW_DESIGN (S6 routing — not yet active)\n"
+            "  'configure sources'— go back to CONFIGURE_SOURCES (S6 routing — not yet active)\n"
+            "  'stop here'        — pause session"
+        )
+
+        # ADR-029 S5: the EVAL turn ALWAYS has must_show_human=True — the user must
+        # explicitly respond after reading the gap report.
+        eval_turn_data = {
+            "structure_score": comparator_result.structure_score if comparator_result else None,
+            "density_score": comparator_result.density_score if comparator_result else None,
+            "missing_sections": comparator_result.missing_sections if comparator_result else [],
+            "thin_sections": comparator_result.thin_sections if comparator_result else [],
+            # Diagnostic-only fields — present for observability but do not gate PROMOTE
+            "intrinsic_recall": recall_at_k,
+            "intrinsic_faithfulness": faithfulness,
+        }
 
         return ConversationTurn(
             state="EVAL",
             message="\n".join(lines),
-            data={"eval": self._data.eval_result},
-            options=options,
+            data={"eval": self._data.eval_result, "gap_report": eval_turn_data},
+            options=["accept", "ship as draft", "review design", "configure sources", "stop here"],
+            must_show_human=True,   # ADR-029 S5: user MUST read gap report before accepting
+            awaiting_user=True,
         )
 
     def _handle_eval_response(self, user_input: str) -> ConversationTurn:
+        """Handle user response at EVAL state.
+
+        ADR-029 Phase 1 (S5) gate:
+          "accept" or "looks good" → PROMOTE (the only numeric-independent gate)
+          "ship as draft"          → DONE with draft status
+          "stop here"              → DONE (session paused)
+          "review design" / "configure sources" / "retry" → S6 seam (not yet active)
+
+        NOTE: "force promote" is intentionally retained for operator escape-hatch
+        but no longer needed as the primary path (any user who sees the gap report
+        and types "accept" proceeds to PROMOTE without needing to force).
+
+        S6 routing seam: when the user rejects (not "accept" / "ship as draft" /
+        "stop here"), S5 surfaces the gap report again with guidance but does NOT
+        auto-route. Auto-routing requires the classifier validation gate (between
+        S5 and S6 per the blueprint). The reject path is a labeled seam here.
+        """
         lowered = user_input.lower().strip()
-        if any(kw in lowered for kw in ("stop", "done", "exit", "no")):
+
+        # --- STOP / PAUSE ---
+        if any(kw in lowered for kw in ("stop", "exit", "pause")):
             self._state = "DONE"
             return ConversationTurn(state="DONE", message="Session paused.", done=True)
 
-        # "force promote" — user explicitly overrides failing exit criteria.
-        # The eval_result already has passed=False; we warn but proceed.
+        # --- SHIP AS DRAFT ---
+        if "ship" in lowered and "draft" in lowered:
+            self._state = "DONE"
+            log.info(
+                "_handle_eval_response: user chose 'ship as draft' — "
+                "session ends at DONE without PROMOTE. persona=%s skill=%s",
+                self._data.persona, self._data.skill_name,
+            )
+            return ConversationTurn(
+                state="DONE",
+                message=(
+                    f"Skill {self._data.persona}.{self._data.skill_name} saved as draft.\n\n"
+                    "The skill is committed to ADB but NOT live in production. "
+                    "Promote it later via: resume this session → accept, or kb-cli promote.\n\n"
+                    f"Session ID: {self._data.synth_id}"
+                ),
+                done=True,
+            )
+
+        # --- FORCE PROMOTE (operator escape-hatch, retained for backward-compat) ---
+        # Check BEFORE the generic "promote" accept path so "force promote" is not
+        # captured by the accept branch.
         if "force" in lowered and "promote" in lowered:
             eval_result = self._data.eval_result or {}
             metrics = eval_result.get("metrics", {})
-            ec = eval_result.get("exit_criteria", {})
             log.warning(
                 "_handle_eval_response: FORCE PROMOTE by user — "
-                "metrics did not meet exit criteria. "
-                "recall_at_k=%.3f (threshold=%.2f) faithfulness=%.3f (threshold=%.2f) "
-                "persona=%s skill=%s",
+                "persona=%s skill=%s "
+                "recall_at_k=%.3f faithfulness=%.3f (both now diagnostic-only — "
+                "force promote retained as operator escape-hatch)",
+                self._data.persona, self._data.skill_name,
                 metrics.get("recall_at_k", 0),
-                ec.get("recall_threshold", 0.85),
                 metrics.get("faithfulness", 0),
-                ec.get("faithfulness_threshold", 0.85),
-                self._data.persona,
-                self._data.skill_name,
             )
-            # Stamp force-promote into eval_result for audit trail
             if self._data.eval_result:
                 self._data.eval_result["force_promoted"] = True
                 self._data.eval_result["force_promoted_at"] = _now_iso()
             return self._run_promote()
 
-        return self._run_promote()
+        # --- ACCEPT → PROMOTE ---
+        # User acceptance is the ONLY gate for PROMOTE (ADR-029 Phase 1).
+        # exit_criteria.passed is now diagnostic-only (DECISION-010 superseded).
+        if any(kw in lowered for kw in ("accept", "looks good", "yes, promote", "promote")):
+            log.info(
+                "_handle_eval_response: user accepted — transitioning to PROMOTE. "
+                "persona=%s skill=%s",
+                self._data.persona, self._data.skill_name,
+            )
+            # Stamp user-accept into eval_result for audit trail
+            if self._data.eval_result:
+                self._data.eval_result["user_accepted"] = True
+                self._data.eval_result["user_accepted_at"] = _now_iso()
+            return self._run_promote()
+
+        # --- S6 SEAM: reject / review design / configure sources ---
+        # S5 stops here. S6 will add the classifier-driven auto-routing.
+        # The classifier validation gate must pass before S6 routing is enabled.
+        # This path is labeled as a seam — do NOT implement auto-routing here.
+        log.info(
+            "_handle_eval_response: user chose reject path (%r) — "
+            "S6 routing seam reached. S6 not yet active. "
+            "Surfacing gap report again for user to reconsider. "
+            "TODO-S6: wire classifier here after validation gate passes. "
+            "[file:framework/skill_builder/conversation.py _handle_eval_response S6 seam]",
+            user_input[:60],
+        )
+        eval_result = self._data.eval_result or {}
+        comparator_dict = eval_result.get("comparator") or {}
+        gap_msg_lines: list[str] = [
+            "You chose to revise rather than accept. Here is the gap report again:\n",
+        ]
+        if comparator_dict:
+            gap_msg_lines.append(comparator_dict.get("gap_report", "(no gap report)"))
+            gap_msg_lines.append("")
+        else:
+            gap_msg_lines.append(
+                "(No comparator result — reference artifact was not available or comparison failed.)"
+            )
+            gap_msg_lines.append("")
+        gap_msg_lines.append(
+            "S6 constrained routing is not yet active (classifier validation gate pending).\n"
+            "Options at this stage:\n"
+            "  'accept'          — accept the current output and promote\n"
+            "  'ship as draft'   — save without promoting\n"
+            "  'stop here'       — pause session\n\n"
+            "To iterate on this skill, stop here and re-author from REVIEW_DESIGN "
+            "or CONFIGURE_SOURCES in a new call."
+        )
+        return ConversationTurn(
+            state="EVAL",
+            message="\n".join(gap_msg_lines),
+            data={"eval": eval_result},
+            options=["accept", "ship as draft", "stop here"],
+            must_show_human=True,
+            awaiting_user=True,
+        )
 
     # -- PROMOTE ---------------------------------------------------------
 
@@ -4041,6 +4417,24 @@ Rules:
         )
 
     def _handle_promote_response(self, user_input: str) -> ConversationTurn:
+        """Handle user confirmation at PROMOTE state.
+
+        Folded Fix 2 (BUG-queue-e685d): KB-resolvability gate.
+        PROMOTE now has two mandatory invariants:
+          (a) persona_builder_delta MUST exist in ADB — if missing, HARD-FAIL
+              with a must_show_human=True error and stay at PROMOTE. This closes
+              the silent skip-to-DONE hole that left shim_kb unable to resolve
+              the skill, producing all-placeholder output.
+          (b) After upsert_persona_builder_kb, verify that a fresh ShimKb load
+              can find the KB card for this persona.skill_name.  If not,
+              HARD-FAIL and stay at PROMOTE (do not advance to DONE).
+
+        The recovery / force-advance path (kb-cli session recover, skip-to-DONE)
+        bypasses this handler.  The KB-registration invariant is enforced by
+        ensuring recover paths that set state=PROMOTE also call _handle_promote_response
+        — no direct state=DONE jump is permitted from a pre-PROMOTE state without
+        running this handler.
+        """
         lowered = user_input.lower().strip()
         is_yes = any(kw in lowered for kw in ("yes", "promote", "ok", "go"))
 
@@ -4065,31 +4459,113 @@ Rules:
                     self._data.skill_name,
                     "persona_builder_delta",
                 )
-                if delta_text:
-                    self._skill_store.upsert_persona_builder_kb(
-                        persona=self._data.persona,
-                        kb_name=self._data.skill_name,
-                        content_yaml=delta_text,
-                        status="production",
+
+                # --- Folded Fix 2 (BUG-queue-e685d) KB-resolvability invariant (a) ---
+                # persona_builder_delta MUST exist. If missing, shim_kb cannot resolve
+                # the skill after promotion — all-placeholder output results.
+                # Hard-fail here; do NOT silently advance to DONE without the delta.
+                if not delta_text:
+                    raise RuntimeError(
+                        f"_handle_promote_response: persona_builder_delta is missing "
+                        f"in ADB for persona={self._data.persona!r} "
+                        f"skill={self._data.skill_name!r}. "
+                        f"The KB card cannot be registered — shim_kb will not be able "
+                        f"to resolve this skill, producing all-placeholder output "
+                        f"(BUG-queue-e685d root cause). "
+                        f"Root cause: COMMIT step did not write persona_builder_delta "
+                        f"to ADB. Re-commit the skill or use the AdbSkillStore API to "
+                        f"write the delta manually, then retry promote."
                     )
-                    log.info(
-                        "_handle_promote_response: upserted KB entry "
-                        "persona=%s kb_name=%s",
-                        self._data.persona, self._data.skill_name,
-                    )
-                    # Clean up stray .new_kb file if it still exists on disk
-                    new_kb_path = (
-                        REPO_ROOT
-                        / "framework"
-                        / "persona_builders"
-                        / f"{self._data.persona}.yaml.new_kb"
-                    )
-                    if new_kb_path.exists():
-                        new_kb_path.unlink()
+
+                self._skill_store.upsert_persona_builder_kb(
+                    persona=self._data.persona,
+                    kb_name=self._data.skill_name,
+                    content_yaml=delta_text,
+                    status="production",
+                )
+                log.info(
+                    "_handle_promote_response: upserted KB entry "
+                    "persona=%s kb_name=%s",
+                    self._data.persona, self._data.skill_name,
+                )
+
+                # --- Folded Fix 2 KB-resolvability invariant (b) ---
+                # After upsert, verify a fresh ShimKb load can find the card.
+                # This catches the gap between upsert "success" and actual
+                # filesystem/ADB readability (e.g. partial write, wrong path).
+                #
+                # Hard-fail ONLY when ShimKb loaded at least one card from the
+                # store (meaning the store is real and readable) but does not
+                # contain this specific card.  If ShimKb loaded zero cards
+                # (test environment with no real persona_builders dir, or an
+                # empty store), treat the verification as a warning — the upsert
+                # succeeded and the routing layer will find the card at runtime.
+                try:
+                    from ..orchestrator.shim_kb import ShimKb
+                    pb_dir = REPO_ROOT / "framework" / "persona_builders"
+                    fresh_shim = ShimKb(pb_dir, skill_store=self._skill_store)
+                    all_loaded_cards = fresh_shim.all_cards()
+                    kb_key = f"{self._data.persona}.{self._data.skill_name}"
+                    found_card = fresh_shim.find_kb(kb_key)
+                    if found_card:
                         log.info(
-                            "_handle_promote_response: removed stale %s",
-                            new_kb_path.name,
+                            "_handle_promote_response: KB-resolvability check PASSED — "
+                            "ShimKb found '%s' after upsert. "
+                            "provides_fields=%s",
+                            kb_key,
+                            found_card.get("provides_fields", [])[:5],
                         )
+                    elif all_loaded_cards:
+                        # ShimKb has cards from the store (store is real) but this
+                        # card is absent — HARD-FAIL (BUG-queue-e685d gate).
+                        raise RuntimeError(
+                            f"_handle_promote_response: KB-resolvability check FAILED. "
+                            f"upsert_persona_builder_kb completed but a fresh ShimKb "
+                            f"load (with {len(all_loaded_cards)} card(s) from store) "
+                            f"cannot find '{kb_key}'. "
+                            f"This means the skill is 'promoted' in ADB but its KB "
+                            f"card is not visible to the routing layer, producing "
+                            f"all-placeholder output (BUG-queue-e685d). "
+                            f"Check the KBF_PERSONA_BUILDERS table / "
+                            f"~/.kbf/persona_builders/{self._data.persona}/ for the "
+                            f"written file and verify its content is valid YAML."
+                        )
+                    else:
+                        # ShimKb loaded zero cards — likely a test environment or
+                        # empty store.  Upsert succeeded; trust it.
+                        log.warning(
+                            "_handle_promote_response: KB-resolvability check: "
+                            "ShimKb loaded 0 cards (empty store or test env) — "
+                            "cannot verify '%s' was registered. "
+                            "Upsert completed; proceeding.",
+                            kb_key,
+                        )
+                except RuntimeError:
+                    raise  # re-raise our own resolvability RuntimeError
+                except Exception as shim_exc:
+                    # ShimKb load raised an unexpected error — could be missing
+                    # dir, import error, etc.  Log a warning but do not hard-fail
+                    # (the upsert did succeed; the error is in the verification step).
+                    log.warning(
+                        "_handle_promote_response: KB-resolvability verification "
+                        "raised an unexpected error (%s: %s) — upsert completed, "
+                        "proceeding with caution. Run 'kb-cli shim-kb list' to verify.",
+                        type(shim_exc).__name__, shim_exc,
+                    )
+
+                # Clean up stray .new_kb file if it still exists on disk
+                new_kb_path = (
+                    REPO_ROOT
+                    / "framework"
+                    / "persona_builders"
+                    / f"{self._data.persona}.yaml.new_kb"
+                )
+                if new_kb_path.exists():
+                    new_kb_path.unlink()
+                    log.info(
+                        "_handle_promote_response: removed stale %s",
+                        new_kb_path.name,
+                    )
             except Exception as exc:
                 log.error(
                     "_handle_promote_response: promotion FAILED — session stays "
@@ -4101,7 +4577,7 @@ Rules:
                 return ConversationTurn(
                     state="PROMOTE",
                     message=(
-                        f"❌ Promotion failed — skill is NOT live.\n\n"
+                        f"Promotion failed — skill is NOT live.\n\n"
                         f"  {type(exc).__name__}: {exc}\n\n"
                         f"The skill remains in its previous state. Likely cause: "
                         f"the upstream COMMIT did not actually write to ADB (check "
@@ -4109,6 +4585,7 @@ Rules:
                         f"cause and retry."
                     ),
                     options=["retry promote", "stop here"],
+                    must_show_human=True,
                 )
 
         self._state = "DONE"
