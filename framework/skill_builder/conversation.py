@@ -40,6 +40,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Module-level import so tests can patch 'framework.skill_builder.conversation.fetch_samples'
 from .sampler import fetch_samples  # noqa: E402
+# ADR-029 Phase 2 (S6): shared JSON-parse helper — same as S5/review.py path
+from .review import _parse_llm_json_response  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -625,6 +627,29 @@ Rules:
 """
 
 # ---------------------------------------------------------------------------
+# ADR-029 Phase 2 (S6): constrained routing map + guardrail constants
+# ---------------------------------------------------------------------------
+#
+# This map is CODE, not LLM-decided. The classifier diagnoses; this dict routes.
+# An unknown/garbled failure_class must NOT be used to free-route — see guardrail 1.
+#
+# The sentinel value "DONE_DRAFT" means: exit to DONE with draft status + explanation.
+# It is NOT a state in the STATES list — it is handled inline in _classify_and_route.
+_ROUTING_MAP: dict[str, str] = {
+    "MISSING_FIELDS": "REVIEW_DESIGN",
+    "THIN_FIELDS":    "REVIEW_DESIGN",
+    "WRONG_LAYOUT":   "REVIEW_DESIGN",
+    "SOURCE_COVERAGE": "CONFIGURE_SOURCES",
+    "WRONG_SOURCE":   "INSPECT_SOURCES",
+    "UNSUPPORTABLE":  "DONE_DRAFT",
+}
+
+# Guardrail thresholds — may be overridden per workflow YAML in future but
+# hardcoded here per ADR-029 §C.3 until a workflow-YAML override is wired.
+_EVAL_MAX_ITERATIONS: int = 3
+_EVAL_COST_CEILING_USD: float = 2.00
+
+# ---------------------------------------------------------------------------
 # STATES list: ADR-027 + ADR-028 state machine
 # ---------------------------------------------------------------------------
 
@@ -652,6 +677,9 @@ STATES = [
     "PROMOTE",
     "DONE",
 ]
+# ADR-029 S6 internal transient state — NOT in STATES (not user-facing or API-facing).
+# Used only by the handler dispatch table to route _handle_eval_route_confirm.
+_EVAL_ROUTE_PENDING = "EVAL_ROUTE_PENDING"
 
 # Legacy states from the ADR-026 machine. In-flight sessions at deploy time
 # execute via the legacy handlers (dispatch table below). New sessions never
@@ -774,6 +802,19 @@ class _SessionData:
     # artifact_reference_type: "pptx" | "docx" | "md" | "txt" — needed to dispatch
     # the right ArtifactComparator extractor at EVAL time.
     artifact_reference_type: str | None = None
+    # ADR-029 Phase 2 (S6): loop guardrail fields.
+    # eval_iteration_count: incremented every time the reject path runs the classifier.
+    # eval_cumulative_cost_usd: accumulates classifier LLM call cost across iterations.
+    # last_eval_failure_class: the failure_class returned on the PREVIOUS iteration;
+    #   used by the consecutive-same-class pathological-loop detector.
+    # All have backward-compat defaults for pre-S6 sessions.
+    eval_iteration_count: int = 0
+    eval_cumulative_cost_usd: float = 0.0
+    last_eval_failure_class: str | None = None
+    # Internal transient: target state after the user confirms the routing turn.
+    # Set when state machine enters EVAL_ROUTE_PENDING.
+    # Not persisted (reconstructed from the routing turn if needed).
+    _eval_pending_route: str = field(default="REVIEW_DESIGN")
 
 
 class SkillBuilderConversation:
@@ -883,6 +924,7 @@ class SkillBuilderConversation:
             "VALIDATE": self._handle_validate_response,
             "INGEST": self._handle_ingest_response,
             "EVAL": self._handle_eval_response,
+            "EVAL_ROUTE_PENDING": self._handle_eval_route_confirm,  # ADR-029 S6
             "PROMOTE": self._handle_promote_response,
             "DONE": lambda _: ConversationTurn(
                 state="DONE", message="Session complete.", done=True,
@@ -965,6 +1007,11 @@ class SkillBuilderConversation:
         # backward-compat; pre-S5 sessions will simply have no reference artifact.
         d["artifact_reference_id"] = self._data.artifact_reference_id
         d["artifact_reference_type"] = self._data.artifact_reference_type
+        # ADR-029 Phase 2 (S6): loop guardrail fields — default 0/None for
+        # backward-compat; pre-S6 sessions have no iteration history.
+        d["eval_iteration_count"] = self._data.eval_iteration_count
+        d["eval_cumulative_cost_usd"] = self._data.eval_cumulative_cost_usd
+        d["last_eval_failure_class"] = self._data.last_eval_failure_class
         return d
 
     @classmethod
@@ -1022,6 +1069,11 @@ class SkillBuilderConversation:
             # Backward-compat default None — pre-S5 sessions have no reference.
             artifact_reference_id=d.get("artifact_reference_id"),
             artifact_reference_type=d.get("artifact_reference_type"),
+            # ADR-029 Phase 2 (S6): loop guardrail fields.
+            # Backward-compat defaults: 0 / 0.0 / None for pre-S6 sessions.
+            eval_iteration_count=int(d.get("eval_iteration_count", 0)),
+            eval_cumulative_cost_usd=float(d.get("eval_cumulative_cost_usd", 0.0)),
+            last_eval_failure_class=d.get("last_eval_failure_class"),
         )
         return obj
 
@@ -4475,45 +4527,382 @@ Rules:
                 self._data.eval_result["user_accepted_at"] = _now_iso()
             return self._run_promote()
 
-        # --- S6 SEAM: reject / review design / configure sources ---
-        # S5 stops here. S6 will add the classifier-driven auto-routing.
-        # The classifier validation gate must pass before S6 routing is enabled.
-        # This path is labeled as a seam — do NOT implement auto-routing here.
-        log.info(
-            "_handle_eval_response: user chose reject path (%r) — "
-            "S6 routing seam reached. S6 not yet active. "
-            "Surfacing gap report again for user to reconsider. "
-            "TODO-S6: wire classifier here after validation gate passes. "
-            "[file:framework/skill_builder/conversation.py _handle_eval_response S6 seam]",
-            user_input[:60],
-        )
+        # --- S6: classifier-driven constrained routing (ADR-029 Phase 2) ---
+        # Gate has passed (commit eb31230). Auto-routing is now ACTIVE.
+        # Guardrails are applied in order before the classifier is called.
+        # The routing turn is must_show_human=True — user must confirm re-route.
+        return self._classify_and_route(user_input)
+
+    def _classify_and_route(self, user_input: str) -> ConversationTurn:
+        """ADR-029 Phase 2 (S6): run the failure-class classifier and apply constrained routing.
+
+        Guardrails (applied in order, all six per ADR-029 §C.3):
+          1. confidence==low → route to REVIEW_DESIGN (never CONFIGURE_SOURCES/INSPECT_SOURCES).
+          2. UNSUPPORTABLE → DONE as draft, no loop.
+          3. Consecutive-same-class → pathological-loop → DONE as draft.
+          4. eval_iteration_count >= _EVAL_MAX_ITERATIONS → DONE as draft.
+          5. eval_cumulative_cost_usd > _EVAL_COST_CEILING_USD → DONE as draft.
+          6. ALWAYS surface evidence + why_not_alternative to user (must_show_human=True)
+             before applying the route — a routing turn the user must confirm.
+
+        The LLM only classifies.  _ROUTING_MAP is the only thing that maps class→state.
+        An unknown/garbled class is treated as low-confidence (guardrail 1: REVIEW_DESIGN).
+
+        No stub mode: if self._llm is None this method raises RuntimeError immediately
+        with an actionable message.  The seam was previously non-functional; S6 requires
+        a real LLM for all router calls.
+        """
+        if self._llm is None:
+            # No stub-mode: do NOT silently skip routing. Surface a hard-fail turn
+            # with must_show_human=True so the operator sees the configuration error.
+            # The session stays at EVAL — the user must supply a correctly-wired
+            # session (with an LLM client) to continue.
+            log.error(
+                "_classify_and_route: self._llm is None — cannot run failure classifier. "
+                "Wire an LLM client when constructing SkillBuilderConversation. "
+                "Returning actionable error turn (no silent skip per no-stub-mode policy). "
+                "persona=%s skill=%s",
+                self._data.persona, self._data.skill_name,
+            )
+            return ConversationTurn(
+                state="EVAL",
+                message=(
+                    "ERROR: Failure classifier cannot run — no LLM client is configured. "
+                    "This session was constructed without an LLM (llm=None). "
+                    "The failure-class classifier requires a real LLM client. "
+                    "Please re-create the session with a properly wired LLM.\n\n"
+                    "Options: 'accept' to promote as-is, 'ship as draft' to save without promoting."
+                ),
+                options=["accept", "ship as draft", "stop here"],
+                must_show_human=True,
+                awaiting_user=True,
+            )
+
         eval_result = self._data.eval_result or {}
         comparator_dict = eval_result.get("comparator") or {}
-        gap_msg_lines: list[str] = [
-            "You chose to revise rather than accept. Here is the gap report again:\n",
-        ]
-        if comparator_dict:
-            gap_msg_lines.append(comparator_dict.get("gap_report", "(no gap report)"))
-            gap_msg_lines.append("")
-        else:
-            gap_msg_lines.append(
-                "(No comparator result — reference artifact was not available or comparison failed.)"
+
+        # --- Guardrail 4: iteration ceiling ---
+        if self._data.eval_iteration_count >= _EVAL_MAX_ITERATIONS:
+            self._state = "DONE"
+            log.warning(
+                "_classify_and_route: eval_iteration_count=%d >= max=%d — "
+                "exiting as draft (loop ceiling). persona=%s skill=%s",
+                self._data.eval_iteration_count, _EVAL_MAX_ITERATIONS,
+                self._data.persona, self._data.skill_name,
             )
-            gap_msg_lines.append("")
-        gap_msg_lines.append(
-            "S6 constrained routing is not yet active (classifier validation gate pending).\n"
-            "Options at this stage:\n"
-            "  'accept'          — accept the current output and promote\n"
-            "  'ship as draft'   — save without promoting\n"
-            "  'stop here'       — pause session\n\n"
-            "To iterate on this skill, stop here and re-author from REVIEW_DESIGN "
-            "or CONFIGURE_SOURCES in a new call."
+            return ConversationTurn(
+                state="DONE",
+                message=(
+                    f"EVAL loop limit reached ({_EVAL_MAX_ITERATIONS} iterations). "
+                    f"Skill {self._data.persona}.{self._data.skill_name} saved as draft "
+                    f"for manual review.\n\n"
+                    f"Session ID: {self._data.synth_id}"
+                ),
+                done=True,
+            )
+
+        # --- Guardrail 5: cost ceiling ---
+        if self._data.eval_cumulative_cost_usd > _EVAL_COST_CEILING_USD:
+            self._state = "DONE"
+            log.warning(
+                "_classify_and_route: eval_cumulative_cost_usd=%.4f > ceiling=%.2f — "
+                "exiting as draft (cost ceiling). persona=%s skill=%s",
+                self._data.eval_cumulative_cost_usd, _EVAL_COST_CEILING_USD,
+                self._data.persona, self._data.skill_name,
+            )
+            return ConversationTurn(
+                state="DONE",
+                message=(
+                    f"EVAL cost ceiling exceeded "
+                    f"(${self._data.eval_cumulative_cost_usd:.4f} > "
+                    f"${_EVAL_COST_CEILING_USD:.2f}). "
+                    f"Skill {self._data.persona}.{self._data.skill_name} saved as draft "
+                    f"for manual review.\n\n"
+                    f"Session ID: {self._data.synth_id}"
+                ),
+                done=True,
+            )
+
+        # --- Run the failure-class classifier ---
+        schema_properties = (self._data.design or {}).get("schema", {}).get("properties", {})
+        prompt = _FAILURE_CLASSIFIER_PROMPT.format(
+            normalised_intent=json.dumps(self._data.normalised_intent, indent=2),
+            schema_properties=json.dumps(schema_properties, indent=2),
+            capability_inventory=json.dumps(self._data.source_capability, indent=2),
+            gap_report=comparator_dict.get("gap_report", ""),
+            missing_sections=json.dumps(comparator_dict.get("missing_sections", [])),
+            thin_sections=json.dumps(comparator_dict.get("thin_sections", [])),
         )
+        log.info(
+            "_classify_and_route: calling failure classifier. "
+            "iteration=%d persona=%s skill=%s",
+            self._data.eval_iteration_count + 1,
+            self._data.persona, self._data.skill_name,
+        )
+        try:
+            classifier_response = self._llm.chat(
+                model="synthesis",
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                max_tokens=512,
+            )
+        except Exception as exc:
+            log.error("_classify_and_route: LLM call failed: %s", exc)
+            raise
+
+        raw_text = (
+            classifier_response.get("text", "")
+            if isinstance(classifier_response, dict)
+            else str(classifier_response)
+        )
+        # Accumulate cost from this classifier call
+        call_cost = 0.0
+        if isinstance(classifier_response, dict):
+            call_cost = float(classifier_response.get("estimated_cost_usd", 0.0) or 0.0)
+        self._data.eval_cumulative_cost_usd += call_cost
+        self._data.eval_iteration_count += 1
+
+        # Parse — use the shared helper (parity with S5 / review.py)
+        try:
+            tokens_out = (
+                classifier_response.get("tokens_out")
+                if isinstance(classifier_response, dict)
+                else None
+            )
+            parsed = _parse_llm_json_response(
+                raw_text,
+                tokens_out=tokens_out,
+                max_tokens=512,
+            )
+        except (ValueError, Exception) as exc:
+            log.error(
+                "_classify_and_route: failed to parse classifier JSON (%s). "
+                "Raw text: %r. Treating as low-confidence → REVIEW_DESIGN.",
+                exc, raw_text[:300],
+            )
+            parsed = {
+                "failure_class": "UNKNOWN",
+                "confidence": "low",
+                "evidence": f"Classifier returned non-JSON output ({exc}). Defaulting to REVIEW_DESIGN.",
+                "alternative_class": "UNKNOWN",
+                "why_not_alternative": "Parse failed.",
+            }
+
+        failure_class = parsed.get("failure_class", "UNKNOWN")
+        confidence = parsed.get("confidence", "low")
+        evidence = parsed.get("evidence", "(no evidence provided)")
+        alternative_class = parsed.get("alternative_class", "(none)")
+        why_not_alternative = parsed.get("why_not_alternative", "(not provided)")
+
+        log.info(
+            "_classify_and_route: classifier result: failure_class=%r confidence=%r "
+            "cost_this_call=%.4f cumulative_cost=%.4f persona=%s skill=%s",
+            failure_class, confidence, call_cost, self._data.eval_cumulative_cost_usd,
+            self._data.persona, self._data.skill_name,
+        )
+
+        # --- Guardrail 1: low confidence → REVIEW_DESIGN (never CONFIGURE_SOURCES/INSPECT_SOURCES) ---
+        # Also applies to unknown/garbled failure_class.
+        unknown_class = failure_class not in _ROUTING_MAP
+        if confidence == "low" or unknown_class:
+            if unknown_class:
+                log.warning(
+                    "_classify_and_route: unknown failure_class=%r — treating as low-confidence "
+                    "→ REVIEW_DESIGN (guardrail 1). persona=%s skill=%s",
+                    failure_class, self._data.persona, self._data.skill_name,
+                )
+            else:
+                log.info(
+                    "_classify_and_route: confidence=low → defaulting to REVIEW_DESIGN "
+                    "(guardrail 1). failure_class=%r persona=%s skill=%s",
+                    failure_class, self._data.persona, self._data.skill_name,
+                )
+            target_state = "REVIEW_DESIGN"
+        else:
+            target_state = _ROUTING_MAP[failure_class]
+
+        # --- Guardrail 2: UNSUPPORTABLE → DONE as draft ---
+        if target_state == "DONE_DRAFT" or failure_class == "UNSUPPORTABLE":
+            self._state = "DONE"
+            self._data.last_eval_failure_class = failure_class
+            log.info(
+                "_classify_and_route: UNSUPPORTABLE — exiting as draft. "
+                "evidence=%r persona=%s skill=%s",
+                evidence[:200], self._data.persona, self._data.skill_name,
+            )
+            return ConversationTurn(
+                state="DONE",
+                message=(
+                    f"Failure diagnosis: UNSUPPORTABLE\n\n"
+                    f"Evidence: {evidence}\n\n"
+                    f"Why not {alternative_class}: {why_not_alternative}\n\n"
+                    f"The missing content cannot be derived from any configured source, "
+                    f"even with synthesis. Human review is required. "
+                    f"Skill {self._data.persona}.{self._data.skill_name} saved as draft.\n\n"
+                    f"Session ID: {self._data.synth_id}"
+                ),
+                done=True,
+                must_show_human=True,
+            )
+
+        # --- Guardrail 3: consecutive-same-class → pathological loop → DONE as draft ---
+        if (
+            self._data.last_eval_failure_class is not None
+            and self._data.last_eval_failure_class == failure_class
+        ):
+            self._state = "DONE"
+            log.warning(
+                "_classify_and_route: consecutive-same-class detected (%r). "
+                "Pathological loop — exiting as draft. persona=%s skill=%s",
+                failure_class, self._data.persona, self._data.skill_name,
+            )
+            return ConversationTurn(
+                state="DONE",
+                message=(
+                    f"EVAL has cycled twice on the same failure class ({failure_class!r}). "
+                    f"This likely means the root cause is structural. "
+                    f"The skill is saved as draft for manual review.\n\n"
+                    f"Diagnosis: {evidence}\n\n"
+                    f"Session ID: {self._data.synth_id}"
+                ),
+                done=True,
+                must_show_human=True,
+            )
+
+        # --- Update loop-state fields ---
+        self._data.last_eval_failure_class = failure_class
+
+        # --- Guardrail 6: surface evidence + why_not_alternative to user (must_show_human) ---
+        # The routing turn MUST be confirmed by the user before the state machine transitions.
+        # ADR-029 §C.3: a misdiagnosis the user can see and correct is far less harmful
+        # than a silent misroute.
+        log.info(
+            "_classify_and_route: routing to %r after user confirmation. "
+            "failure_class=%r confidence=%r persona=%s skill=%s",
+            target_state, failure_class, confidence,
+            self._data.persona, self._data.skill_name,
+        )
+
+        # Encode the intended transition in state so the NEXT respond() call
+        # (user confirmation) knows where to go.  We use a special pending-route
+        # string that _handle_eval_route_confirm will detect.
+        self._state = "EVAL_ROUTE_PENDING"
+        self._data._eval_pending_route = target_state  # type: ignore[attr-defined]
+
+        options_map = {
+            "REVIEW_DESIGN":       "confirm route to REVIEW_DESIGN",
+            "CONFIGURE_SOURCES":   "confirm route to CONFIGURE_SOURCES",
+            "INSPECT_SOURCES":     "confirm route to INSPECT_SOURCES",
+        }
+        confirm_option = options_map.get(target_state, f"confirm route to {target_state}")
+
         return ConversationTurn(
             state="EVAL",
-            message="\n".join(gap_msg_lines),
-            data={"eval": eval_result},
-            options=["accept", "ship as draft", "stop here"],
+            message=(
+                f"Failure diagnosis: {failure_class} (confidence: {confidence})\n\n"
+                f"Evidence: {evidence}\n\n"
+                f"Why not {alternative_class}: {why_not_alternative}\n\n"
+                f"Recommended next step: re-run from {target_state}.\n\n"
+                f"Type '{confirm_option}' to proceed, "
+                f"or 'accept' to promote as-is, "
+                f"or 'ship as draft' to save without promoting."
+            ),
+            data={
+                "failure_class": failure_class,
+                "confidence": confidence,
+                "evidence": evidence,
+                "alternative_class": alternative_class,
+                "why_not_alternative": why_not_alternative,
+                "target_state": target_state,
+                "eval_iteration_count": self._data.eval_iteration_count,
+                "eval_cumulative_cost_usd": self._data.eval_cumulative_cost_usd,
+            },
+            options=[confirm_option, "accept", "ship as draft", "stop here"],
+            must_show_human=True,
+            awaiting_user=True,
+        )
+
+    def _handle_eval_route_confirm(self, user_input: str) -> ConversationTurn:
+        """ADR-029 Phase 2 (S6): handle user confirmation of the routing turn.
+
+        Called when state==EVAL_ROUTE_PENDING (user has seen the diagnosis and
+        must confirm the re-route, accept, or ship as draft).
+
+        The target state is stored in self._data._eval_pending_route, set by
+        _classify_and_route before transitioning to EVAL_ROUTE_PENDING.
+
+        Responses:
+          "confirm*" / the confirm_option string → transition to target_state
+          "accept" / "looks good" / "yes, promote" → PROMOTE
+          "ship as draft" → DONE (draft)
+          "stop here" / "exit" / "pause" → DONE (paused)
+          anything else → re-surface the routing turn (user did not confirm)
+        """
+        lowered = user_input.lower().strip()
+        target_state = getattr(self._data, "_eval_pending_route", "REVIEW_DESIGN")
+
+        # --- STOP / PAUSE ---
+        if any(kw in lowered for kw in ("stop", "exit", "pause")):
+            self._state = "DONE"
+            return ConversationTurn(state="DONE", message="Session paused.", done=True)
+
+        # --- SHIP AS DRAFT ---
+        if "ship" in lowered and "draft" in lowered:
+            self._state = "DONE"
+            return ConversationTurn(
+                state="DONE",
+                message=(
+                    f"Skill {self._data.persona}.{self._data.skill_name} saved as draft.\n\n"
+                    "The skill is committed to ADB but NOT live in production.\n\n"
+                    f"Session ID: {self._data.synth_id}"
+                ),
+                done=True,
+            )
+
+        # --- ACCEPT → PROMOTE ---
+        if any(kw in lowered for kw in ("accept", "looks good", "yes, promote", "promote")):
+            if self._data.eval_result:
+                self._data.eval_result["user_accepted"] = True
+                self._data.eval_result["user_accepted_at"] = _now_iso()
+            self._state = "EVAL"  # restore before _run_promote changes it
+            return self._run_promote()
+
+        # --- CONFIRM ROUTE ---
+        if "confirm" in lowered or target_state.lower().replace("_", " ") in lowered:
+            log.info(
+                "_handle_eval_route_confirm: user confirmed route to %r. "
+                "persona=%s skill=%s",
+                target_state, self._data.persona, self._data.skill_name,
+            )
+            # Transition state machine back to the mapped state so the loop re-runs
+            # that segment on the next respond() call.
+            self._state = target_state
+            return self._turn(ConversationTurn(
+                state=target_state,
+                message=(
+                    f"Routing back to {target_state} based on failure diagnosis "
+                    f"({self._data.last_eval_failure_class}).\n\n"
+                    f"Please review and update accordingly, then respond to continue."
+                ),
+                must_show_human=True,
+                awaiting_user=True,
+            ))
+
+        # --- Unrecognised: re-surface the routing turn ---
+        options_map = {
+            "REVIEW_DESIGN":     "confirm route to REVIEW_DESIGN",
+            "CONFIGURE_SOURCES": "confirm route to CONFIGURE_SOURCES",
+            "INSPECT_SOURCES":   "confirm route to INSPECT_SOURCES",
+        }
+        confirm_option = options_map.get(target_state, f"confirm route to {target_state}")
+        return ConversationTurn(
+            state="EVAL",
+            message=(
+                f"Please confirm the recommended routing to {target_state}.\n\n"
+                f"Type '{confirm_option}' to proceed, "
+                f"'accept' to promote as-is, or 'ship as draft' to save without promoting."
+            ),
+            options=[confirm_option, "accept", "ship as draft", "stop here"],
             must_show_human=True,
             awaiting_user=True,
         )

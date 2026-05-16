@@ -1,5 +1,5 @@
 ---
-title: authorSkill conversation flow — state-by-state map (post-ADR-029 S5)
+title: authorSkill conversation flow — state-by-state map (post-ADR-029 S6)
 owner: architect
 created: 2026-05-14
 updated: 2026-05-15
@@ -7,14 +7,63 @@ related: [ADR-015, ADR-026, ADR-027, ADR-028, ADR-029, ADR-016, ADR-017]
 supersedes: authorskill-flow-pre-adr-027.md
 ---
 
-# authorSkill conversation flow — state-by-state map (post-ADR-028)
+# authorSkill conversation flow — state-by-state map (post-ADR-028/ADR-029 S6)
 
 > This file describes the **ADR-028/ADR-029 17-state machine** (ADR-028 Stream A S1-S4 +
-> ADR-029 Phase 1 S5 implementation).
+> ADR-029 Phase 1 S5 + ADR-029 Phase 2 S6).
 > The pre-ADR-027 15-state machine is archived at `docs/wiki/authorskill-flow-pre-adr-027.md`.
 > The ADR-027 16-state machine is superseded by this document (CLARIFY added as 17th state).
 > In-flight sessions at deploy time complete under the old machine (legacy handlers are
 > retained in `conversation.py`); all new sessions use the machine below.
+
+## ADR-029 changes (Phase 2 — S6)
+
+- **EVAL reject path is now fully active.** The `# TODO-S6` seam is replaced by
+  `_classify_and_route` (new method). When the user types anything other than "accept",
+  "ship as draft", "stop", or "force promote" at EVAL, the failure-class classifier runs.
+- **Failure-class classifier** (`_FAILURE_CLASSIFIER_PROMPT`): validated against the
+  known gold case (commit eb31230, gate: 3/3 runs → MISSING_FIELDS). Called with ALL SIX
+  mandatory inputs: `normalised_intent`, `schema_properties`, `capability_inventory`,
+  `gap_report`, `missing_sections`, `thin_sections`. Parsed via shared
+  `_parse_llm_json_response` helper (parity with S5 / review.py).
+- **Constrained routing map (code, not LLM-decided):**
+
+  | failure_class | target state |
+  |---|---|
+  | MISSING_FIELDS | REVIEW_DESIGN |
+  | THIN_FIELDS | REVIEW_DESIGN |
+  | WRONG_LAYOUT | REVIEW_DESIGN |
+  | SOURCE_COVERAGE | CONFIGURE_SOURCES |
+  | WRONG_SOURCE | INSPECT_SOURCES |
+  | UNSUPPORTABLE | DONE (draft) |
+
+- **Six guardrails (ADR-029 §C.3):**
+  1. `confidence == "low"` → route to REVIEW_DESIGN by default; NEVER auto-route to
+     CONFIGURE_SOURCES or INSPECT_SOURCES on low confidence. Unknown/garbled class also
+     treated as low-confidence.
+  2. `UNSUPPORTABLE` → DONE as draft immediately. No loop.
+  3. Consecutive-same-class: if `last_eval_failure_class == current failure_class` →
+     emit pathological-loop message, DONE as draft.
+  4. `eval_iteration_count >= 3` → DONE as draft.
+  5. `eval_cumulative_cost_usd > 2.00` → DONE as draft.
+  6. ALWAYS surface `evidence` + `why_not_alternative` to the user with
+     `must_show_human=True` BEFORE applying the route. The routing turn must be confirmed
+     by the user — no silent auto-advance even on confident diagnosis.
+- **Routing-confirmation interstitial state** (`EVAL_ROUTE_PENDING`): after the classifier
+  runs, the state machine moves to this internal transient state. `_handle_eval_route_confirm`
+  handles the user's confirmation. Valid responses: `"confirm route to <STATE>"` (transitions),
+  `"accept"` (→ PROMOTE), `"ship as draft"` (→ DONE), `"stop"` (→ DONE).
+- **New `_SessionData` fields (backward-compat defaults for pre-S6 sessions):**
+  - `eval_iteration_count: int = 0` — incremented each time the reject path runs the classifier
+  - `eval_cumulative_cost_usd: float = 0.0` — accumulates classifier LLM call cost
+  - `last_eval_failure_class: str | None = None` — set after each classification for
+    consecutive-same-class detection
+  - `_eval_pending_route: str = "REVIEW_DESIGN"` — transient; target state pending user confirm
+  All three durable fields are in `to_dict()` / `from_dict()`.
+- **No stub-mode for classifier**: if `self._llm is None`, returns a `must_show_human=True`
+  EVAL error turn (actionable operator message). No silent skip.
+- **Auto-gold is diagnostic-only**: the `exit_criteria.passed` path remains diagnostic-only.
+  The only PROMOTE gate is user's explicit `"accept"` (unchanged from S5).
 
 ## ADR-029 changes (Phase 1 — S5)
 
@@ -31,8 +80,8 @@ supersedes: authorskill-flow-pre-adr-027.md
 - **EVAL terminal gate — user acceptance**: options are `["accept", "ship as draft",
   "review design", "configure sources", "stop here"]`. "accept" or "promote" → transitions
   to PROMOTE (stamps `user_accepted=True`). "ship as draft" → DONE without promoting.
-  "stop" → DONE. Reject / "review design" / "configure sources" → stay at EVAL with a
-  labeled `# TODO-S6` seam (S6 not yet implemented).
+  "stop" → DONE. Reject / "review design" / "configure sources" → **S6 classifier routing
+  (active as of S6 — gate passed commit eb31230).**
 - **PROMOTE KB-resolvability gate** (Folded Fix 2, BUG-queue-e685d): before marking
   production, `persona_builder_delta` must exist in ADB (hard-fail if absent). After
   `upsert_persona_builder_kb`, a fresh `ShimKb` load must find the card (hard-fail only
@@ -496,8 +545,21 @@ Hard-fail on zero pages. No LLM.
      (force-promote is checked **before** accept to avoid substring collision).
    - `"ship as draft"` → DONE immediately (no promote, no ADB write).
    - `"stop"` / `"exit"` / `"pause"` → DONE.
-   - Reject / `"review design"` / `"configure sources"` → stay at EVAL,
-     `must_show_human=True`, seam labeled `# TODO-S6` (S6 not yet implemented).
+   - Reject / `"review design"` / `"configure sources"` / any other input →
+     **ADR-029 Phase 2 (S6): failure-class classifier runs** (`_classify_and_route`).
+     See ADR-029 Phase 2 section above for the six guardrails and routing map.
+     If `self._llm is None`, returns an actionable error turn at EVAL (no silent skip).
+
+10. **S6 routing-confirmation turn** (EVAL_ROUTE_PENDING internal state):
+    After the classifier runs and guardrails pass, the state machine emits a routing
+    turn (`must_show_human=True`) showing:
+    - `failure_class` + `confidence`
+    - `evidence` (must cite capability_inventory fields)
+    - `why_not_alternative` (rules out the second-most-likely class)
+    - `target_state` (per the routing map)
+    The user must type `"confirm route to <STATE>"` to proceed. The session transitions
+    state machine back to `target_state` (REVIEW_DESIGN / CONFIGURE_SOURCES / INSPECT_SOURCES)
+    so the loop re-runs that segment. On DONE-as-draft paths, finalises cleanly.
 
 **LLM involvement.**
 - One `synthesis` call per sample for extraction (2-3 calls).
@@ -571,6 +633,19 @@ Terminal. Unchanged.
 - `artifact_reference_type: str | None` — file extension without dot (e.g. `"pptx"`, `"docx"`).
   `None` if user skipped. Backward-compat: absent key in serialised dict → `None`.
 
+**New fields (ADR-029 Phase 2 S6):**
+- `eval_iteration_count: int = 0` — incremented each time the classifier runs in the reject path.
+  Guardrail 4: when `>= _EVAL_MAX_ITERATIONS` (3), exits as draft before calling classifier.
+  Persisted in `to_dict()` / `from_dict()`. Backward-compat default 0.
+- `eval_cumulative_cost_usd: float = 0.0` — accumulates cost of classifier LLM calls (USD).
+  Guardrail 5: when `> _EVAL_COST_CEILING_USD` (2.00), exits as draft before calling classifier.
+  Persisted in `to_dict()` / `from_dict()`. Backward-compat default 0.0.
+- `last_eval_failure_class: str | None = None` — the `failure_class` from the most recent
+  classifier run. Guardrail 3: if current class == last class → pathological loop → DONE draft.
+  Persisted in `to_dict()` / `from_dict()`. Backward-compat default None.
+- `_eval_pending_route: str = "REVIEW_DESIGN"` — transient (not persisted). Target state
+  waiting for user confirmation in EVAL_ROUTE_PENDING. Set by `_classify_and_route`.
+
 **Removed fields:**
 - `llm_suggested_specs` — folded into `design["schema"]`
 - `slide_mapping` — replaced by `artifact_layout`
@@ -587,4 +662,10 @@ Terminal. Unchanged.
 | PREVIEW_EXTRACTION | 1 per sample (usually 2-3) |
 | EVAL (extraction) | 1 per sample (usually 2-3) |
 | EVAL (faithfulness judge) | 1 |
-| **Total** | **7-14** |
+| EVAL (failure classifier — S6, reject path only) | 1 per reject iteration (max 3) |
+| **Total (happy path)** | **7-14** |
+| **Total (3 reject iterations)** | **10-17** |
+
+**Cost ceiling (S6 guardrail 5):** classifier calls cumulate against a $2.00 ceiling.
+Classifier token budget: 512 output tokens per call (small; the prompt is ~1.5k tokens).
+Estimated cost per classifier call: ~$0.01 (OCI synthesis model at current pricing).

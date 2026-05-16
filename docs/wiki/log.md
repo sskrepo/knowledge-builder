@@ -30,6 +30,51 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-15] backend-dev | S6 — ADR-029 Phase 2 constrained routing + loop guardrails wired
+
+**Task: Wire the validated failure-class classifier into the EVAL reject path.**
+Gate: 3/3 live LLM runs → MISSING_FIELDS (commit eb31230). Full auto-routing enabled.
+
+**Changes to `framework/skill_builder/conversation.py`:**
+- Added `_ROUTING_MAP` constant (code-only map; failure_class → target state). Located
+  after `_FAILURE_CLASSIFIER_PROMPT` constant.
+- Added `_EVAL_MAX_ITERATIONS = 3` and `_EVAL_COST_CEILING_USD = 2.00` guardrail constants.
+- Added `_EVAL_ROUTE_PENDING` as an internal transient state constant (NOT in `STATES[]`
+  — stays at 17 per ADR-028 S3 contract).
+- Added import of `_parse_llm_json_response` from `.review` (parity with S5).
+- `_SessionData`: added `eval_iteration_count: int = 0`, `eval_cumulative_cost_usd: float = 0.0`,
+  `last_eval_failure_class: str | None = None`, `_eval_pending_route: str = "REVIEW_DESIGN"`.
+  First three persisted in `to_dict()` / `from_dict()` with backward-compat defaults.
+- Replaced `# TODO-S6` seam in `_handle_eval_response` with `return self._classify_and_route(user_input)`.
+- New method `_classify_and_route`: applies all 6 guardrails in order (iteration ceiling
+  before LLM call, cost ceiling before LLM call, then LLM call, then UNSUPPORTABLE check,
+  then consecutive-same-class check, then routing turn with must_show_human=True).
+  Mandatory 6-input call contract honored. llm=None surfaced as EVAL error turn (no silent skip).
+- New method `_handle_eval_route_confirm`: handles user response at EVAL_ROUTE_PENDING.
+  "confirm route to X" → state machine transitions to X. "accept" → PROMOTE. "ship as draft" → DONE.
+- Handler dispatch: added `"EVAL_ROUTE_PENDING": self._handle_eval_route_confirm`.
+
+**New test file: `framework/tests/unit/test_adr029_s6.py`** (44 tests):
+- Routing map: MISSING_FIELDS/THIN_FIELDS/WRONG_LAYOUT → REVIEW_DESIGN;
+  SOURCE_COVERAGE → CONFIGURE_SOURCES; WRONG_SOURCE → INSPECT_SOURCES.
+- Guardrail 1: low-confidence + unknown class always → REVIEW_DESIGN.
+- Guardrail 2: UNSUPPORTABLE → DONE draft.
+- Guardrail 3: consecutive-same-class → DONE draft (pathological loop).
+- Guardrail 4: iteration count >= 3 → DONE draft, no classifier call.
+- Guardrail 5: cost > 2.00 → DONE draft, no classifier call.
+- Guardrail 6: routing turn must_show_human=True + evidence + why_not_alternative.
+- Input contract: classifier prompt contains capability_inventory / all 6 inputs.
+- Accept path: still → PROMOTE unchanged; classifier NOT called.
+- Session persistence: 3 new fields round-trip through to_dict/from_dict.
+
+**Full suite result: 306 passed, 0 failures.**
+Suites: test_adr029_s6.py (44) + test_adr029_s5.py (62) + test_failure_classifier_gate.py (11, skipped live) + test_skill_builder_conversation.py (108) + test_adr028_stream_a.py (81).
+
+**Wiki updated:** docs/wiki/authorskill-flow.md (S6 section + routing map + guardrails + state changes).
+**Impl plan updated:** ADR-028-029-impl-plan.md (S6 marked DONE — 2026-05-15).
+
+---
+
 ## [2026-05-15] backend-dev | fix S5 stale tests + gold-set write None guard (commit 4167ce7)
 
 **Task 1 — 3 stale tests updated to ADR-029 / Folded Fix 2 contract**

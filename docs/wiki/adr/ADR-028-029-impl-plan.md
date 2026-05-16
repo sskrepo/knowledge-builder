@@ -581,6 +581,11 @@ instructions, now possible after S1 lands).
 
 ### S6 — ADR-029 Phase 2: Constrained routing + loop guardrails
 
+**STATUS: DONE — 2026-05-15**
+Implemented in `framework/skill_builder/conversation.py` (`_classify_and_route`,
+`_handle_eval_route_confirm`). Tests: `framework/tests/unit/test_adr029_s6.py`
+(44 tests, 0 failures). Full suite: 306 passed, 0 failures.
+
 **Parallel-safe:** No (serial stream). Starts after S5 merges AND classifier
 validation gate passes.
 
