@@ -221,7 +221,7 @@ Return ONLY a JSON object:
   "source_id": "{source_id}",
   "available_fields": [
     {{"field": "snake_case_name", "type": "string|array|integer",
-      "confidence": "high|medium|low",
+      "confidence": "high|medium|synthesisable|low",
       "evidence": "quote or location from sample (< 100 chars)"}}
   ],
   "missing_fields": [
@@ -235,10 +235,24 @@ Return ONLY a JSON object:
   "summary": "2-3 sentence overview of what this source contains"
 }}
 
+Confidence taxonomy for available_fields:
+- "high": the field value is present as an explicitly labelled element in the source
+  (e.g. a named table cell, a heading with its content, a structured field).
+- "medium": the field value is clearly inferrable from the source with minimal
+  interpretation (e.g. a status implied by a colour-coded row, a date in a nearby cell).
+- "synthesisable": the field VALUE must be DERIVED by aggregating or combining content
+  that IS present in the source but does not appear as a single labelled element.
+  Examples: "risks" synthesised from WBS table status cells marked "blocked" or
+  "at risk"; "next_steps" synthesised from open action items across multiple rows.
+  Use this level when the source has the raw ingredients but the LLM must aggregate
+  them — do NOT classify these as "low" or "missing".
+- "low": the field is marginally mentioned or ambiguous; treat as advisory only.
+
 Rules:
-- "available_fields": ONLY fields clearly extractable from the sample content.
+- "available_fields": ONLY fields clearly extractable or synthesisable from the sample.
 - "suggested_fields": fields present in the sample that the intent might have missed.
-- "missing_fields": fields the intent implies but the source clearly cannot provide.
+- "missing_fields": fields the intent implies but the source clearly CANNOT provide
+  even via synthesis (the raw content is genuinely absent).
 - Base ALL findings on the sample content — do not invent.
 """
 
@@ -286,7 +300,15 @@ Produce a single JSON design object:
 }}
 
 Rules:
-- Include ONLY fields that at least one source can support (confidence high or medium).
+- Include fields that at least one source can support with confidence "high", "medium",
+  or "synthesisable". Do NOT exclude synthesisable fields — they are extractable.
+- For fields with confidence="synthesisable": the extraction instruction MUST explicitly
+  state "Derive this value by [aggregating / combining / summarising] the following
+  content: [specific source element, e.g. WBS table rows flagged as blocked]."
+  A synthesisable field with no aggregation instruction in its description is a prompt
+  defect — it will cause the LLM to fail or hallucinate at extraction time.
+- Fields with confidence="low" or genuinely "missing" from all sources: exclude them
+  or place them in "unsupportable_fields" with a clear reason.
 - Source bindings must reference source IDs from the capability inventory.
 - Reuse plan covers must reference real KB cards from "existing_kb_cards".
 - If artifact layout is provided, align the output_format and layout accordingly.
