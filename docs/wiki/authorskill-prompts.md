@@ -2,6 +2,7 @@
 title: authorSkill — Full Prompt Dump
 source: framework/skill_builder/conversation.py, review.py, synthesize_schema.py
 compiled_at: 2026-05-15
+updated: 2026-05-15
 owner: architect
 tags: [skill-builder, prompts, adr-028]
 status: current
@@ -12,6 +13,26 @@ status: current
 This document is the authoritative inventory of every LLM prompt used anywhere
 in the authorSkill flow. It is produced as part of ADR-028 (Item 1) and must be
 kept current when any prompt changes.
+
+## ADR-028 S1–S4 changes (2026-05-15)
+
+- **S1** (`_INSPECT_SOURCES_PROMPT`): `synthesisable` added as 4th confidence level.
+  Fields aggregated from multiple items (e.g., trend, count, summary across pages) use
+  this level. `_DESIGN_SKILL_PROMPT` rules updated: "high, medium, or synthesisable" are
+  designable; field descriptions for synthesisable fields must include "Derive this value by…"
+  aggregation instruction.
+- **S2** (new `_CLARIFY_PROMPT` constant): Conversational prose template (not JSON) for
+  the CLARIFY state. Emitted when blocking questions need human answers. Not an LLM prompt
+  — it is a turn message template with `{question}` placeholder.
+- **S3** (`_CAPTURE_INTENT_PROMPT`): `ambiguities` split into `blocking_ambiguities` and
+  `nice_to_know_ambiguities`. Prompt rules distinguish blocking (schema-changing) from
+  advisory (proceed with assumption).
+- **S3** (`_DESIGN_SKILL_PROMPT`): `open_questions` split into `blocking_questions` and
+  `open_questions`. Blocking questions route to CLARIFY; open questions are advisory.
+- **S4** (`_CAPTURE_INTENT_PROMPT` and `_DESIGN_SKILL_PROMPT`): Added
+  `{persona_key_fields}`, `{persona_extraction_style}`, `{persona_few_shot_example}` format
+  kwargs. These are loaded at call time from `framework/config/persona_prompts.yaml` via
+  `_load_persona_prompt_fragments(persona)`. Instructions now differ by persona.
 
 For each prompt the entry records:
 - The Python constant name and source file:line
@@ -70,50 +91,37 @@ Return ONLY a JSON object mapping field_name → object with "type" and "descrip
 
 ## 2. `_CAPTURE_INTENT_PROMPT`
 
-**File:** `framework/skill_builder/conversation.py`, line 150  
-**Path in flow:** ADR-027 CAPTURE_INTENT state — called in `_advance_to_capture_intent()`, line 816.
+**File:** `framework/skill_builder/conversation.py`  
+**Path in flow:** CAPTURE_INTENT state — called in `_advance_to_capture_intent()`.  
+**ADR-028 S3 + S4 updated.**
 
-**Full prompt template:**
-```
-You are a Knowledge Builder Framework assistant. Parse the user's intent into a
-normalised goal object so downstream design steps have a structured representation
-to work from.
+**Key changes from ADR-028:**
+- `ambiguities` split into `blocking_ambiguities` + `nice_to_know_ambiguities` (S3)
+- `{persona_key_fields}` persona hint injected (S4)
 
-Persona: {persona}
-Raw intent: "{intent}"
+The LLM returns `blocking_ambiguities` (questions whose answers would change schema
+structure, source selection, or output format) and `nice_to_know_ambiguities` (advisory;
+LLM proceeds with stated assumption). The routing logic in `_advance_to_capture_intent`
+sends blocking ones to CLARIFY and auto-advances on nice-to-know-only.
 
-Return ONLY a JSON object with these keys:
-{
-  "output_kind": "pptx | docx | markdown | email | slack",
-  "audience": "exec | team | ops | all",
-  "cadence": "weekly | monthly | on_request | daily",
-  "scope_domains": ["domain1", "domain2"],
-  "success_criteria": ["criterion1", "criterion2"],
-  "ambiguities": ["anything unclear that the user should confirm"]
-}
-
-Rules:
-- "output_kind": infer from words like "PPT", "deck", "slide", "document", "report", "email"
-- "scope_domains": extract project/service names (e.g. "26ai", "FA DB", "OCIFACP")
-- "success_criteria": infer from phrases like "one slide", "real data", "exec-ready"
-- "ambiguities": list anything genuinely unclear; empty list if intent is clear
-- Keep all string values concise (< 80 chars each)
-```
-
-**Format kwargs at call time** (`_advance_to_capture_intent`, line 816):
+**Format kwargs at call time** (`_advance_to_capture_intent`):
 ```python
 prompt = _CAPTURE_INTENT_PROMPT.format(
-    persona=persona,       # e.g. "tpm"
-    intent=intent,         # e.g. "Produce a weekly PPT for exec review"
+    persona=persona,
+    intent=intent,
+    persona_key_fields=key_fields_text,   # S4: from persona_prompts.yaml
 )
 ```
 
 | Variable | Source | Personalises instructions? |
 |---|---|---|
-| `persona` | `self._data.persona` | NO — label only; the output_kind/audience/cadence inference rules are identical for TPM and ops_eng |
+| `persona` | `self._data.persona` | YES — label in guidance block |
 | `intent` | `self._data.intent_description` | NO — user data |
+| `persona_key_fields` | `_load_persona_prompt_fragments(persona)["key_fields"]` | YES — per-persona field hints |
 
-**Verdict:** Static template. The LLM is not told "for a TPM, pay special attention to X" vs "for ops_eng, pay attention to Y". The `ambiguities` list is the only mechanism for surfacing unclear requirements — but the prompt has no instruction to treat ambiguities as blocking, and `_handle_capture_intent` lets `"ok"` bypass them silently (line 891).
+**Verdict (post-S4):** Instructions now differ by persona via `persona_key_fields`.
+`blocking_ambiguities` vs `nice_to_know_ambiguities` split ensures schema-changing
+questions block (route to CLARIFY) while advisory ones auto-advance with assumptions.
 
 ---
 
@@ -236,7 +244,12 @@ prompt = _INSPECT_SOURCES_PROMPT.format(
 | `normalised_intent` | CAPTURE_INTENT output | NO — data |
 | `sample_content` | fetched Confluence page text | NO — data |
 
-**Verdict:** Static template. The analysis instructions are persona-agnostic: a TPM source and an ops_eng source are analysed by the same rubric. A TPM might care about "ORM status" and "milestone risk"; an ops_eng might care about "MTTR" and "incident severity" — the prompt has no mechanism to weight these differently.
+**ADR-028 S1 change:** `synthesisable` added as a 4th confidence level between `medium` and `low/missing`. Use when the field is not directly readable from a single page but can be aggregated from multiple items in the source (e.g., a count of open P1s across linked Jira tickets). Tells DESIGN_SKILL that the field is viable but needs an aggregation instruction in the field description. The updated confidence taxonomy is: `high` | `medium` | `synthesisable` | `low` | `missing`.
+
+**Verdict (post-S1):** The `synthesisable` level closes the PPT-thinness regression
+(ADR-027 root cause). Fields that existed in source but required aggregation were
+previously missed because LLM assigned `low` or `missing` when no single page had
+the aggregated value. `synthesisable` signals "present but needs synthesis logic."
 
 ---
 
@@ -318,7 +331,55 @@ prompt = _DESIGN_SKILL_PROMPT.format(
 | `artifact_layout` | parse of uploaded artifact | NO — data |
 | `existing_kb_cards` | ShimKb cards visible to this persona | PARTIALLY — the card list is filtered to the persona, so reuse planning sees only that persona's KBs. But the design rules ("Include ONLY fields that at least one source can support") are persona-agnostic. |
 
-**Verdict:** Static template with persona-filtered data inputs. The LLM receives no persona-specific extraction heuristics, no "for TPM skills, always include ORM status and RAG summary", no few-shot examples of a good TPM vs ops_eng schema. This is the highest-leverage gap in the flow.
+**ADR-028 changes (S1 + S3 + S4):**
+- **S1**: Rules updated from "high or medium only" to "high, medium, or synthesisable".
+  Field descriptions for synthesisable fields must include "Derive this value by…" instruction.
+  `unsupportable_fields` receives `low` and `missing` confidence fields.
+- **S3**: `open_questions` split into `blocking_questions` (route to CLARIFY) and
+  `open_questions` (advisory). `_run_design_skill` routes to CLARIFY when blocking_questions
+  non-empty, with `next_state="REVIEW_DESIGN"`.
+- **S4**: Added `{persona_key_fields}`, `{persona_extraction_style}`, `{persona_few_shot_example}`
+  format kwargs loaded from `framework/config/persona_prompts.yaml`.
+
+**Format kwargs at call time** (`_run_design_skill`):
+```python
+prompt = _DESIGN_SKILL_PROMPT.format(
+    persona=self._data.persona,
+    normalised_intent=json.dumps(self._data.normalised_intent, indent=2),
+    source_capability=json.dumps(self._data.source_capability, indent=2),
+    artifact_layout=json.dumps(self._data.artifact_layout, indent=2) if artifact_layout else "null",
+    existing_kb_cards=json.dumps(cards_summary, indent=2),
+    persona_key_fields=key_fields_text,           # S4
+    persona_extraction_style=frags["extraction_style"],  # S4
+    persona_few_shot_example=frags["few_shot_example"],  # S4
+)
+```
+
+**Verdict (post-S4):** Instructions now differ by persona. `persona_extraction_style` tells
+the LLM the output format expected (e.g., "exec-safe language, bullet lists, no raw data"),
+and `persona_few_shot_example` shows a canonical field definition. `persona_key_fields`
+anchors the schema to fields known to matter for this persona.
+
+---
+
+## 5b. `_CLARIFY_PROMPT` (new in ADR-028 S3)
+
+**File:** `framework/skill_builder/conversation.py`  
+**Path in flow:** CLARIFY state — used in `_advance_to_clarify()` as turn message template.  
+**NOT an LLM prompt.** This is a turn message template, not a call to the LLM.
+
+**Purpose.** Formats the blocking question as a conversational, actionable message
+displayed to the human user. The CLARIFY state is fully deterministic — no LLM involved.
+
+**Template structure:** Prose paragraph presenting the question, followed by options
+`["<your answer>", "skip"]`. When there are multiple blocking questions, a progress
+note `(N/M)` is shown.
+
+**Format kwargs:** `{question}` — the blocking question text from `_clarify_questions`.
+
+**must_show_human.** Always `True` — this turn must be displayed to the human by
+MCP clients. The `_NON_ANSWERS` frozenset in `SkillBuilderConversation` rejects
+single-word non-answers (`ok`, `yes`, `no`, `continue`, etc.) and re-asks.
 
 ---
 
@@ -500,16 +561,21 @@ prompt = _REVIEW_EXTRACT_PROMPT.format(
 
 ## Summary Table
 
-| Prompt | State | Persona in format() kwargs? | Instructions differ by persona? |
-|---|---|---|---|
-| `_ANALYZE_ARTIFACT_PROMPT` | ANALYZE_ARTIFACT (legacy) | YES — label | NO |
-| `_CAPTURE_INTENT_PROMPT` | CAPTURE_INTENT | YES — label | NO |
-| `_CONFIGURE_SOURCES_SUGGEST_PROMPT` | CONFIGURE_SOURCES | YES — label + adapter list | adapter list varies; instructions static |
-| `_INSPECT_SOURCES_PROMPT` | INSPECT_SOURCES | YES — label | NO |
-| `_DESIGN_SKILL_PROMPT` | DESIGN_SKILL | YES — label + filtered KB cards | KB card list varies; instructions static |
-| `_REVIEW_DESIGN_REPLAN_PROMPT` | REVIEW_DESIGN (replan) | NO — omitted entirely | NO |
-| `_EVAL_JUDGE_PROMPT` | EVAL | NO | NO — correct by design |
-| `_DESCRIPTION_SYNTHESIS_PROMPT` | REVIEW_SCHEMA (legacy) | YES — label | NO |
-| `_REVIEW_EXTRACT_PROMPT` | PREVIEW_EXTRACTION | NO | NO |
+| Prompt | State | Persona in format() kwargs? | Instructions differ by persona? | ADR-028 change |
+|---|---|---|---|---|
+| `_ANALYZE_ARTIFACT_PROMPT` | ANALYZE_ARTIFACT (legacy) | YES — label | NO | none |
+| `_CAPTURE_INTENT_PROMPT` | CAPTURE_INTENT | YES — label + key_fields | YES (S4) | S3: blocking/nice_to_know split; S4: persona_key_fields |
+| `_CONFIGURE_SOURCES_SUGGEST_PROMPT` | CONFIGURE_SOURCES | YES — label + adapter list | adapter list varies; instructions static | none |
+| `_INSPECT_SOURCES_PROMPT` | INSPECT_SOURCES | YES — label | NO | S1: synthesisable confidence level added |
+| `_CLARIFY_PROMPT` | CLARIFY | N/A (turn message, not LLM) | N/A | S3: new constant |
+| `_DESIGN_SKILL_PROMPT` | DESIGN_SKILL | YES — all S4 fragments | YES (S4) | S1: synthesisable; S3: blocking_questions; S4: persona fragments |
+| `_REVIEW_DESIGN_REPLAN_PROMPT` | REVIEW_DESIGN (replan) | NO — omitted entirely | NO | none |
+| `_EVAL_JUDGE_PROMPT` | EVAL | NO | NO — correct by design | none |
+| `_DESCRIPTION_SYNTHESIS_PROMPT` | REVIEW_SCHEMA (legacy) | YES — label | NO | none |
+| `_REVIEW_EXTRACT_PROMPT` | PREVIEW_EXTRACTION | NO | NO | none |
 
-**Conclusion:** Every prompt is a static template. Persona enters as a bare string label or as filtered data (adapter list, KB card list). No prompt contains persona-specific instructional branches, heuristics, or few-shot examples. The LLM receives no guidance on what a "good" TPM skill looks like vs what a "good" ops_eng skill looks like.
+**Conclusion (post-ADR-028 S1–S4):** CAPTURE_INTENT and DESIGN_SKILL now have
+persona-specific instructional branches via S4 fragments. INSPECT_SOURCES has the
+synthesisable confidence level to avoid PPT-thinness regression. CLARIFY is a new
+deterministic state with a turn message template (not an LLM call). All other prompts
+remain static — this is intentional for CONFIGURE_SOURCES, EVAL, and review paths.

@@ -1,33 +1,50 @@
 ---
-title: authorSkill conversation flow — state-by-state map (post-ADR-027)
+title: authorSkill conversation flow — state-by-state map (post-ADR-028)
 owner: architect
 created: 2026-05-14
-updated: 2026-05-14
-related: [ADR-015, ADR-026, ADR-027, ADR-016, ADR-017]
+updated: 2026-05-15
+related: [ADR-015, ADR-026, ADR-027, ADR-028, ADR-016, ADR-017]
 supersedes: authorskill-flow-pre-adr-027.md
 ---
 
-# authorSkill conversation flow — state-by-state map (post-ADR-027)
+# authorSkill conversation flow — state-by-state map (post-ADR-028)
 
-> This file describes the **ADR-027 16-state machine**. The pre-ADR-027 15-state
-> machine is archived at `docs/wiki/authorskill-flow-pre-adr-027.md`. In-flight
-> sessions at deploy time complete under the old machine (legacy handlers are
+> This file describes the **ADR-028 17-state machine** (Stream A S1-S4 implementation).
+> The pre-ADR-027 15-state machine is archived at `docs/wiki/authorskill-flow-pre-adr-027.md`.
+> The ADR-027 16-state machine is superseded by this document (CLARIFY added as 17th state).
+> In-flight sessions at deploy time complete under the old machine (legacy handlers are
 > retained in `conversation.py`); all new sessions use the machine below.
+
+## ADR-028 changes (Stream A S1–S4)
+
+- **S1**: `synthesisable` added as fourth confidence level in INSPECT_SOURCES + DESIGN_SKILL
+  prompts. Fields aggregated from multiple source items must now use this level; the field
+  description must include an explicit "Derive this value by…" aggregation instruction.
+- **S2**: `ConversationTurn` gains `must_show_human: bool` and `awaiting_user: bool`.
+  `must_show_human=True` is set on REVIEW_DESIGN, PREVIEW_EXTRACTION, and CLARIFY turns.
+  MCP tool description updated with CRITICAL instruction for smart clients.
+- **S3**: CLARIFY added as the 17th state (between CAPTURE_INTENT and CONFIGURE_SOURCES,
+  and optionally between DESIGN_SKILL and REVIEW_DESIGN). See CLARIFY section below.
+- **S4**: Persona prompt fragments (`key_fields`, `extraction_style`, `few_shot_example`)
+  injected from `framework/config/persona_prompts.yaml` into CAPTURE_INTENT and DESIGN_SKILL
+  prompts. Unknown personas degrade loudly (warning logged, empty defaults used).
 
 ## Executive summary
 
-7-12 LLM calls per session (up from 3-5 in ADR-026). The LLM is involved at:
+**17-state machine** (ADR-028 added CLARIFY as 17th state between CAPTURE_INTENT and
+CONFIGURE_SOURCES). 7-12 LLM calls per session (up from 3-5 in ADR-026). The LLM is
+involved at:
 
-1. **CAPTURE_INTENT** — parse free-text intent into a normalised goal object
+1. **CAPTURE_INTENT** — parse free-text intent into a normalised goal object (S4: persona fragments injected)
 2. **CONFIGURE_SOURCES** — propose sources from intent + persona adapters
-3. **INSPECT_SOURCES** — one call per source to produce a capability inventory
-4. **DESIGN_SKILL** — one integrated design call: schema + source_bindings + workflow_shape + reuse_plan
+3. **INSPECT_SOURCES** — one call per source to produce a capability inventory (S1: synthesisable level added)
+4. **DESIGN_SKILL** — one integrated design call: schema + source_bindings + workflow_shape + reuse_plan (S1+S4)
 5. **REVIEW_DESIGN** — only on substantive user edits (LLM re-plan diff)
 6. **PREVIEW_EXTRACTION** — one call per cached sample to show real extracted values
 7. **EVAL** — extraction calls (one per sample) + one faithfulness judge call
 
-Everything else — persona identification, trigger configuration, commit,
-validation, ingest, and promotion — is deterministic.
+Everything else — persona identification, CLARIFY (deterministic question/answer),
+trigger configuration, commit, validation, ingest, and promotion — is deterministic.
 
 ---
 
@@ -49,8 +66,8 @@ and transitions to CAPTURE_INTENT.
 
 **Trigger.** IDENTIFY_PERSONA completes; user submits free-text intent.
 
-**What runs.** `_handle_capture_intent` calls the LLM with `_CAPTURE_INTENT_PROMPT`.
-Input: persona + raw intent string. The LLM returns a normalised goal object:
+**What runs.** `_advance_to_capture_intent` calls the LLM with `_CAPTURE_INTENT_PROMPT`.
+Input: persona + raw intent string + persona key_fields hint (S4). The LLM returns:
 
 ```json
 {
@@ -59,21 +76,52 @@ Input: persona + raw intent string. The LLM returns a normalised goal object:
   "cadence": "weekly",
   "scope_domains": ["26ai", "FA DB"],
   "success_criteria": ["one slide", "real Confluence data"],
-  "ambiguities": ["which Confluence space? — inferred from URL in intent"]
+  "blocking_ambiguities": ["Which Confluence space — FAAAS or FA-LEGACY?"],
+  "nice_to_know_ambiguities": ["Include budget table? Assuming yes."]
 }
 ```
 
-Ambiguities are shown to the user; the user can clarify or proceed. The
-normalised intent is stored on `_data.normalised_intent` and passed to all
-downstream LLM prompts.
+**ADR-028 S3 routing logic** (in `_advance_to_capture_intent`):
+- `blocking_ambiguities` non-empty → route to **CLARIFY** state (must_show_human=True)
+- `nice_to_know_ambiguities` only (no blocking) → auto-advance to CONFIGURE_SOURCES
+  (assumptions stored on `normalised_intent.nice_to_know_assumptions`)
+- Zero ambiguities → show CAPTURE_INTENT confirmation turn; user types "ok" to advance
 
 **LLM involvement.** One `synthesis` call (`_CAPTURE_INTENT_PROMPT`).
 
 **External I/O.** None.
 
-**Output / next state.** Sets `_data.normalised_intent` and
-`_data.skill_name` (re-slugified from `scope_domains` + `output_kind`).
-Transitions to CONFIGURE_SOURCES.
+**Output / next state.** Sets `_data.normalised_intent` and `_data.skill_name`.
+Routes to CLARIFY or CONFIGURE_SOURCES depending on ambiguity split.
+
+---
+
+## CLARIFY
+
+**Trigger.** `_advance_to_capture_intent` finds `blocking_ambiguities` non-empty, or
+`_run_design_skill` finds `blocking_questions` non-empty.
+
+**What runs.** `_advance_to_clarify(blocking_questions, next_state)` transitions to this
+state and emits a conversational question (one per turn, prose not JSON).
+`_handle_clarify_response(user_input)` records answers:
+
+- Non-substantive replies (`ok`, `yes`, `no`, `continue`, etc.) are **rejected** — the
+  handler re-displays the question with a prompt for a real answer or "skip"
+- `skip` is accepted but flagged in logs (answer stored as "[SKIPPED — proceeding with best assumption]")
+- Real answers are recorded in `_data.clarification_log` with `{question, answer, resolved_at}`
+
+When all blocking questions are resolved, `_clarify_advance()` transitions to `next_state`
+(CONFIGURE_SOURCES from CAPTURE_INTENT path, or REVIEW_DESIGN from DESIGN_SKILL path).
+
+**LLM involvement.** None. CLARIFY is fully deterministic.
+
+**must_show_human.** Always `True` — MCP clients must display the question to the human
+and wait for a typed response.
+
+**_SessionData changes.**
+- `clarification_log: list[dict]` — audit trail of resolved questions (serialized in to_dict)
+- `_clarify_questions: list[dict]` — in-flight question list with `{question, resolved, answer}`
+- `_clarify_next_state: str` — state to advance to when all questions resolved
 
 ---
 
