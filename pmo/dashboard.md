@@ -10,8 +10,21 @@ status: current
 
 # Knowledgebase — Dashboard
 
-**Current phase:** Phase 1-3 + V3 + laptop mode — ADR-030 complete; ADR-031 accepted (BUG-queue-44364 comprehensive fix)
-**Updated:** 2026-05-16 by backend-dev (ADR-031 accepted; BUG-44364 comprehensive fix complete; no open decisions)
+**Current phase:** Phase 1-3 + V3 + laptop mode — ADR-032 proposed (ask-time source ingestion); DECISION-012 open
+**Updated:** 2026-05-16 by architect (ADR-032 Proposed; DECISION-012 open — runtime ingestion option needed)
+
+## Session update — 2026-05-16 (ADR-032 Proposed — ask-time source ingestion)
+
+**ADR-032 proposed. Production failure analyzed: TPM email-draft skill silently drew from wrong page. Three root causes documented. DECISION-012 open.**
+
+- `docs/wiki/adr/ADR-032-ask-time-source-ingestion.md` — Proposed
+- `pmo/decisions/DECISION-012-ask-time-source-ingestion-option.md` — open (choose Option A/B/C)
+- P3 (silent wrong-page substitution) recommended for immediate fix independent of decision.
+- Architect recommends Option C (ephemeral request-scoped ingestion).
+
+**Open decisions: DECISION-012** (reply "DECISION-012: option C" to accept recommendation).
+
+---
 
 ## Session update — 2026-05-16 (BUG-queue-44364 comprehensive fix — ADR-031)
 
@@ -23,8 +36,6 @@ status: current
 - Group D/E: review._llm_extract + executor._llm_extract_fields source caps 12k/24k → 80k chars.
 - Gate test: classifier checksum sha256:aef837cd…1c1d1f STILL GREEN. Template unchanged.
 - 272 passed, 0 failures (excl. 8 pre-existing baseline).
-
-**No open decisions.**
 
 ## Session update — 2026-05-16 (ADR-030 prompt externalization + harness design)
 
@@ -252,7 +263,11 @@ python -m framework.cli.kb_cli promote framework/persona_builders/ops-eng.yaml -
 
 ## 🔴 Decisions awaiting your review
 
-(None — all open decisions resolved as of 2026-05-15.)
+| # | Decision | Options | Recommendation |
+|---|---|---|---|
+| [DECISION-012](decisions/DECISION-012-ask-time-source-ingestion-option.md) | Runtime ingestion mechanism for ask-parameterized skills (ADR-032) | A (sync ingest in ask) / B (queue + retry) / C (ephemeral, recommended) | **Option C** |
+
+Reply: `DECISION-012: option C` (or A/B with any caveats on trust boundary mitigations).
 
 ## 🟡 In-flight work
 

@@ -4,6 +4,37 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] architect | ADR-032 — ask-time source ingestion (Proposed) + DECISION-012
+
+**Root-cause analysis of observed production failure: TPM email-draft skill silently
+drew from wrong Confluence page (pageId=20030556732) when consumer supplied
+un-ingested pageId=18625350641. Three problems separated and documented.**
+
+- `docs/wiki/adr/ADR-032-ask-time-source-ingestion.md` — new ADR (Status: Proposed).
+  Covers P1 (design-contract gap: no source_binding mode in YAML), P2 (runtime-capability
+  gap: no ingest path in ask handler), P3 (silent wrong-page substitution — fix recommended
+  immediately, independent of ADR decision). Three runtime-ingestion options presented;
+  Option C (ephemeral) recommended. P3 fix target: executor.py:150-236 _retrieve_for_inputs.
+- `pmo/decisions/DECISION-012-ask-time-source-ingestion-option.md` — open decision;
+  user must choose Option A/B/C for runtime ingestion mechanism.
+- `docs/wiki/index.md` — ADR-032 indexed.
+
+Key findings:
+- Most likely invoked skill: `project_tracking_confluence_stakeholder_status_meeting_email`
+  (skill card explicitly names "read a project tracking Confluence page").
+- P3 silent substitution: executor.py line 163 joins all input values into query_text;
+  retriever at line 189 runs semantic search with no pageId filter; first result wins
+  at line 208 regardless of whether it matches the requested page.
+- No ingest-on-demand path exists anywhere in ask → executor chain; ConfluenceWikiIngestor
+  only reachable from ingestion_worker.py (separate process).
+- Highest-risk aspect: trust boundary — ephemeral fetch at ask time issues Confluence
+  HTTP call with service credential on behalf of consumer-supplied pageId.
+- ADR-032 is honest: Option C blurs the spec §2 ingest/retrieve line but within
+  acceptable bounds (schema-bounded extraction, author-time grant, not unconstrained
+  autonomous LLM extraction).
+
+---
+
 ## [2026-05-16] backend-dev | BUG-queue-44364 comprehensive fix — no arbitrary content caps; all LLM-JSON parses detect truncation
 
 **Policy: ADR-031 accepted. synthesized schemas carry no maxLength on content fields; source text sized to model context; every LLM-JSON parse site detects truncation and hard-fails (BUG-queue-44364).**
