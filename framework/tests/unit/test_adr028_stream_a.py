@@ -22,6 +22,7 @@ from framework.skill_builder import conversation as conv_module
 from framework.skill_builder.conversation import (
     ConversationTurn,
     SkillBuilderConversation,
+    _CAPTURE_INTENT_PROMPT,
     _DESIGN_SKILL_PROMPT,
     _INSPECT_SOURCES_PROMPT,
     STATES,
@@ -98,14 +99,18 @@ class TestSynthesisableFieldPrompts:
         )
 
     def test_synthesisable_field_design_skill_prompt_format(self):
-        """DESIGN_SKILL prompt must format correctly with all expected kwargs."""
+        """DESIGN_SKILL prompt must format correctly with all expected kwargs (S1 + S4 placeholders)."""
         # This verifies the prompt template is valid — all expected format kwargs work
+        # S4 added persona fragment placeholders; include them here so the format() succeeds.
         formatted = _DESIGN_SKILL_PROMPT.format(
             persona="tpm",
             normalised_intent='{"output_kind": "pptx"}',
             source_capability='[{"available_fields": [{"field": "risks", "confidence": "synthesisable"}]}]',
             artifact_layout="null",
             existing_kb_cards="[]",
+            persona_key_fields="- risk_summary\n- orm_status",
+            persona_extraction_style="Extract as structured table rows.",
+            persona_few_shot_example="Example: risk_summary: 'P1 open items'",
         )
         assert "synthesisable" in formatted
 
@@ -194,13 +199,15 @@ class TestMustShowHumanOnStateTurns:
             ]
         }
 
-        with patch("framework.skill_builder.conversation.review_extractions") as mock_review:
+        # review_extractions and synthesize_extraction_schema are local imports inside the method;
+        # patch at their actual module locations.
+        with patch("framework.skill_builder.review.review_extractions") as mock_review:
             mock_review.return_value = {
                 "extractions": [{"source_citation": "test-page", "extracted": {"test_field": "v"}, "missing_fields": []}],
                 "field_coverage": {"test_field": 1.0},
                 "issues": [],
             }
-            with patch("framework.skill_builder.conversation.synthesize_extraction_schema") as mock_schema:
+            with patch("framework.skill_builder.synthesize_schema.synthesize_extraction_schema") as mock_schema:
                 mock_schema.return_value = {"properties": {"test_field": {"type": "string", "description": "t"}}}
                 turn = c._advance_to_preview_extraction()
 
@@ -374,16 +381,24 @@ class TestClarifyStateHandlers:
         """respond() must handle CLARIFY state without falling into the unknown-state path."""
         c = _make_conv()
         c._state = "CLARIFY"
-        # Seed a blocking question so the handler has something to ask
+        # Seed TWO blocking questions so answering the first keeps us in CLARIFY
         c._data.clarification_log = []
-        c._data._clarify_questions = [{"question": "Which space?", "resolved": False}]
+        c._data._clarify_questions = [
+            {"question": "Which space?", "resolved": False},
+            {"question": "Weekly or monthly?", "resolved": False},
+        ]
+        c._data._clarify_next_state = "CONFIGURE_SOURCES"
 
         # If CLARIFY is not in the dispatch table, respond() returns an error turn.
-        # The correct behavior: it should return a CLARIFY state turn.
+        # With two questions, answering the first should keep us in CLARIFY state.
         turn = c.respond("FAAAS space")
         # We don't check the exact state here — just that it doesn't say "Unknown state"
         assert "Unknown state" not in turn.message, (
             "CLARIFY state not wired into respond() dispatch table"
+        )
+        # Should still be in CLARIFY (one more question pending)
+        assert c._state == "CLARIFY", (
+            f"Expected CLARIFY state after first of two questions, got {c._state!r}"
         )
 
     def test_session_data_has_clarification_log(self):
@@ -650,7 +665,10 @@ class TestPersonaInjectedIntoPrompts:
         ]
         c._data.normalised_intent = {"output_kind": "pptx", "scope_domains": ["26ai"]}
 
-        with patch("framework.skill_builder.conversation.ShimKb") as mock_shim_class:
+        # ShimKb is imported locally inside _run_design_skill; patch at its real module path.
+        # If ShimKb cannot be loaded (e.g. missing orchestrator), it fails gracefully with
+        # cards_summary=[] — that is acceptable for this test which only checks prompt content.
+        with patch("framework.orchestrator.shim_kb.ShimKb") as mock_shim_class:
             mock_shim = MagicMock()
             mock_shim.cards_visible_to.return_value = []
             mock_shim.all_cards.return_value = []

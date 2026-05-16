@@ -42,6 +42,85 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 from .sampler import fetch_samples  # noqa: E402
 
 
+# ---------------------------------------------------------------------------
+# ADR-028 Item 1 (S4): Persona prompt fragment loader
+# ---------------------------------------------------------------------------
+
+# Module-level cache — loaded once at import time, updated on reload.
+_PERSONA_PROMPT_FRAGMENTS: dict[str, dict] | None = None
+_PERSONA_PROMPTS_YAML_PATH = REPO_ROOT / "framework" / "config" / "persona_prompts.yaml"
+
+
+def _load_persona_prompt_fragments(persona: str) -> dict:
+    """Load per-persona prompt fragments from persona_prompts.yaml.
+
+    Returns a dict with keys: key_fields (list[str]), extraction_style (str),
+    few_shot_example (str). Falls back to empty-string defaults if the persona
+    is not found in the YAML — logs a WARNING (not silent; not a crash).
+
+    The YAML is loaded lazily on first call and cached at module level.
+    Restart the server (or call _reload_persona_prompts()) to pick up YAML edits.
+
+    ADR-028 Item 1 Option A — per-persona prompt fragments in
+    framework/config/persona_prompts.yaml.
+    """
+    global _PERSONA_PROMPT_FRAGMENTS
+
+    if _PERSONA_PROMPT_FRAGMENTS is None:
+        _reload_persona_prompts()
+
+    frags = (_PERSONA_PROMPT_FRAGMENTS or {}).get(persona)
+    if frags is None:
+        log.warning(
+            "_load_persona_prompt_fragments: persona %r not found in %s. "
+            "Persona-aware prompting will be disabled for this session. "
+            "Add a stanza for this persona to persona_prompts.yaml to enable it.",
+            persona,
+            _PERSONA_PROMPTS_YAML_PATH.name,
+        )
+        return {
+            "key_fields": [],
+            "extraction_style": "",
+            "few_shot_example": "",
+        }
+
+    return {
+        "key_fields": frags.get("key_fields", []),
+        "extraction_style": frags.get("extraction_style", ""),
+        "few_shot_example": frags.get("few_shot_example", ""),
+    }
+
+
+def _reload_persona_prompts() -> None:
+    """(Re)load persona_prompts.yaml into the module-level cache.
+
+    Called on first use and can be called explicitly to hot-reload
+    the YAML without restarting the server.
+    """
+    global _PERSONA_PROMPT_FRAGMENTS
+    try:
+        if _PERSONA_PROMPTS_YAML_PATH.exists():
+            raw = yaml.safe_load(_PERSONA_PROMPTS_YAML_PATH.read_text()) or {}
+            _PERSONA_PROMPT_FRAGMENTS = {k: v for k, v in raw.items() if isinstance(v, dict)}
+            log.info(
+                "_reload_persona_prompts: loaded %d persona stanzas from %s",
+                len(_PERSONA_PROMPT_FRAGMENTS),
+                _PERSONA_PROMPTS_YAML_PATH.name,
+            )
+        else:
+            log.warning(
+                "_reload_persona_prompts: %s not found — persona prompt injection disabled",
+                _PERSONA_PROMPTS_YAML_PATH,
+            )
+            _PERSONA_PROMPT_FRAGMENTS = {}
+    except Exception as exc:
+        log.warning(
+            "_reload_persona_prompts: failed to load %s: %s — persona prompt injection disabled",
+            _PERSONA_PROMPTS_YAML_PATH.name, exc,
+        )
+        _PERSONA_PROMPT_FRAGMENTS = {}
+
+
 def _build_confluence_adapter(kbf_env: str, repo_root: "Path"):
     """Build the Confluence adapter from config.
 
@@ -155,6 +234,10 @@ to work from.
 Persona: {persona}
 Raw intent: "{intent}"
 
+Persona guidance: This persona's canonical output always includes these fields —
+{persona_key_fields}
+Use this list as a starting point for understanding what dimensions matter most.
+
 Return ONLY a JSON object with these keys:
 {{
   "output_kind": "pptx | docx | markdown | email | slack",
@@ -162,14 +245,22 @@ Return ONLY a JSON object with these keys:
   "cadence": "weekly | monthly | on_request | daily",
   "scope_domains": ["domain1", "domain2"],
   "success_criteria": ["criterion1", "criterion2"],
-  "ambiguities": ["anything unclear that the user should confirm"]
+  "blocking_ambiguities": [
+    "questions whose answers would change the schema structure, output kind, or source selection"
+  ],
+  "nice_to_know_ambiguities": [
+    "questions that can be assumed; proceed and flag for user awareness"
+  ]
 }}
 
 Rules:
 - "output_kind": infer from words like "PPT", "deck", "slide", "document", "report", "email"
 - "scope_domains": extract project/service names (e.g. "26ai", "FA DB", "OCIFACP")
 - "success_criteria": infer from phrases like "one slide", "real data", "exec-ready"
-- "ambiguities": list anything genuinely unclear; empty list if intent is clear
+- "blocking_ambiguities": ONLY include if the answer would materially change the schema
+  structure, the source selection, or the output format. Example: "which Confluence space
+  — FAAAS or 26AI-LEGACY?" is blocking. "which day of the week?" is nice_to_know.
+- "nice_to_know_ambiguities": advisory items; proceed with stated assumption, flag for user.
 - Keep all string values concise (< 80 chars each)
 """
 
@@ -267,6 +358,15 @@ Source capability inventory: {source_capability}
 Artifact layout hint (may be null): {artifact_layout}
 Existing reusable KB cards: {existing_kb_cards}
 
+Persona guidance — canonical key fields for this persona:
+{persona_key_fields}
+
+Persona extraction style:
+{persona_extraction_style}
+
+Worked example of a well-designed field for this persona:
+{persona_few_shot_example}
+
 Produce a single JSON design object:
 {{
   "schema": {{
@@ -296,7 +396,12 @@ Produce a single JSON design object:
   "unsupportable_fields": [
     {{"field": "field_name", "reason": "why no source can provide this"}}
   ],
-  "open_questions": ["question for the user to resolve"]
+  "blocking_questions": [
+    "questions whose answers would change the schema structure — must resolve before review"
+  ],
+  "open_questions": [
+    "cosmetic questions that can be noted without blocking — show at REVIEW_DESIGN"
+  ]
 }}
 
 Rules:
@@ -315,6 +420,11 @@ Rules:
 - Choose "weekly_exec_review_v1" layout only for exec-review PPTX skills.
 - "required" list should contain only fields critical to the skill's purpose.
 - maxLength: 200 for IDs/statuses, 500 for summaries, 2000 for detailed content.
+- "blocking_questions": ONLY include questions where the answer would change the schema
+  structure, field types, or source bindings. These trigger CLARIFY before REVIEW_DESIGN.
+- "open_questions": advisory items — show at REVIEW_DESIGN but do not block.
+- Persona key fields above are strong hints — always attempt to include them if the
+  source capability inventory can support them.
 """
 
 _REVIEW_DESIGN_REPLAN_PROMPT = """\
@@ -369,14 +479,32 @@ Rules:
 - Base the judgment ONLY on the source snippet provided — do not use outside knowledge.
 """
 
+# ADR-028 Item 3: CLARIFY state prompt.
+# Emits conversational prose the human can read and respond to — NOT a JSON blob.
+# The handler asks one blocking question per turn and waits for the user's answer.
+_CLARIFY_PROMPT = """\
+Before I proceed, I need to clarify one thing:
+
+{question}
+
+Please provide a specific answer. I will use your response to design the skill correctly.
+(You can type 'skip' to proceed with my best assumption — but be aware this may affect
+the quality of the extraction schema.)
+"""
+
 # ---------------------------------------------------------------------------
-# STATES list: ADR-027 16-state machine
+# STATES list: ADR-027 + ADR-028 state machine
 # ---------------------------------------------------------------------------
 
-# The canonical ADR-027 state machine.
+# The canonical ADR-027 + ADR-028 state machine.
+# ADR-028 Item 3 (S3): adds CLARIFY as the 17th state.
+# CLARIFY sits after CAPTURE_INTENT (and optionally after DESIGN_SKILL)
+# to handle blocking ambiguities before proceeding to CONFIGURE_SOURCES
+# or REVIEW_DESIGN respectively.
 STATES = [
     "IDENTIFY_PERSONA",
     "CAPTURE_INTENT",
+    "CLARIFY",                 # ADR-028 Item 3: conversational clarification loop
     "CONFIGURE_SOURCES",
     "INSPECT_SOURCES",
     "UPLOAD_ARTIFACT_EXAMPLE",
@@ -498,6 +626,14 @@ class _SessionData:
     source_capability: list = field(default_factory=list)  # per-source capability inventory
     artifact_layout: dict | None = None
     design: dict | None = None
+    # ADR-028 Item 3 (CLARIFY state) fields
+    clarification_log: list = field(default_factory=list)
+    # {"question": str, "answer": str, "resolved_at": str (ISO)}
+    # Internal: pending blocking questions for CLARIFY handler (not persisted between
+    # sessions — reconstructed from normalised_intent on resume if needed)
+    _clarify_questions: list = field(default_factory=list)
+    # Context: which state CLARIFY should transition to after all questions are resolved
+    _clarify_next_state: str = field(default="CONFIGURE_SOURCES")
 
 
 class SkillBuilderConversation:
@@ -594,6 +730,7 @@ class SkillBuilderConversation:
             # ADR-027 new states
             "IDENTIFY_PERSONA": self._handle_identify_persona,
             "CAPTURE_INTENT": self._handle_capture_intent,
+            "CLARIFY": self._handle_clarify_response,  # ADR-028 Item 3
             "CONFIGURE_SOURCES": self._handle_configure_sources_response,
             "INSPECT_SOURCES": self._handle_inspect_sources_response,
             "UPLOAD_ARTIFACT_EXAMPLE": self._handle_upload_artifact_example,
@@ -682,6 +819,8 @@ class SkillBuilderConversation:
             d["artifact_layout"] = dict(self._data.artifact_layout)
         if self._data.design is not None:
             d["design"] = dict(self._data.design)
+        # ADR-028 Item 3: clarification_log persisted for session resumability
+        d["clarification_log"] = list(self._data.clarification_log)
         return d
 
     @classmethod
@@ -731,6 +870,8 @@ class SkillBuilderConversation:
             normalised_intent=dict(d.get("normalised_intent", {})),
             source_samples=dict(d.get("source_samples", {})),
             source_capability=list(d.get("source_capability", [])),
+            # ADR-028 Item 3
+            clarification_log=list(d.get("clarification_log", [])),
             artifact_layout=d.get("artifact_layout"),
             design=d.get("design"),
         )
@@ -849,9 +990,18 @@ class SkillBuilderConversation:
         intent = self._data.intent_description
         persona = self._data.persona
 
+        # ADR-028 Item 1 (S4): load persona prompt fragments for CAPTURE_INTENT
+        persona_frags = _load_persona_prompt_fragments(persona)
+        key_fields_text = (
+            ", ".join(persona_frags.get("key_fields", []))
+            if persona_frags.get("key_fields")
+            else "(none specified)"
+        )
+
         prompt = _CAPTURE_INTENT_PROMPT.format(
             persona=persona,
             intent=intent,
+            persona_key_fields=key_fields_text,
         )
         try:
             result = self._llm.chat(
@@ -910,20 +1060,22 @@ class SkillBuilderConversation:
             ]
             return self._advance_to_clarify(self._data._clarify_questions)
 
+        # ADR-028 S3: nice_to_know_ambiguities are advisory — proceed with assumptions.
+        # Do NOT block at CAPTURE_INTENT or CLARIFY; log the assumptions and auto-advance.
+        # NOTE: only auto-advance when there ARE nice-to-know notes; zero ambiguities
+        #       still returns a CAPTURE_INTENT confirmation turn (legacy S2 contract).
         all_ambiguities = list(ambiguities) + list(nice_to_know_ambiguities)
-        ambig_text = ""
-        if all_ambiguities:
-            ambig_text = (
-                "\n\nAdvisory notes (proceeding with assumptions):\n"
-                + "\n".join(f"  • {a}" for a in all_ambiguities)
-                + "\n\nType 'ok' to proceed, or provide additional context."
+        if nice_to_know_ambiguities:
+            log.info(
+                "_advance_to_capture_intent: %d nice-to-know advisory notes — "
+                "auto-advancing with assumptions (no blocking questions)",
+                len(nice_to_know_ambiguities),
             )
-        else:
-            ambig_text = "\n\nNo ambiguities. Type 'ok' to proceed."
+            # Store advisory notes in normalised_intent for downstream reference
+            normalised["nice_to_know_assumptions"] = all_ambiguities
+            return self._advance_to_configure_sources_v2()
 
-        # ADR-028 Item 2: set must_show_human when there are any ambiguities (even advisory)
-        has_any_ambiguity = bool(all_ambiguities)
-
+        # Zero ambiguities — show CAPTURE_INTENT confirmation turn; user types 'ok' to advance.
         return ConversationTurn(
             state="CAPTURE_INTENT",
             message=(
@@ -933,12 +1085,12 @@ class SkillBuilderConversation:
                 f"  Cadence: {normalised.get('cadence', '?')}\n"
                 f"  Scope: {', '.join(normalised.get('scope_domains', ['?']))}\n"
                 f"  Success criteria: {'; '.join(normalised.get('success_criteria', ['?']))}\n"
-                f"  Skill name: {self._data.skill_name}"
-                + ambig_text
+                f"  Skill name: {self._data.skill_name}\n\n"
+                "No ambiguities. Type 'ok' to proceed."
             ),
             data={"normalised_intent": normalised, "skill_name": self._data.skill_name},
-            options=["ok"] + (["clarify"] if all_ambiguities else []),
-            must_show_human=has_any_ambiguity,  # ADR-028 Item 2
+            options=["ok"],
+            must_show_human=False,
             awaiting_user=True,
         )
 
@@ -958,6 +1110,175 @@ class SkillBuilderConversation:
             return self._advance_to_capture_intent()
 
         return self._advance_to_configure_sources_v2()
+
+    # -- CLARIFY state (ADR-028 Item 3) ----------------------------------
+
+    def _advance_to_clarify(self, blocking_questions: list, next_state: str = "CONFIGURE_SOURCES") -> ConversationTurn:
+        """Transition to CLARIFY state with a list of blocking questions.
+
+        ADR-028 Item 3: The CLARIFY state asks one blocking question per turn.
+        It must NOT advance while any blocking questions remain unresolved.
+        Sets must_show_human=True on every turn — the human must see and answer.
+
+        Args:
+            blocking_questions: List of dicts {"question": str, "resolved": bool}
+            next_state: The state to transition to when all questions are resolved.
+                        Defaults to CONFIGURE_SOURCES (after CAPTURE_INTENT).
+                        Can be "REVIEW_DESIGN" (after DESIGN_SKILL blocking_questions).
+        """
+        self._state = "CLARIFY"
+        self._data._clarify_questions = blocking_questions
+        self._data._clarify_next_state = next_state
+
+        # Find the first unresolved question
+        pending = [q for q in blocking_questions if not q.get("resolved")]
+        if not pending:
+            # All resolved — advance to next state
+            return self._clarify_advance()
+
+        question = pending[0]["question"]
+        total = len(blocking_questions)
+        resolved_count = total - len(pending)
+
+        progress_note = f"({resolved_count + 1}/{total})" if total > 1 else ""
+
+        message = _CLARIFY_PROMPT.format(question=question)
+        if progress_note:
+            message = f"Clarification {progress_note}:\n\n{question}\n\nPlease answer so I can proceed."
+
+        log.info(
+            "_advance_to_clarify: pending=%d total=%d next_state=%s",
+            len(pending), total, next_state,
+        )
+
+        return ConversationTurn(
+            state="CLARIFY",
+            message=message,
+            data={
+                "question": question,
+                "pending_count": len(pending),
+                "total_count": total,
+            },
+            options=["<your answer>", "skip"],
+            must_show_human=True,   # ADR-028 Item 2: ALWAYS show CLARIFY turns to human
+            awaiting_user=True,
+        )
+
+    # Non-substantive single-word replies that do NOT answer a clarification question.
+    # Sending any of these alone must keep the session at CLARIFY and re-display the question.
+    _NON_ANSWERS: frozenset[str] = frozenset({
+        "ok", "yes", "no", "continue", "proceed", "next", "sure", "okay", "got it",
+        "noted", "done", "fine", "alright", "right",
+    })
+
+    def _handle_clarify_response(self, user_input: str) -> ConversationTurn:
+        """Handle user response at CLARIFY state (ADR-028 Item 3).
+
+        Records the answer, marks the question resolved, and either:
+        - Asks the next unresolved question (if any remain), or
+        - Advances to the next state (when all are resolved).
+
+        Refuses to advance if the user sends a non-substantive response (e.g. 'ok', 'yes').
+        The user must provide a real answer or type 'skip' to proceed with an assumption.
+        """
+        lowered = user_input.strip().lower()
+
+        questions = getattr(self._data, "_clarify_questions", [])
+        next_state = getattr(self._data, "_clarify_next_state", "CONFIGURE_SOURCES")
+
+        # Reject non-substantive responses — 'ok'/'yes'/'no' don't answer the question
+        if lowered in self._NON_ANSWERS:
+            pending = [q for q in questions if not q.get("resolved")]
+            question_text = pending[0]["question"] if pending else "the question above"
+            log.info(
+                "_handle_clarify_response: non-substantive reply %r — re-asking question",
+                user_input.strip()[:40],
+            )
+            return ConversationTurn(
+                state="CLARIFY",
+                message=(
+                    f"I need a specific answer to proceed.\n\n"
+                    f"{question_text}\n\n"
+                    f"Please type your answer, or type 'skip' to proceed with my best assumption.\n"
+                    f"(Typing '{user_input.strip()}' alone doesn't answer the question.)"
+                ),
+                data={
+                    "question": question_text,
+                    "pending_count": len(pending),
+                    "total_count": len(questions),
+                },
+                options=["<your answer>", "skip"],
+                must_show_human=True,
+                awaiting_user=True,
+            )
+
+        # Find the first unresolved question and mark it answered
+        resolved_any = False
+        for q in questions:
+            if not q.get("resolved"):
+                answer = user_input.strip()
+
+                # "skip" is accepted but flagged — we log it and proceed
+                if lowered == "skip":
+                    answer = "[SKIPPED — proceeding with best assumption]"
+                    log.warning(
+                        "_handle_clarify_response: user skipped question=%r — schema quality may suffer",
+                        q["question"][:80],
+                    )
+
+                q["resolved"] = True
+                q["answer"] = answer
+
+                # Record in clarification_log for audit trail
+                self._data.clarification_log.append({
+                    "question": q["question"],
+                    "answer": answer,
+                    "resolved_at": _now_iso(),
+                })
+                log.info(
+                    "_handle_clarify_response: resolved question=%r answer=%r",
+                    q["question"][:80], answer[:80],
+                )
+                resolved_any = True
+                break
+
+        if not resolved_any:
+            # No unresolved questions — this is unexpected; advance anyway
+            log.warning("_handle_clarify_response: no unresolved questions found — advancing")
+            return self._clarify_advance()
+
+        # Check if any questions remain unresolved
+        pending = [q for q in questions if not q.get("resolved")]
+        if pending:
+            # More questions to ask — stay in CLARIFY
+            return self._advance_to_clarify(questions, next_state)
+
+        # All resolved — advance
+        return self._clarify_advance()
+
+    def _clarify_advance(self) -> ConversationTurn:
+        """Advance from CLARIFY to the configured next state.
+
+        Called when all blocking questions are resolved.
+        """
+        next_state = getattr(self._data, "_clarify_next_state", "CONFIGURE_SOURCES")
+        log.info(
+            "_clarify_advance: all questions resolved, advancing to %s. "
+            "clarification_log=%d entries",
+            next_state, len(self._data.clarification_log),
+        )
+
+        if next_state == "CONFIGURE_SOURCES":
+            return self._advance_to_configure_sources_v2()
+        elif next_state == "REVIEW_DESIGN":
+            return self._prompt_review_design()
+        else:
+            # Unexpected next_state — fall back to CONFIGURE_SOURCES
+            log.warning(
+                "_clarify_advance: unexpected next_state=%r — falling back to CONFIGURE_SOURCES",
+                next_state,
+            )
+            return self._advance_to_configure_sources_v2()
 
     # -- CONFIGURE_SOURCES (v2 — LLM-assisted) ---------------------------
 
@@ -1368,6 +1689,15 @@ class SkillBuilderConversation:
             log.warning("_run_design_skill: could not load ShimKb cards: %s", exc)
             cards_summary = []
 
+        # ADR-028 Item 1 (S4): load persona prompt fragments; graceful degradation
+        # if persona not in YAML (logs warning, uses empty strings).
+        persona_frags = _load_persona_prompt_fragments(self._data.persona)
+        key_fields_text = (
+            ", ".join(persona_frags.get("key_fields", []))
+            if persona_frags.get("key_fields")
+            else "(none specified — use intent-driven fields)"
+        )
+
         prompt = _DESIGN_SKILL_PROMPT.format(
             persona=self._data.persona,
             normalised_intent=json.dumps(self._data.normalised_intent, indent=2),
@@ -1376,6 +1706,9 @@ class SkillBuilderConversation:
             if self._data.artifact_layout
             else "null",
             existing_kb_cards=json.dumps(cards_summary, indent=2),
+            persona_key_fields=key_fields_text,
+            persona_extraction_style=persona_frags.get("extraction_style", ""),
+            persona_few_shot_example=persona_frags.get("few_shot_example", ""),
         )
         try:
             result = self._llm.chat(
@@ -1461,13 +1794,25 @@ class SkillBuilderConversation:
         trigger = ws.get("trigger", {"on_request": True})
         self._data.trigger = trigger
 
+        # ADR-028 Item 3: route to CLARIFY if DESIGN_SKILL has blocking_questions
+        blocking_questions_from_design = design.get("blocking_questions", [])
         log.info(
-            "_run_design_skill: fields=%d output_format=%s reuse_covered=%d gaps=%d",
+            "_run_design_skill: fields=%d output_format=%s reuse_covered=%d gaps=%d "
+            "blocking_questions=%d",
             len(self._data.fields),
             self._data.output_format,
             len(reuse_plan.get("covered", {})),
             len(reuse_plan.get("gaps", [])),
+            len(blocking_questions_from_design),
         )
+
+        if blocking_questions_from_design:
+            log.info(
+                "_run_design_skill: routing to CLARIFY — %d blocking questions before REVIEW_DESIGN",
+                len(blocking_questions_from_design),
+            )
+            bq_dicts = [{"question": q, "resolved": False} for q in blocking_questions_from_design]
+            return self._advance_to_clarify(bq_dicts, next_state="REVIEW_DESIGN")
 
         return self._prompt_review_design()
 
