@@ -1229,15 +1229,18 @@ class SkillBuilderConversation:
                 cache_key = f"confluence:{source_id}"
                 source_samples_cache[cache_key] = samples
 
-                # Build sample content for the LLM prompt (cap at 6k chars)
+                # Build sample content for the LLM prompt.
+                # C6/ADR-031: raise per-sample cap 3000→20000, total cap 6000→40000.
+                # gpt-4o input is ~128k tokens; the old 3k/6k caps discarded source
+                # content that the capability analysis needs (e.g. WBS table rows).
                 sample_parts = []
                 total_chars = 0
                 for s in samples:
-                    content = s.get("content", "")[:3000]
+                    content = s.get("content", "")[:20000]
                     citation = s.get("source_citation", source_id)
                     sample_parts.append(f"--- {citation} ---\n{content}")
                     total_chars += len(content)
-                    if total_chars >= 6000:
+                    if total_chars >= 40000:
                         break
                 sample_content = "\n\n".join(sample_parts)
 
@@ -1247,7 +1250,7 @@ class SkillBuilderConversation:
                     source_id=cache_key,
                     persona=self._data.persona,
                     normalised_intent=json.dumps(self._data.normalised_intent, indent=2),
-                    sample_content=sample_content[:6000],
+                    sample_content=sample_content[:40000],
                 )
                 try:
                     result = self._llm.chat(
@@ -1257,9 +1260,13 @@ class SkillBuilderConversation:
                         max_tokens=spec.max_tokens,
                     )
                     raw = result.get("text", "") if isinstance(result, dict) else str(result)
-                    import re as _re
-                    cleaned = _re.sub(r"```(?:json)?\n?(.*?)\n?```", r"\1", raw, flags=_re.S).strip()
-                    cap = json.loads(cleaned)
+                    # C3/ADR-031: parse via _parse_llm_json_response for truncation detection.
+                    tokens_out = result.get("tokens_out") if isinstance(result, dict) else None
+                    cap = _parse_llm_json_response(
+                        raw,
+                        tokens_out=tokens_out,
+                        max_tokens=spec.max_tokens,
+                    )
                     cap["source_id"] = cache_key
                     capability_list.append(cap)
                     log.info(
@@ -1269,6 +1276,12 @@ class SkillBuilderConversation:
                         len(cap.get("suggested_fields", [])),
                         len(cap.get("missing_fields", [])),
                     )
+                except ValueError as exc:
+                    raise RuntimeError(
+                        f"INSPECT_SOURCES: LLM response could not be parsed for source "
+                        f"'{cache_key}'. Possible truncation (BUG-queue-44364). "
+                        f"Error: {exc}."
+                    ) from exc
                 except Exception as exc:
                     raise RuntimeError(
                         f"INSPECT_SOURCES: LLM capability analysis failed for source "
@@ -1588,9 +1601,22 @@ class SkillBuilderConversation:
                 max_tokens=spec.max_tokens,
             )
             raw = result.get("text", "") if isinstance(result, dict) else str(result)
-            import re as _re
-            cleaned = _re.sub(r"```(?:json)?\n?(.*?)\n?```", r"\1", raw, flags=_re.S).strip()
-            design = json.loads(cleaned)
+            # C2/ADR-031: capture tokens_out and parse via _parse_llm_json_response
+            # — HIGHEST-risk silent-loss site: a truncated design = silently
+            # incomplete deployed skill schema. Hard-fail loudly on truncation.
+            tokens_out = result.get("tokens_out") if isinstance(result, dict) else None
+            design = _parse_llm_json_response(
+                raw,
+                tokens_out=tokens_out,
+                max_tokens=spec.max_tokens,
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                f"DESIGN_SKILL: LLM response could not be parsed. "
+                f"If this is a truncation error (BUG-queue-44364), increase "
+                f"design_skill max_tokens in skill_builder.yaml or reduce schema size. "
+                f"Error: {exc}"
+            ) from exc
         except Exception as exc:
             raise RuntimeError(
                 f"DESIGN_SKILL: LLM design call failed. Error: {exc}. "
@@ -1913,9 +1939,18 @@ class SkillBuilderConversation:
                 max_tokens=spec.max_tokens,
             )
             raw = result.get("text", "") if isinstance(result, dict) else str(result)
-            import re as _re
-            cleaned = _re.sub(r"```(?:json)?\n?(.*?)\n?```", r"\1", raw, flags=_re.S).strip()
-            diff = json.loads(cleaned)
+            # C4/ADR-031: parse via _parse_llm_json_response for truncation detection.
+            tokens_out = result.get("tokens_out") if isinstance(result, dict) else None
+            diff = _parse_llm_json_response(
+                raw,
+                tokens_out=tokens_out,
+                max_tokens=spec.max_tokens,
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                f"REVIEW_DESIGN replan: LLM response could not be parsed. "
+                f"Possible truncation (BUG-queue-44364). Error: {exc}."
+            ) from exc
         except Exception as exc:
             raise RuntimeError(
                 f"REVIEW_DESIGN replan: LLM call failed. Error: {exc}."
@@ -2432,44 +2467,9 @@ class SkillBuilderConversation:
         )
 
     # -- Source-grounded review (ADR-026 Fix 4) --------------------------
-
-    _SOURCE_GROUNDED_REVIEW_PROMPT = """\
-You are a Knowledge Builder Framework schema engineer performing a source-coherence check.
-
-Persona: {persona}
-Intent: "{intent}"
-
-CANDIDATE EXTRACTION SCHEMA (fields the user wants to extract):
-{schema_summary}
-
-LIVE SOURCE CONTENT (sample from the actual Confluence page(s) declared as sources):
-{sample_content}
-
-Your task — analyse the source content against the candidate schema and return a JSON object:
-{{
-  "unsupportable_fields": [
-    {{"field": "field_name", "reason": "why this field cannot be extracted from the source"}}
-  ],
-  "suggested_additions": [
-    {{"field": "snake_case_name", "type": "string|array|integer",
-      "description": "extraction instruction",
-      "reason": "what in the source suggests this field"}}
-  ],
-  "enum_corrections": [
-    {{"field": "field_name",
-      "current_enum": ["val1"],
-      "seen_in_source": ["actual_val1", "actual_val2"],
-      "recommendation": "update enum or use free-text string"}}
-  ],
-  "summary": "1-3 sentence note for the user about overall schema-source alignment"
-}}
-
-Rules:
-- Only flag a field as unsupportable if the source clearly cannot produce it.
-- Only suggest additions that are clearly and consistently present in the source.
-- If the schema is well-aligned, return empty lists and a positive summary.
-- Base ALL findings on the actual source content above — do not invent.
-"""
+    # ADR-031 C1: _SOURCE_GROUNDED_REVIEW_PROMPT deleted — prompt is now served
+    # by PromptRegistry (id="source_grounded_review" in skill_builder.yaml).
+    # Use get_registry().get_prompt("source_grounded_review", ...) at call sites.
 
     def _source_grounded_review(self, field_specs: dict) -> dict | None:
         """Fetch live source samples and run a schema-coherence LLM check.
@@ -2556,44 +2556,55 @@ Rules:
                 )
                 return None
 
-            # Build schema summary
+            # Build schema summary.
+            # C7: pass the full description — no [:120] slice (descriptions are
+            # never huge; slicing silently discards precision from the LLM).
             schema_lines = []
             for field, spec in field_specs.items():
                 t = spec.get("type", "string")
                 desc = spec.get("description", "")
                 enum = spec.get("enum")
                 extra = f" (enum: {enum})" if enum else ""
-                schema_lines.append(f"  - {field} [{t}{extra}]: {desc[:120]}")
+                schema_lines.append(f"  - {field} [{t}{extra}]: {desc}")
 
-            # Combine sample content (cap total at 8k chars for prompt budget)
+            # Combine sample content.
+            # C6/ADR-031: raise per-sample cap 4000→20000, total cap 8000→40000.
+            # gpt-4o input is ~128k tokens; the old 4k/8k caps silently discarded
+            # source structure that the coherence check needed to see.
             sample_parts = []
             total_chars = 0
             for s in all_samples:
-                content = s.get("content", s.get("text", ""))[:4000]
+                content = s.get("content", s.get("text", ""))[:20000]
                 citation = s.get("source_citation", "?")
                 sample_parts.append(f"--- {citation} ---\n{content}")
                 total_chars += len(content)
-                if total_chars >= 8000:
+                if total_chars >= 40000:
                     break
             sample_content = "\n\n".join(sample_parts)
 
-            prompt = self._SOURCE_GROUNDED_REVIEW_PROMPT.format(
+            # ADR-031 C1: prompt via PromptRegistry — last hard-coded prompt migrated.
+            spec = get_registry().get_prompt(
+                "source_grounded_review",
                 persona=self._data.persona or "unknown",
                 intent=self._data.intent_description or "",
                 schema_summary="\n".join(schema_lines),
-                sample_content=sample_content[:8000],
+                sample_content=sample_content[:40000],
             )
 
             result = self._llm.chat(
-                model="synthesis",
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                max_tokens=2048,
+                model=spec.model,
+                messages=[{"role": "user", "content": spec.text}],
+                response_format=spec.response_format,
+                max_tokens=spec.max_tokens,
             )
             raw = result.get("text", "") if isinstance(result, dict) else str(result)
-            import re as _re
-            cleaned = _re.sub(r"```(?:json)?\n?(.*?)\n?```", r"\1", raw, flags=_re.S).strip()
-            review_data = json.loads(cleaned)
+            tokens_out = result.get("tokens_out") if isinstance(result, dict) else None
+            # ADR-031 C1: parse via shared helper — truncation detection active.
+            review_data = _parse_llm_json_response(
+                raw,
+                tokens_out=tokens_out,
+                max_tokens=spec.max_tokens,
+            )
 
             # Attach citations so the user can trace findings back to the source
             review_data["_source_citations"] = [
@@ -2807,8 +2818,9 @@ Rules:
             if field_name in self._data.field_specs:
                 self._data.field_specs[field_name]["description"] = new_desc
             elif field_name in self._data.fields:
+                # ADR-031 C9: no maxLength — consistent with Group B policy.
                 self._data.field_specs[field_name] = {
-                    "type": "string", "description": new_desc, "maxLength": 500,
+                    "type": "string", "description": new_desc,
                 }
             else:
                 return _err(
@@ -3649,10 +3661,11 @@ Rules:
                 ) from exc
 
             # Faithfulness judge needs to find the extracted value in the
-            # snippet. _llm_extract uses 12k chars; the judge MUST get the
-            # same window or it will return faithful=false for any value
-            # not in the first 500 chars (most of them). Match the budget.
-            source_snippet = str(sample.get("content", ""))[:12000]
+            # snippet. _llm_extract now uses 80k chars (raised in review.py
+            # Group D / ADR-031). Keep parity so the judge sees the same
+            # window as the extractor — mismatches cause false unfaithful verdicts.
+            # C6/ADR-031: raise 12000→80000 (sync with review.py _llm_extract).
+            source_snippet = str(sample.get("content", ""))[:80000]
             gold_row = {
                 "kind": "auto_generated",
                 "source_citation": sample.get("source_citation", "?"),
@@ -3697,12 +3710,16 @@ Rules:
                 if not val:
                     continue
                 faithfulness_total += 1
-                # ADR-030 C1: eval_judge prompt via registry
+                # ADR-030 C1: eval_judge prompt via registry.
+                # C8/ADR-031: pass full field_description (no [:200] slice — never
+                # huge); extracted_value raised [:300]→[:2000] so the judge sees
+                # the real value, not a clip that would give false "unfaithful"
+                # verdicts on longer extracted strings.
                 judge_spec = get_registry().get_prompt(
                     "eval_judge",
                     field_name=fname,
-                    field_description=fspec.get("description", "")[:200],
-                    extracted_value=str(val)[:300],
+                    field_description=fspec.get("description", ""),
+                    extracted_value=str(val)[:2000],
                     source_snippet=source_snippet,
                 )
                 try:
@@ -3783,7 +3800,10 @@ Rules:
             "question": canonical_question,
             "expected_skill": expected_skill,
             "expected_tier": 1,
-            "expected_fields": list(all_fields[:5]),  # top-5 fields as presence check
+            # C10/ADR-031: no cap — eval quality gate must cover the whole schema
+            # (e.g. 32 fields), not just the first 5. Arbitrary :5 cap means
+            # 27 of 32 fields are never checked in the eval gold row.
+            "expected_fields": list(all_fields),
             "actual_tier_used": wf_tier,
             "actual_artifact_url": wf_artifact_url,
             "ask_latency_ms": ask_latency_ms,
@@ -4320,10 +4340,13 @@ Rules:
                 if isinstance(classifier_response, dict)
                 else None
             )
+            # C5/ADR-031: use spec value (matches YAML — today 512, but will
+            # not drift if the YAML value is updated). Template NOT touched
+            # (gate-locked checksum covers template only, not max_tokens).
             parsed = _parse_llm_json_response(
                 raw_text,
                 tokens_out=tokens_out,
-                max_tokens=512,
+                max_tokens=classifier_spec.max_tokens,
             )
         except (ValueError, Exception) as exc:
             log.error(

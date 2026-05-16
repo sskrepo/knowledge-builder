@@ -545,6 +545,60 @@ prompts:
       Respond with ONLY the JSON object, no prose, no markdown fences.
 
   # ---------------------------------------------------------------------------
+  # source_grounded_review
+  # Source: conversation.py _SOURCE_GROUNDED_REVIEW_PROMPT (line ~2436)
+  # ADR-031 C1: migrated from hard-coded Python constant to PromptRegistry.
+  # Previously: hard-coded with max_tokens=2048, model="synthesis", raw json.loads.
+  # Now: max_tokens=4096 (generous — this is a multi-field coherence analysis),
+  #       truncation detected via _parse_llm_json_response.
+  # Template text is verbatim from the Python constant — zero wording changes.
+  # ---------------------------------------------------------------------------
+  source_grounded_review:
+    id: source_grounded_review
+    version: "1.0"
+    model: synthesis
+    max_tokens: 4096
+    response_format: json_object
+    description: "Schema-coherence check: analyse live source content against the candidate extraction schema and return unsupportable fields, suggested additions, enum corrections, and a summary."
+    required_vars: [persona, intent, schema_summary, sample_content]
+    template: |
+      You are a Knowledge Builder Framework schema engineer performing a source-coherence check.
+
+      Persona: {persona}
+      Intent: "{intent}"
+
+      CANDIDATE EXTRACTION SCHEMA (fields the user wants to extract):
+      {schema_summary}
+
+      LIVE SOURCE CONTENT (sample from the actual Confluence page(s) declared as sources):
+      {sample_content}
+
+      Your task — analyse the source content against the candidate schema and return a JSON object:
+      {{
+        "unsupportable_fields": [
+          {{"field": "field_name", "reason": "why this field cannot be extracted from the source"}}
+        ],
+        "suggested_additions": [
+          {{"field": "snake_case_name", "type": "string|array|integer",
+            "description": "extraction instruction",
+            "reason": "what in the source suggests this field"}}
+        ],
+        "enum_corrections": [
+          {{"field": "field_name",
+            "current_enum": ["val1"],
+            "seen_in_source": ["actual_val1", "actual_val2"],
+            "recommendation": "update enum or use free-text string"}}
+        ],
+        "summary": "1-3 sentence note for the user about overall schema-source alignment"
+      }}
+
+      Rules:
+      - Only flag a field as unsupportable if the source clearly cannot produce it.
+      - Only suggest additions that are clearly and consistently present in the source.
+      - If the schema is well-aligned, return empty lists and a positive summary.
+      - Base ALL findings on the actual source content above — do not invent.
+
+  # ---------------------------------------------------------------------------
   # analyze_artifact  [DEPRECATED — legacy ADR-026 state machine]
   # Source: conversation.py _ANALYZE_ARTIFACT_PROMPT (line 200)
   # Used only by in-flight sessions on the pre-ADR-027 state machine path.
