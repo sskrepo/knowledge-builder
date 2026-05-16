@@ -103,7 +103,21 @@ class PptxRenderer(BaseRenderer):
         header_shape.line.fill.background()  # no border
 
         # --- Title ---
-        title_text = data.get("title") or data.get("sections", {}).get("Project Name", "Weekly Exec Review")
+        # Prefer an extracted project/program title field over data["title"]
+        # (which the executor may set from a generic page heading like
+        # "Project Plan" when multiple sources are bound). Only fall back to
+        # data["title"] / "Project Name" section when no schema title field
+        # produced a value.
+        _ex0 = data.get("extracted", {}) or {}
+        _title_from_schema = (
+            _ex0.get("program_title") or _ex0.get("project_name")
+            or _ex0.get("program_name") or _ex0.get("project_title")
+        )
+        title_text = (
+            _title_from_schema
+            or data.get("title")
+            or data.get("sections", {}).get("Project Name", "Weekly Exec Review")
+        )
         tx_title = slide.shapes.add_textbox(
             Inches(0.25), Inches(0.5),
             Inches(9.0), Inches(0.55),
@@ -130,6 +144,16 @@ class PptxRenderer(BaseRenderer):
             v = ex.get(key) or sec.get(key.replace("_", " ").title())
             if v:
                 jira_candidates.append(str(v).strip())
+        # Generic: any extracted key mentioning 'jira' whose value looks like
+        # a key (e.g. FAAASPMO-1190). Covers ADR-027/029 designs that name
+        # the field differently (e.g. tracking_jira, jira_keys, key_links).
+        if not jira_candidates:
+            import re as _jre
+            for k, v in ex.items():
+                if "jira" in k.lower() and v:
+                    for m in _jre.findall(r"[A-Z][A-Z0-9]+-\d+", str(v)):
+                        if m not in jira_candidates:
+                            jira_candidates.append(m)
         jira_id = data.get("jira_id") or sec.get("Jira Id") or ex.get("jira_id") or ", ".join(jira_candidates)
         if jira_id:
             tx_jira = slide.shapes.add_textbox(
@@ -177,17 +201,27 @@ class PptxRenderer(BaseRenderer):
 
         # Scope: prefer explicit scope; otherwise compose from in_scope +
         # out_of_scope (the way the source page often expresses it).
-        scope_text = _get("scope", "in_scope", "business_outcome")
+        scope_text = _get("scope", "scope_and_impact", "scope_summary",
+                          "scope_and_objectives", "in_scope", "business_outcome")
         out_of_scope = _get("out_of_scope")
         if scope_text and out_of_scope:
             scope_text = f"In scope: {scope_text}. Out of scope: {out_of_scope}."
         assumptions     = _get_list("assumptions")
+        # Status narrative — reference slide titles this "Provisioning and
+        # Lifecycle Status". Accept the rich exec/rag summary fields the
+        # ADR-027/029 designs produce.
         status_bullets  = _get_list("status_bullets", "weekly_status_update",
-                                    "current_status", "current_phase", "overall_status")
+                                    "provisioning_and_lifecycle_status",
+                                    "exec_summary", "executive_summary",
+                                    "rag_summary", "schedule_health",
+                                    "current_status", "current_phase",
+                                    "overall_status")
         next_steps      = _get_list("next_steps", "completed_last_week", "next_week_plan")
-        key_milestones  = _get_list("key_milestones", "milestones", "top_milestones")
+        key_milestones  = _get_list("key_milestones", "key_milestones_rollup",
+                                    "milestones", "top_milestones")
         orm_status      = _get("orm_status", "orm")
-        risks           = _get_list("risks_mitigations", "risks", "top_risks",
+        risks           = _get_list("risks_mitigations", "risks_and_mitigations",
+                                    "risks", "top_risks", "blocking_issues",
                                     "top_issues_blockers", "blockers")
 
         # Left column dimensions
