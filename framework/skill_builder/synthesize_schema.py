@@ -206,13 +206,14 @@ def _infer_field_spec(field: str) -> dict:
         }
 
     if any(kw in f for kw in ("_summary", "_description", "_text", "_body", "_narrative")):
+        # ADR-031: no arbitrary maxLength — ADB CLOB is the backing store.
         return {
             "type": "string",
             "description": f"Free-text summary — {field}",
-            "maxLength": 1000,
         }
 
     if "bool" in f or f.startswith("is_") or f.startswith("has_") or f.startswith("enabled"):
         return {"type": "boolean", "description": f"Boolean flag — {field}"}
 
-    return {"type": "string", "description": f"Field {field} — refine description", "maxLength": 500}
+    # ADR-031: no arbitrary maxLength for catch-all string fields — ADB CLOB backs storage.
+    return {"type": "string", "description": f"Field {field} — refine description"}
