@@ -1,0 +1,47 @@
+# framework/config/prompts/executor.yaml
+#
+# ADR-030 — YAML Prompt Store: executor prompts
+#
+# Source: framework/workflow_runtime/executor.py — inline prompt in
+#         _llm_extract_fields (~line 493). This prompt had no constant name
+#         in the original code; it is assigned the ID `executor_extract`
+#         per ADR-030 impl-plan §P2.
+#
+# IMPORTANT: The original code used Python f-string concatenation (not str.format()).
+# The {field_lines} placeholder maps to chr(10).join(field_lines) from the original.
+# The {user_request} placeholder maps to inputs.get('input', '') from the original.
+# The {snippet} placeholder maps to text[:24000] from the original.
+# Callers MUST pre-join field_lines with newlines before passing to get_prompt().
+#
+# Generated: 2026-05-16 (P2 verbatim migration — zero wording changes)
+# Schema: ADR-030-prompt-externalization-and-harness.md §Design §2
+
+prompts:
+
+  # ---------------------------------------------------------------------------
+  # executor_extract
+  # Source: executor.py _llm_extract_fields inline prompt (lines 493–504)
+  # Production render-time extraction prompt for /api/v1/ask workflow output.
+  # Extracts structured fields from Confluence pages using the committed skill schema.
+  # ---------------------------------------------------------------------------
+  executor_extract:
+    id: executor_extract
+    version: "1.0"
+    model: synthesis
+    max_tokens: 4096
+    response_format: json_object
+    description: "Production render-time extraction prompt for /api/v1/ask workflow output. Extracts structured fields from Confluence pages using the committed skill schema."
+    notes: "Template uses {field_lines} (pre-joined with newlines by caller), {user_request} (the user's input string), {snippet} (source text truncated to 24000 chars). These map directly to the f-string variables in the original executor.py _llm_extract_fields method."
+    required_vars: [field_lines, user_request, snippet]
+    template: |
+      You are extracting structured fields from a Confluence/wiki page to populate an executive-review presentation. Return a single JSON object with EXACTLY these keys (use empty string "" or empty list [] when a field is genuinely absent — do not invent data):
+
+      {field_lines}
+
+      User request: {user_request}
+
+      === Source document ===
+      {snippet}
+      === End source ===
+
+      Respond with ONLY the JSON object, no prose, no markdown fences.

@@ -4,6 +4,31 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] backend-dev | ADR-030 P2 — YAML prompt store authored verbatim
+
+**Task: P2 — Author YAML prompt store (parallel stream, new files only).**
+
+- Created `framework/config/prompts/` directory.
+- `framework/config/prompts/skill_builder.yaml` — 11 prompts:
+  `capture_intent`, `configure_sources`, `inspect_sources`, `design_skill`,
+  `review_design_replan`, `eval_judge`, `clarify`, `failure_classifier` (gate-locked),
+  `description_synthesis`, `review_extract`, `analyze_artifact` (deprecated legacy).
+- `framework/config/prompts/executor.yaml` — 1 prompt: `executor_extract`
+  (f-string→str.format() conversion; placeholders: {field_lines}, {user_request}, {snippet}).
+- `framework/config/prompts/persona_overlays.yaml` — 9 persona stanzas (tpm, pm, architect,
+  eng_mgr, developer, ops_eng, ops_mgr, service_owner, kbf_ops) migrated verbatim from
+  `framework/config/persona_prompts.yaml` under the ADR-030 overlay schema.
+- Byte-identity: all 12 prompts verified byte-identical to their Python source constants
+  (sha256 hash comparison — all diffs empty).
+- required_vars ↔ template placeholder consistency: PASS for all 12 prompts.
+- YAML parse: all 3 files parse cleanly via yaml.safe_load().
+- Gate-locked classifier checksum computed per ADR-030 algorithm:
+  `sha256(template.rstrip('\n').encode('utf-8'))` →
+  `sha256:aef837cdde856fe83039f19fff816a101fe886187a7ce6f741a39eaab71c1d1f`
+- No Python source files modified (P2 is additive-only; cutover deferred to C-stream).
+
+---
+
 ## [2026-05-16] architect | ADR-030 — Prompt externalization design + implementation blueprint
 
 **Task: Design ADR-030 (user-chosen approach: Externalize to YAML + harness).**

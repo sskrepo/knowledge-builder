@@ -1,0 +1,588 @@
+# framework/config/prompts/skill_builder.yaml
+#
+# ADR-030 — YAML Prompt Store: skill_builder prompts
+#
+# Sources: framework/skill_builder/conversation.py (8 prompts + 1 legacy),
+#          framework/skill_builder/synthesize_schema.py (1 prompt),
+#          framework/skill_builder/review.py (1 prompt)
+#
+# DO NOT hand-edit template text — any change must be verbatim-verified
+# against the source Python constant using the checksum procedure in ADR-030 §P2.
+# The failure_classifier entry is gate-locked: locked=true enforces checksum
+# at PromptRegistry load time.
+#
+# Generated: 2026-05-16 (P2 verbatim migration — zero wording changes)
+# Schema: ADR-030-prompt-externalization-and-harness.md §Design §2
+
+prompts:
+
+  # ---------------------------------------------------------------------------
+  # capture_intent
+  # Source: conversation.py _CAPTURE_INTENT_PROMPT (line 231)
+  # ---------------------------------------------------------------------------
+  capture_intent:
+    id: capture_intent
+    version: "1.0"
+    model: synthesis
+    max_tokens: 1024
+    response_format: json_object
+    description: "Parse the user's raw intent into a normalised goal object for downstream design steps."
+    required_vars: [persona, intent, persona_key_fields]
+    template: |
+      You are a Knowledge Builder Framework assistant. Parse the user's intent into a
+      normalised goal object so downstream design steps have a structured representation
+      to work from.
+
+      Persona: {persona}
+      Raw intent: "{intent}"
+
+      Persona guidance: This persona's canonical output always includes these fields —
+      {persona_key_fields}
+      Use this list as a starting point for understanding what dimensions matter most.
+
+      Return ONLY a JSON object with these keys:
+      {{
+        "output_kind": "pptx | docx | markdown | email | slack",
+        "audience": "exec | team | ops | all",
+        "cadence": "weekly | monthly | on_request | daily",
+        "scope_domains": ["domain1", "domain2"],
+        "success_criteria": ["criterion1", "criterion2"],
+        "blocking_ambiguities": [
+          "questions whose answers would change the schema structure, output kind, or source selection"
+        ],
+        "nice_to_know_ambiguities": [
+          "questions that can be assumed; proceed and flag for user awareness"
+        ]
+      }}
+
+      Rules:
+      - "output_kind": infer from words like "PPT", "deck", "slide", "document", "report", "email"
+      - "scope_domains": extract project/service names (e.g. "26ai", "FA DB", "OCIFACP")
+      - "success_criteria": infer from phrases like "one slide", "real data", "exec-ready"
+      - "blocking_ambiguities": ONLY include if the answer would materially change the schema
+        structure, the source selection, or the output format. Example: "which Confluence space
+        — FAAAS or 26AI-LEGACY?" is blocking. "which day of the week?" is nice_to_know.
+      - "nice_to_know_ambiguities": advisory items; proceed with stated assumption, flag for user.
+      - Keep all string values concise (< 80 chars each)
+
+  # ---------------------------------------------------------------------------
+  # configure_sources
+  # Source: conversation.py _CONFIGURE_SOURCES_SUGGEST_PROMPT (line 269)
+  # ---------------------------------------------------------------------------
+  configure_sources:
+    id: configure_sources
+    version: "1.0"
+    model: synthesis
+    max_tokens: 1024
+    response_format: json_object
+    description: "Propose the most likely source descriptors given the user's intent and available adapters."
+    required_vars: [persona, normalised_intent, adapter_list, intent_text]
+    template: |
+      You are a Knowledge Builder Framework source advisor. Given the user's intent and the
+      persona's declared adapters, propose the most likely source descriptors.
+
+      Persona: {persona}
+      Normalised intent: {normalised_intent}
+      Available adapters: {adapter_list}
+      Intent text (original): "{intent_text}"
+
+      Return ONLY a JSON array of source descriptor objects. Each object must include:
+      - "kind": "confluence" | "jira" | "git" | "adb"
+      - For confluence: optionally "pages" (list of page IDs or URLs), "space", "labels"
+      - For jira: "jql" string
+      - "rationale": why this source is likely to contain the required data (1 sentence)
+
+      Example:
+      [
+        {{
+          "kind": "confluence",
+          "pages": ["20030556732"],
+          "rationale": "26ai project status page explicitly mentioned in intent"
+        }}
+      ]
+
+      Rules:
+      - Extract all page IDs or URLs from the intent text — these are high-confidence.
+      - Propose additional sources only when the adapter list makes them available AND
+        the intent clearly implies them.
+      - Do not invent sources not supported by the adapter list.
+      - Return an empty array [] if no confident source can be proposed.
+
+  # ---------------------------------------------------------------------------
+  # inspect_sources
+  # Source: conversation.py _INSPECT_SOURCES_PROMPT (line 301)
+  # ---------------------------------------------------------------------------
+  inspect_sources:
+    id: inspect_sources
+    version: "1.0"
+    model: synthesis
+    max_tokens: 2048
+    response_format: json_object
+    description: "Review sample content from a source and produce a capability inventory with confidence levels."
+    required_vars: [source_id, persona, normalised_intent, sample_content]
+    template: |
+      You are a Knowledge Builder Framework source analyst. Review the sample content
+      fetched from a source and produce a capability inventory.
+
+      Source ID: {source_id}
+      Persona: {persona}
+      Intent: {normalised_intent}
+
+      Sample content (up to 3 pages):
+      {sample_content}
+
+      Return ONLY a JSON object:
+      {{
+        "source_id": "{source_id}",
+        "available_fields": [
+          {{"field": "snake_case_name", "type": "string|array|integer",
+            "confidence": "high|medium|synthesisable|low",
+            "evidence": "quote or location from sample (< 100 chars)"}}
+        ],
+        "missing_fields": [
+          {{"field": "field_the_intent_might_want",
+            "reason": "why this content cannot supply it"}}
+        ],
+        "suggested_fields": [
+          {{"field": "snake_case_name", "type": "string|array|integer",
+            "reason": "why this is consistently present and useful"}}
+        ],
+        "summary": "2-3 sentence overview of what this source contains"
+      }}
+
+      Confidence taxonomy for available_fields:
+      - "high": the field value is present as an explicitly labelled element in the source
+        (e.g. a named table cell, a heading with its content, a structured field).
+      - "medium": the field value is clearly inferrable from the source with minimal
+        interpretation (e.g. a status implied by a colour-coded row, a date in a nearby cell).
+      - "synthesisable": the field VALUE must be DERIVED by aggregating or combining content
+        that IS present in the source but does not appear as a single labelled element.
+        Examples: "risks" synthesised from WBS table status cells marked "blocked" or
+        "at risk"; "next_steps" synthesised from open action items across multiple rows.
+        Use this level when the source has the raw ingredients but the LLM must aggregate
+        them — do NOT classify these as "low" or "missing".
+      - "low": the field is marginally mentioned or ambiguous; treat as advisory only.
+
+      Rules:
+      - "available_fields": ONLY fields clearly extractable or synthesisable from the sample.
+      - "suggested_fields": fields present in the sample that the intent might have missed.
+      - "missing_fields": fields the intent implies but the source clearly CANNOT provide
+        even via synthesis (the raw content is genuinely absent).
+      - Base ALL findings on the sample content — do not invent.
+
+  # ---------------------------------------------------------------------------
+  # design_skill
+  # Source: conversation.py _DESIGN_SKILL_PROMPT (line 352)
+  # ---------------------------------------------------------------------------
+  design_skill:
+    id: design_skill
+    version: "1.0"
+    model: synthesis
+    max_tokens: 4096
+    response_format: json_object
+    description: "Design a complete skill from intent, source capability inventory, artifact layout, and reusable KB cards."
+    required_vars: [persona, normalised_intent, source_capability, artifact_layout, existing_kb_cards, persona_key_fields, persona_extraction_style, persona_few_shot_example]
+    template: |
+      You are a Knowledge Builder Framework skill architect. Design a complete skill from
+      the user's intent, the source capability inventory, the artifact layout, and the
+      existing reusable KB cards.
+
+      Persona: {persona}
+      Normalised intent: {normalised_intent}
+      Source capability inventory: {source_capability}
+      Artifact layout hint (may be null): {artifact_layout}
+      Existing reusable KB cards: {existing_kb_cards}
+
+      Persona guidance — canonical key fields for this persona:
+      {persona_key_fields}
+
+      Persona extraction style:
+      {persona_extraction_style}
+
+      Worked example of a well-designed field for this persona:
+      {persona_few_shot_example}
+
+      Produce a single JSON design object:
+      {{
+        "schema": {{
+          "title": "skill_name",
+          "properties": {{
+            "field_name": {{
+              "type": "string|array|integer|boolean",
+              "description": "precise 1-2 sentence extraction instruction",
+              "maxLength": 500
+            }}
+          }},
+          "required": ["field1", "field2"]
+        }},
+        "source_bindings": {{
+          "field_name": ["source_id1"]
+        }},
+        "workflow_shape": {{
+          "output_format": "pptx|docx|markdown|email|slack",
+          "layout": "weekly_exec_review_v1 | default",
+          "trigger": {{"on_request": true, "schedule": "cron_or_null"}},
+          "retriever": "search_wiki"
+        }},
+        "reuse_plan": {{
+          "covered": {{"field": "existing_kb_name"}},
+          "gaps": ["field1", "field2"]
+        }},
+        "unsupportable_fields": [
+          {{"field": "field_name", "reason": "why no source can provide this"}}
+        ],
+        "blocking_questions": [
+          "questions whose answers would change the schema structure — must resolve before review"
+        ],
+        "open_questions": [
+          "cosmetic questions that can be noted without blocking — show at REVIEW_DESIGN"
+        ]
+      }}
+
+      Rules:
+      - Include fields that at least one source can support with confidence "high", "medium",
+        or "synthesisable". Do NOT exclude synthesisable fields — they are extractable.
+      - For fields with confidence="synthesisable": the extraction instruction MUST explicitly
+        state "Derive this value by [aggregating / combining / summarising] the following
+        content: [specific source element, e.g. WBS table rows flagged as blocked]."
+        A synthesisable field with no aggregation instruction in its description is a prompt
+        defect — it will cause the LLM to fail or hallucinate at extraction time.
+      - Fields with confidence="low" or genuinely "missing" from all sources: exclude them
+        or place them in "unsupportable_fields" with a clear reason.
+      - Source bindings must reference source IDs from the capability inventory.
+      - Reuse plan covers must reference real KB cards from "existing_kb_cards".
+      - If artifact layout is provided, align the output_format and layout accordingly.
+      - Choose "weekly_exec_review_v1" layout only for exec-review PPTX skills.
+      - "required" list should contain only fields critical to the skill's purpose.
+      - maxLength: 200 for IDs/statuses, 500 for summaries, 2000 for detailed content.
+      - "blocking_questions": ONLY include questions where the answer would change the schema
+        structure, field types, or source bindings. These trigger CLARIFY before REVIEW_DESIGN.
+      - "open_questions": advisory items — show at REVIEW_DESIGN but do not block.
+      - Persona key fields above are strong hints — always attempt to include them if the
+        source capability inventory can support them.
+
+  # ---------------------------------------------------------------------------
+  # review_design_replan
+  # Source: conversation.py _REVIEW_DESIGN_REPLAN_PROMPT (line 432)
+  # ---------------------------------------------------------------------------
+  review_design_replan:
+    id: review_design_replan
+    version: "1.0"
+    model: synthesis
+    max_tokens: 2048
+    response_format: json_object
+    description: "Return a diff object for user-requested modifications to the current skill design."
+    required_vars: [current_design, edit_request, updated_source_capability]
+    template: |
+      You are a Knowledge Builder Framework skill architect. The user wants to modify the
+      current skill design. Return ONLY the changes needed as a diff object.
+
+      Current design: {current_design}
+      User edit request: "{edit_request}"
+      Updated source capability (if sources changed): {updated_source_capability}
+
+      Return ONLY a JSON diff object with keys matching what changed:
+      {{
+        "schema_add": {{"field_name": {{"type": "...", "description": "...", "maxLength": 500}}}},
+        "schema_remove": ["field_to_remove"],
+        "schema_update": {{"field_name": {{"description": "updated instruction"}}}},
+        "source_bindings_add": {{"new_field": ["source_id"]}},
+        "source_bindings_remove": ["field_to_unbind"],
+        "workflow_shape_update": {{"layout": "new_layout"}},
+        "reuse_plan_update": {{"covered": {{}}, "gaps": ["field1"]}},
+        "open_questions": ["any new questions from the edit"]
+      }}
+
+      Rules:
+      - Only include keys that actually change — omit unchanged sections.
+      - If the edit request is trivial (rename, description change), return only the
+        affected field in schema_update.
+      - If new sources must be added (the edit implies data not in the inventory),
+        add an open_question noting the source gap.
+
+  # ---------------------------------------------------------------------------
+  # eval_judge
+  # Source: conversation.py _EVAL_JUDGE_PROMPT (line 460)
+  # ---------------------------------------------------------------------------
+  eval_judge:
+    id: eval_judge
+    version: "1.0"
+    model: synthesis
+    max_tokens: 256
+    response_format: json_object
+    description: "Faithfulness judge: determine whether an extracted field value is grounded in the source snippet."
+    required_vars: [field_name, field_description, extracted_value, source_snippet]
+    template: |
+      You are a Knowledge Builder Framework faithfulness judge. Determine whether an
+      extracted field value is faithfully grounded in the source document snippet.
+
+      Field: {field_name}
+      Extraction instruction: {field_description}
+      Extracted value: {extracted_value}
+      Source snippet: {source_snippet}
+
+      Return ONLY a JSON object:
+      {{
+        "faithful": true | false,
+        "confidence": "high | medium | low",
+        "reason": "1 sentence explanation"
+      }}
+
+      Rules:
+      - "faithful" = true if the extracted value is directly supported by the source snippet.
+      - "faithful" = false if the extracted value contains information NOT present in the snippet.
+      - Paraphrasing is acceptable; exact wording is not required.
+      - If the extracted value is empty/null and the field is optional, mark faithful=true.
+      - Base the judgment ONLY on the source snippet provided — do not use outside knowledge.
+
+  # ---------------------------------------------------------------------------
+  # clarify
+  # Source: conversation.py _CLARIFY_PROMPT (line 487)
+  # ADR-028 Item 3: turn message template — NOT an LLM call.
+  # model: none / response_format: none per ADR-030 impl-plan P2 note.
+  # ---------------------------------------------------------------------------
+  clarify:
+    id: clarify
+    version: "1.0"
+    model: none
+    max_tokens: ~
+    response_format: none
+    description: "Turn message template for the CLARIFY state — emits conversational prose, not an LLM call."
+    notes: "This is a turn message template, not an LLM call. The call site uses spec.text only; it does not call llm.chat. Included here so all user-facing string templates live in one place (ADR-030 goal)."
+    required_vars: [question]
+    template: |
+      Before I proceed, I need to clarify one thing:
+
+      {question}
+
+      Please provide a specific answer. I will use your response to design the skill correctly.
+      (You can type 'skip' to proceed with my best assumption — but be aware this may affect
+      the quality of the extraction schema.)
+
+  # ---------------------------------------------------------------------------
+  # failure_classifier
+  # Source: conversation.py _FAILURE_CLASSIFIER_PROMPT (line 525)
+  # GATE-LOCKED — validated by test_failure_classifier_gate.py (live LLM, 3 runs)
+  # Gold case: tpm.26ai_fa_db_upgrade — WBS content exists, schema never asked for it
+  # Correct label: MISSING_FIELDS (NOT SOURCE_COVERAGE)
+  #
+  # DO NOT modify template text without:
+  #   1. Recomputing checksum (sha256(template.rstrip('\n').encode('utf-8')))
+  #   2. Re-running test_failure_classifier_gate.py (live LLM, 3 runs must pass)
+  #   3. Updating checksum field below
+  # ---------------------------------------------------------------------------
+  failure_classifier:
+    id: failure_classifier
+    version: "1.0"
+    model: synthesis
+    max_tokens: 512
+    response_format: json_object
+    description: "Diagnose WHY a produced artifact does not match the reference; return a structured failure_class label for S6 routing."
+    notes: "Gate-locked. Anti-bias guard (CRITICAL REASONING RULE) prevents SOURCE_COVERAGE misclassification when synthesisable evidence exists. This text is the validated result of the gate test — changing it without re-passing the gate invalidates the S6 routing guarantee."
+    locked: true
+    checksum: "sha256:aef837cdde856fe83039f19fff816a101fe886187a7ce6f741a39eaab71c1d1f"
+    required_vars: [normalised_intent, schema_properties, capability_inventory, gap_report, missing_sections, thin_sections]
+    template: |
+      You are a Knowledge Builder Framework failure-class classifier. Your job is to
+      diagnose WHY a produced artifact does not match the reference, and return a
+      structured, auditable classification so the framework can route the user to the
+      correct fix state.
+
+      === INPUTS ===
+
+      Normalised intent:
+      {normalised_intent}
+
+      Current schema (fields the skill was designed to extract):
+      {schema_properties}
+
+      Source capability inventory (what each source can provide, with confidence levels):
+      {capability_inventory}
+
+      Comparator gap report:
+      {gap_report}
+
+      Missing sections (present in reference, absent from produced artifact):
+      {missing_sections}
+
+      Thin sections (present in produced artifact but far less content than reference):
+      {thin_sections}
+
+      === FAILURE CLASSES ===
+
+      Choose exactly ONE failure class from this list:
+
+      - MISSING_FIELDS: The missing/thin sections are absent because the SCHEMA never
+        included fields for them. The source capability inventory shows these fields
+        ARE available (confidence=high, medium, or synthesisable) — the data exists
+        in the source but the schema never asked for it.
+
+      - THIN_FIELDS: The fields ARE in the schema, but their extraction instructions
+        produce thin or empty output. The source capability inventory shows the content
+        IS available (confidence=synthesisable is common here — the LLM must aggregate
+        across multiple rows/items but the instruction does not say so).
+
+      - WRONG_LAYOUT: The required sections/fields are present in the schema and the
+        source, but the output artifact has wrong ordering, missing slide structure,
+        wrong column arrangement, or incorrect section grouping.
+
+      - SOURCE_COVERAGE: The missing sections correspond to fields that the source
+        capability inventory marks as confidence=missing or confidence=low with reason
+        "content genuinely absent from source". The content does NOT exist in the
+        source pages in any form — not even as synthesisable fragments.
+
+      - WRONG_SOURCE: A different source page or Confluence space likely has the
+        required content. The current source pages are the wrong ones — the content
+        exists somewhere else, not in the currently configured sources.
+
+      - UNSUPPORTABLE: The missing content cannot be derived from any configured source
+        at all, even with synthesis. Human judgment is required. No automated fix will
+        help.
+
+      === CRITICAL REASONING RULE (anti-bias guard) ===
+
+      Before choosing SOURCE_COVERAGE, you MUST verify: does the source capability
+      inventory show confidence=synthesisable for ANY field related to the missing
+      section? If YES, the content IS present in the source — it just requires synthesis
+      (aggregation/combination) from scattered elements. In that case the correct class
+      is MISSING_FIELDS (the schema never asked for the synthesis) or THIN_FIELDS
+      (the schema asked for it but the instruction did not specify the synthesis logic).
+
+      "No verbatim labelled row for X" does NOT mean the source lacks X. If the
+      capability inventory shows synthesisable evidence (e.g. WBS table rows with
+      status/notes/risk data), the content EXISTS. The failure is in the schema or
+      extraction instruction — NOT in the source coverage.
+
+      Only choose SOURCE_COVERAGE if the capability inventory explicitly shows
+      confidence=missing or confidence=low with a reason stating the content is
+      genuinely absent (e.g. "source page has no risk section", "no milestone dates
+      found anywhere in the page").
+
+      === REQUIRED OUTPUT ===
+
+      Return ONLY a valid JSON object with exactly these fields:
+
+      {{
+        "failure_class": "MISSING_FIELDS|THIN_FIELDS|WRONG_LAYOUT|SOURCE_COVERAGE|WRONG_SOURCE|UNSUPPORTABLE",
+        "confidence": "high|medium|low",
+        "evidence": "Concrete reasoning (2-4 sentences). MUST reference specific fields
+                     from the capability inventory and schema. For example: 'The capability
+                     inventory shows risks (confidence=synthesisable, evidence=WBS rows with
+                     blocked/at-risk notes). The schema has no risks field. Therefore the fix
+                     is to add the field to the schema, not add more source pages.'",
+        "alternative_class": "the second most likely failure class",
+        "why_not_alternative": "1-2 sentences explaining why the alternative class is
+                                ruled out. MUST cite the capability inventory evidence
+                                that makes the alternative implausible."
+      }}
+
+      Rules:
+      - failure_class and confidence are REQUIRED — do not omit them.
+      - evidence and why_not_alternative are REQUIRED and must cite specific inventory entries.
+      - If confidence=low, you are uncertain — note the ambiguity in evidence.
+      - Do NOT choose SOURCE_COVERAGE unless the capability inventory explicitly confirms
+        the content is absent from all sources (confidence=missing with clear reason).
+      - The routing map (code, not your choice) will translate your failure_class to a
+        target state. Your job is diagnosis, not routing.
+
+  # ---------------------------------------------------------------------------
+  # description_synthesis
+  # Source: synthesize_schema.py _DESCRIPTION_SYNTHESIS_PROMPT (line 14)
+  # ---------------------------------------------------------------------------
+  description_synthesis:
+    id: description_synthesis
+    version: "1.0"
+    model: synthesis
+    max_tokens: 2048
+    response_format: json_object
+    description: "Write precise extraction instructions for each field in an extraction schema."
+    required_vars: [artifact_type, persona, intent, field_contexts]
+    template: |
+      You are a Knowledge Builder Framework schema engineer. Your job is to write
+      precise extraction instructions for each field in an extraction schema.
+
+      The schema will be used by an LLM parser to extract structured data from
+      {artifact_type} documents for persona "{persona}".
+
+      User intent: "{intent}"
+
+      For each field below, write a single concise extraction instruction (1-2 sentences)
+      that tells the LLM parser exactly what content to look for and how to format it.
+      Be specific — reference the section/slide title and describe the expected format.
+
+      Fields (with source location in the artifact):
+      {field_contexts}
+
+      Return ONLY a JSON object mapping field_name → extraction_instruction string.
+      Example: {{"schedule_health": "RAG status (Red/Amber/Green) for the schedule, \
+      with a 1-2 sentence justification citing specific milestone dates or blockers."}}
+
+  # ---------------------------------------------------------------------------
+  # review_extract
+  # Source: review.py _REVIEW_EXTRACT_PROMPT (line 242)
+  # ---------------------------------------------------------------------------
+  review_extract:
+    id: review_extract
+    version: "1.0"
+    model: synthesis
+    max_tokens: 4096
+    response_format: json_object
+    description: "Preview extraction: extract structured fields from a source document using the committed schema."
+    required_vars: [field_lines, text]
+    template: |
+      You are extracting structured fields from a source document to preview what an
+      LLM parser would produce when this schema is applied at ingest time.
+
+      Return a single JSON object with EXACTLY these field keys
+      (use empty string "" or empty list [] when a field is genuinely absent —
+      do NOT invent data that is not in the source document):
+
+      {field_lines}
+
+      === Source document ===
+      {text}
+      === End source ===
+
+      Respond with ONLY the JSON object, no prose, no markdown fences.
+
+  # ---------------------------------------------------------------------------
+  # analyze_artifact  [DEPRECATED — legacy ADR-026 state machine]
+  # Source: conversation.py _ANALYZE_ARTIFACT_PROMPT (line 200)
+  # Used only by in-flight sessions on the pre-ADR-027 state machine path.
+  # New sessions never enter ANALYZE_ARTIFACT.
+  # Retained here for completeness (ADR-030 P2 scope: include it, mark deprecated).
+  # ---------------------------------------------------------------------------
+  analyze_artifact:
+    id: analyze_artifact
+    version: "1.0"
+    model: synthesis
+    max_tokens: 2048
+    response_format: json_object
+    description: "DEPRECATED (legacy ADR-026 path). Decide JSON Schema types and extraction instructions from parsed artifact sections. Used only by in-flight sessions on the pre-ADR-027 state machine."
+    notes: "Legacy — retained for in-flight session continuity only. New sessions use design_skill instead. Will be removed when all pre-ADR-027 in-flight sessions have completed."
+    required_vars: [persona, intent, artifact_type, field_contexts]
+    template: |
+      You are a Knowledge Builder Framework schema engineer. An artifact has been parsed \
+      and its structural sections identified.
+
+      Persona: {persona}
+      Intent: "{intent}"
+      Artifact type: {artifact_type}
+
+      Sections / slides found in the artifact:
+      {field_contexts}
+
+      For EACH field listed above, decide:
+      1. The most appropriate JSON Schema type ("string", "integer", "boolean", "array").
+         Use "array" only for genuinely multi-valued list fields. Default to "string".
+      2. A precise 1–2 sentence extraction instruction that tells the LLM parser exactly
+         what content to look for and how to format the output.
+
+      Return ONLY a JSON object mapping field_name → object with "type" and "description":
+      {{
+        "schedule_health": {{
+          "type": "string",
+          "description": "RAG status (Red/Amber/Green) for the schedule, with a 1–2 sentence \
+      justification citing specific milestone dates or blockers from the slide."
+        }}
+      }}

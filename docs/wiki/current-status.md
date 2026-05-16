@@ -11,7 +11,9 @@ status: current
 # Current Status
 
 ## Where we are
-**Phase 1-3 + V3 deployment layer + laptop mode code complete. ADR-028 S1-S6 live. ADR-029 Phases 1+2 complete. ADR-030 design accepted (prompt externalization + harness); implementation blueprint ready for dispatch.** 160+ Python files, ~18K+ LOC, 630+ tests passing.
+**Phase 1-3 + V3 deployment layer + laptop mode code complete. ADR-028 S1-S6 live. ADR-029 Phases 1+2 complete. ADR-030 P2 complete (YAML prompt store authored verbatim); P1 registry in progress.** 160+ Python files, ~18K+ LOC, 630+ tests passing.
+
+ADR-030 P2 complete (2026-05-16): all 12 authorSkill prompts authored verbatim into `framework/config/prompts/` (3 YAML files). `failure_classifier` gate-locked with checksum `sha256:aef837cdde856fe83039f19fff816a101fe886187a7ce6f741a39eaab71c1d1f`. `persona_prompts.yaml` content migrated to `persona_overlays.yaml`. All byte-identity and required_vars checks pass. Merge gate: P2 YAML loads cleanly via P1's PromptRegistry (once P1 is merged). Serial cutover (C1-C4) blocked until P1+P2 both pass.
 
 ADR-030 design accepted (2026-05-16): all 12 authorSkill prompts to be externalized to hot-reloadable versioned YAML (`framework/config/prompts/`), with a `PromptRegistry` loader and `prompt_lab.py` harness CLI. `persona_prompts.yaml` confirmed live and wired; it migrates to `persona_overlays.yaml` in the same change. `_FAILURE_CLASSIFIER_PROMPT` carries a checksum lock; the gate test remains the re-validation gate for any classifier text change. Blueprint: 4 parallel P-streams (P1=registry, P2=YAML, P3=harness, P4=docs) + 4-step serial cutover + G1 gate.
 
