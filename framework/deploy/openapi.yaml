@@ -895,6 +895,26 @@ components:
           $ref: '#/components/schemas/TokenCost'
         skillSuggestion:
           $ref: '#/components/schemas/SkillSuggestion'
+        sourceFetchedOnDemand:
+          type: boolean
+          description: >
+            True if a Confluence page was fetched ephemerally at request time for
+            this response (ADR-032 Option C — ask_parameterized skill with
+            ingest_on_demand: true). The artifact was produced from a
+            non-persisted page fetched on demand; it was never written to
+            WikiMetadataStore or any persistent KB store. Absent or false for
+            all author_fixed skill responses and standard KB retrieval responses.
+        sourceFetchedPageId:
+          type: string
+          description: >
+            The Confluence page ID that was fetched on demand. Present only when
+            sourceFetchedOnDemand is true.
+        latencyNote:
+          type: string
+          description: >
+            Human-readable note about on-demand fetch latency (e.g.
+            "This request fetched a Confluence page on demand (+2–15s).").
+            Present only when sourceFetchedOnDemand is true.
 
     Citation:
       type: object

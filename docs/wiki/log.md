@@ -4,6 +4,34 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] backend-dev | ADR-032 P2-API — source_fetched_on_demand added to OpenAPI AskResponse contract
+
+**Task P2-API complete.** Single commit to origin/main.
+
+**`framework/deploy/openapi.yaml`** — `AskResponse` schema gains three optional fields
+(per ADR-032-impl-plan.md §P2-API, exact field names/types/placement):
+- `sourceFetchedOnDemand` (boolean) — true when an `ask_parameterized` skill ephemerally
+  fetched a Confluence page for this request (ADR-032 Option C; artifact never persisted).
+- `sourceFetchedPageId` (string) — the fetched page ID; present only when `sourceFetchedOnDemand: true`.
+- `latencyNote` (string) — human-readable latency disclosure; present only when `sourceFetchedOnDemand: true`.
+
+All three fields are optional (not in `required`). Existing required fields unchanged.
+
+**`framework/tests/unit/test_openapi_spec.py`** — NEW: 15 tests covering:
+spec file existence, YAML parse, OpenAPI version field, components/schemas presence,
+AskResponse presence, no broken $refs, all three new fields present + correct types,
+new fields are optional, pre-existing required fields unchanged.
+
+**Sanity:** `test_openapi_spec.py` 15/15 passed; `test_prompt_registry.py` 51/51 passed.
+
+**Follow-up (not implemented here — out of scope for P2-API):** The impl-plan notes
+that `framework/deploy/routes/ask.py` (the ask route response builder) must populate
+these three fields when `WorkflowExecutor` returns a result with
+`source_fetched_on_demand: True`. That wiring is owned by the executor/route agent
+(P2-Exec owner); it is not yet done as of this commit.
+
+---
+
 ## [2026-05-16] backend-dev | ADR-032 Phase-2a P1-C + P1-D — source_binding_mode consumed in CLARIFY; VALIDATE enforces source_binding contract
 
 **Phase-2a complete.** Two commits to origin/main (P1-C: 34269ee, P1-D: 7aec84a).
