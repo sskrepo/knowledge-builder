@@ -443,54 +443,65 @@ class TestSpaceAllowListEnforcement:
         assert len(passages) >= 1
         adapter.fetch.assert_called_once()
 
-    def test_bare_numeric_id_triggers_metadata_fetch_for_space_check(self, tmp_path):
-        """When a bare numeric page_id is supplied (no URL), space cannot be determined
-        from the URL alone.  Per ADR-032-impl-plan.md §Known Gaps: the executor must
-        call fetch_metadata (or fall back to fetch) to determine the space, then enforce
-        the allow-list before extraction."""
+    def test_bare_numeric_id_single_fetch_for_space_check(self, tmp_path):
+        """D2 fix: when a bare numeric page_id is supplied (no URL), the executor
+        uses a SINGLE adapter.fetch() call to obtain both space metadata and content.
+        No fetch_metadata() is called (that method does not exist on any adapter).
+        fetch() is called exactly once; space is read from raw_item.metadata["space"]
+        (a string, as emcp_direct.normalize() sets it).  Allow-listed space → passages
+        returned; fetch called once, no second fetch."""
         skill_yaml = _make_skill_yaml(tmp_path, space_allow_list=["FA", "PROJ"])
-        adapter = MagicMock()
-        # Adapter has fetch_metadata that returns the space
-        adapter.fetch_metadata.return_value = {"space": "FA", "title": "Test"}
-        raw_item = MagicMock()
-        raw_item.metadata = {"page_id": PAGE_ID, "space": "FA", "title": "Test",
-                             "url": f"https://conf.example.com/pages/{PAGE_ID}"}
-        raw_item.payload = {"body": "Test page body content"}
-        raw_item.text = "Test page body content"
-        adapter.fetch.return_value = raw_item
-
+        adapter = _make_adapter(PAGE_ID, SPACE_KEY)  # metadata["space"] = "FA"
         executor = _make_executor(adapter)
 
         passages = executor._retrieve_for_inputs(
             cfg=yaml.safe_load(skill_yaml.read_text()),
-            inputs={"page_id": PAGE_ID},  # bare numeric ID
+            inputs={"page_id": PAGE_ID},  # bare numeric ID — no URL to parse
             sources=[],
         )
-        # fetch_metadata was called to determine space (no URL to parse)
-        adapter.fetch_metadata.assert_called_once()
+        # fetch() called exactly ONCE (single-fetch model — D2 fix)
+        assert adapter.fetch.call_count == 1, (
+            f"D2: fetch must be called exactly once for bare numeric ID; "
+            f"got call_count={adapter.fetch.call_count}"
+        )
+        # fetch_metadata must NOT be called (it does not exist on real adapters)
+        assert not hasattr(adapter, "fetch_metadata") or adapter.fetch_metadata.call_count == 0, (
+            "D2: fetch_metadata must NOT be called; single-fetch model uses fetch() only"
+        )
         assert len(passages) >= 1
+        assert passages[0].get("metadata", {}).get("space") == SPACE_KEY
 
-    def test_bare_numeric_id_space_not_allowed_raises_before_extraction(self, tmp_path):
-        """Bare numeric page_id in a restricted space → metadata fetch, then
-        hard-fail BEFORE any content extraction (trust enforced before extraction)."""
+    def test_bare_numeric_id_space_not_allowed_raises_after_single_fetch(self, tmp_path):
+        """D2 fix: bare numeric page_id in a restricted space → single fetch(), then
+        space check BEFORE extraction.  Fetched content is discarded (never extracted,
+        never cached).  Hard-fail with allow-list violation message.
+        One fetch total; no second fetch; no extraction."""
         skill_yaml = _make_skill_yaml(tmp_path, space_allow_list=["FA", "PROJ"])
-        adapter = MagicMock()
-        # Adapter fetch_metadata returns a restricted space
-        adapter.fetch_metadata.return_value = {"space": "SECRET", "title": "Test"}
-
+        adapter = _make_adapter(PAGE_ID, "SECRET")  # metadata["space"] = "SECRET"
         executor = _make_executor(adapter)
 
         with pytest.raises(ConfluencePageNotInKBError) as exc_info:
             executor._retrieve_for_inputs(
                 cfg=yaml.safe_load(skill_yaml.read_text()),
-                inputs={"page_id": PAGE_ID},
+                inputs={"page_id": PAGE_ID},  # bare numeric ID
                 sources=[],
             )
 
-        # fetch (full content) must NOT be called — space check failed before extraction
-        adapter.fetch.assert_not_called()
+        # fetch() called once (to determine space) — D2 single-fetch model
+        assert adapter.fetch.call_count == 1, (
+            "D2: fetch must be called exactly once even when space is not allowed; "
+            f"got call_count={adapter.fetch.call_count}"
+        )
         msg = str(exc_info.value)
-        assert "SECRET" in msg or "allow-list" in msg.lower()
+        assert "SECRET" in msg or "allow-list" in msg.lower(), (
+            f"Error must mention the offending space or allow-list; got: {msg!r}"
+        )
+        # Content must NOT be cached (disallowed content never persisted)
+        from framework.workflow_runtime.executor import _ephemeral_cache
+        cache_key = f"ephemeral:{PAGE_ID}"
+        assert _ephemeral_cache.get(cache_key, 300) is None, (
+            "D2: disallowed content must NOT be cached"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -866,3 +877,137 @@ class TestWorkflowExecutorConstructor:
         assert executor.retrievers is retrievers
         assert executor.shim_kb is shim_kb
         assert executor.confluence_adapter is None  # default
+
+
+# ---------------------------------------------------------------------------
+# D2 single-fetch model: additional assertions
+# ---------------------------------------------------------------------------
+
+class TestD2SingleFetchModel:
+    """ADR-032 D2 fix — verify the single adapter.fetch() model.
+
+    Before D2 fix: _retrieve_ask_parameterized called fetch_metadata(page_id)
+    which does not exist on any Confluence adapter, causing AttributeError.
+    After D2 fix: a single fetch() call provides both space info and content.
+    Space check happens BEFORE extraction even though content is already in hand.
+    Disallowed content is never extracted, never cached, never persisted.
+    """
+
+    def test_single_fetch_for_allowed_space_url_form(self, tmp_path):
+        """URL form: space extractable pre-fetch → fetch called once, no 2nd fetch."""
+        skill_yaml = _make_skill_yaml(tmp_path, space_allow_list=["FA"])
+        adapter = _make_adapter(PAGE_ID, SPACE_KEY)
+        executor = _make_executor(adapter)
+
+        url = f"https://conf.example.com/spaces/{SPACE_KEY}/pages/{PAGE_ID}/My+Page"
+        executor._retrieve_for_inputs(
+            cfg=yaml.safe_load(skill_yaml.read_text()),
+            inputs={"page_id": url},
+            sources=[],
+        )
+        assert adapter.fetch.call_count == 1, (
+            f"D2: fetch must be called exactly once; got {adapter.fetch.call_count}"
+        )
+
+    def test_space_not_allowed_content_never_cached(self, tmp_path):
+        """D2: when space is not allow-listed, fetched content must NEVER be cached."""
+        skill_yaml = _make_skill_yaml(tmp_path, space_allow_list=["FA"])
+        # Adapter returns a page in RESTRICTED space
+        adapter = _make_adapter(PAGE_ID, "RESTRICTED")
+        executor = _make_executor(adapter)
+
+        with pytest.raises(ConfluencePageNotInKBError):
+            executor._retrieve_for_inputs(
+                cfg=yaml.safe_load(skill_yaml.read_text()),
+                inputs={"page_id": PAGE_ID},  # bare numeric — space determined post-fetch
+                sources=[],
+            )
+
+        cache_key = f"ephemeral:{PAGE_ID}"
+        assert _ephemeral_cache.get(cache_key, 300) is None, (
+            "D2: disallowed content must never be cached (no persist invariant)"
+        )
+
+    def test_space_not_allowed_content_never_extracted(self, tmp_path):
+        """D2: when space is not allow-listed, LLM extraction must NOT be called."""
+        skill_yaml = _make_skill_yaml(tmp_path, space_allow_list=["FA"])
+        adapter = _make_adapter(PAGE_ID, "SECRET")
+        executor = _make_executor(adapter)
+
+        # The mock LLM tracks calls
+        llm_call_count_before = executor.llm.chat.call_count
+
+        with pytest.raises(ConfluencePageNotInKBError):
+            executor._retrieve_for_inputs(
+                cfg=yaml.safe_load(skill_yaml.read_text()),
+                inputs={"page_id": PAGE_ID},
+                sources=[],
+            )
+
+        # LLM must NOT have been called (space check failed before extraction)
+        assert executor.llm.chat.call_count == llm_call_count_before, (
+            "D2: LLM extraction must NOT run for disallowed space"
+        )
+
+
+# ---------------------------------------------------------------------------
+# P2-API: source_fetched_on_demand wiring in execute() result
+# ---------------------------------------------------------------------------
+
+class TestP2ApiResponseWiring:
+    """ADR-032 P2-API — verify execute() result dict includes ephemeral fetch signals."""
+
+    def _run_execute(self, tmp_path) -> dict:
+        """Run execute() end-to-end with mocked render/deliver and return the result."""
+        skill_yaml = _make_skill_yaml(tmp_path)
+        adapter = _make_adapter(PAGE_ID, SPACE_KEY)
+        executor = _make_executor(adapter)
+
+        # Mock render and deliver so we don't need real templates
+        executor._render = lambda cfg, data: b"fake artifact"
+        executor._deliver = lambda cfg, artifact, inputs: {
+            "kind": "filesystem", "path": f"/tmp/test.eml", "url": "",
+        }
+        executor._record_cost = lambda *a, **kw: None
+        executor._record_eval_entry = lambda *a, **kw: None
+
+        url = f"https://conf.example.com/spaces/{SPACE_KEY}/pages/{PAGE_ID}/"
+        return executor.execute(
+            skill_yaml,
+            inputs={"page_id": url, "input": "draft email"},
+        )
+
+    def test_execute_sets_source_fetched_on_demand_true(self, tmp_path):
+        """execute() result must include source_fetched_on_demand=True for
+        ask_parameterized skills where an ephemeral fetch occurred."""
+        result = self._run_execute(tmp_path)
+        assert result.get("source_fetched_on_demand") is True, (
+            f"P2-API: source_fetched_on_demand must be True; result keys: {list(result)}"
+        )
+
+    def test_execute_sets_source_fetched_page_id(self, tmp_path):
+        """execute() result must include source_fetched_page_id with the fetched page id."""
+        result = self._run_execute(tmp_path)
+        assert result.get("source_fetched_page_id") == PAGE_ID, (
+            f"P2-API: source_fetched_page_id must be {PAGE_ID!r}; got {result.get('source_fetched_page_id')!r}"
+        )
+
+    def test_execute_no_ephemeral_flag_absent_for_author_fixed(self, tmp_path):
+        """For author_fixed skills, source_fetched_on_demand must be absent/False."""
+        skill_yaml = _make_author_fixed_skill_yaml(tmp_path)
+        executor = _make_executor()
+        executor._retrieve_for_inputs = lambda cfg, inputs, sources: [{
+            "text": "fixed content",
+            "citation": "wiki://fixed",
+            "metadata": {"page_id": "999", "ephemeral": False},
+            "kb": "tpm.fixed_kb",
+        }]
+        executor._render = lambda cfg, data: b"fake"
+        executor._deliver = lambda cfg, artifact, inputs: {"kind": "filesystem", "path": "/tmp/x"}
+        executor._record_cost = lambda *a, **kw: None
+        executor._record_eval_entry = lambda *a, **kw: None
+
+        result = executor.execute(skill_yaml, inputs={"input": "query"})
+        assert not result.get("source_fetched_on_demand"), (
+            "P2-API: source_fetched_on_demand must be absent or False for author_fixed"
+        )

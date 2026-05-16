@@ -40,6 +40,79 @@ ahead of the P1/P2 build.
 - Tests: 40 new tests in `test_executor_ephemeral.py`; 4 new tests in
   `test_executor_source_guard.py` (conditional guard realignment, 28 total).
 
+**Phase-4 e2e defects D1 and D2 fixed — 2026-05-16 (this commit).**
+
+### D1 — ask route never threaded page ref to executor inputs (fixed)
+
+Root cause: `maybe_render_artifact` in `framework/deploy/routes/ask.py` always
+passed `inputs={"input": question}` to `executor.execute()`. For `ask_parameterized`
+skills, `_retrieve_ask_parameterized()` reads `inputs[source_binding.input_param]`
+(e.g., `inputs["page_id"]`) to get the page reference — so it was always `""`,
+causing the "Requested Confluence page  cannot be used" message with a blank page id.
+
+Fix (`framework/deploy/routes/ask.py`): after loading the skill YAML, if
+`source_binding.mode == "ask_parameterized"`:
+1. Read `input_param = source_binding["input_param"]`.
+2. Resolve the page reference with precedence: (a) explicit body field matching
+   `input_param` (highest priority), (b) extracted from the question string via
+   `_extract_confluence_page_ids` (handles URL, pageId=, BUG-990fe space-form).
+3. Pass `inputs = {"input": question, input_param: page_ref}`.
+4. If no page ref resolvable: hard-fail with actionable message, never execute
+   with empty page id, never substitute. (ADR-031 no-silent-degradation preserved.)
+5. `author_fixed` skills: `inputs={"input": question}` unchanged.
+
+### D2 — fetch_metadata() does not exist on any Confluence adapter (fixed)
+
+Root cause: `_retrieve_ask_parameterized` called
+`self.confluence_adapter.fetch_metadata(page_id)` for bare numeric page IDs (when
+the space cannot be determined from the URL alone). No adapter implements this
+method — only `fetch(RawItemRef) -> RawItem`. This caused `AttributeError` which
+the e2e showed as "FileNotFoundError ... determine its space for allow-list".
+
+Fix (`framework/workflow_runtime/executor.py`): replaced the two-step
+fetch_metadata + fetch pattern with a **single** `adapter.fetch()` call:
+- For URL-form refs: space is extracted from URL before fetch (no API call needed).
+  If space is not allow-listed, reject BEFORE fetch (no network call).
+- For bare numeric IDs: single `adapter.fetch(RawItemRef(...))` obtains both space
+  info and page content in one round-trip.
+- Space key is read from `raw_item.metadata["space"]` — a **string** value (e.g.
+  "FA"), as confirmed from `emcp_direct.normalize()`:
+  `meta_dict["space"] = (meta.get("space") or {}).get("key")`.
+  Both string and dict forms handled defensively.
+- Space allow-list check runs AFTER the single fetch but BEFORE LLM extraction.
+  If the space is not allow-listed: fetched content is discarded immediately (never
+  passed to LLM, never cached, never persisted). No-persist invariant preserved.
+- One round-trip total; no double-fetch.
+
+Trust enforcement order (post-D2):
+  1. `ingest_on_demand` must be true.
+  2. `confluence_adapter` must not be None.
+  3. URL-form space check BEFORE fetch (if space deducible from URL).
+  4. TTL cache check — return cached if hit (skip fetch).
+  5. Single `adapter.fetch()` call.
+  6. Post-fetch space allow-list check BEFORE extraction (discard+fail if not allowed).
+  7. LLM extraction on already-fetched content.
+
+### P2-API response fields wired
+
+`executor.execute()` now returns `source_fetched_on_demand: True` and
+`source_fetched_page_id: <id>` in its result dict when an ephemeral fetch occurred
+(detected by `passage.metadata.ephemeral == True`). `maybe_render_artifact` in
+`ask.py` reads these and sets `result["source_fetched_on_demand"]`,
+`result["source_fetched_page_id"]`, `result["latency_note"]` on the result dict.
+`_build_ask_response` emits these as snake_case keys; `to_camel_response` serializes
+them to `sourceFetchedOnDemand`, `sourceFetchedPageId`, `latencyNote` per the
+P2-API OpenAPI contract (commit cfea4db). Absent/false for `author_fixed` skills.
+
+Tests updated:
+- `test_executor_ephemeral.py`: D2 space-determination tests updated to single-fetch
+  model (2 tests replaced: `test_bare_numeric_id_single_fetch_for_space_check`,
+  `test_bare_numeric_id_space_not_allowed_raises_after_single_fetch`); new D2 test
+  class (`TestD2SingleFetchModel`, 3 tests); new P2-API test class
+  (`TestP2ApiResponseWiring`, 3 tests).
+- `test_ask_route_ask_parameterized.py` (NEW, 13 tests): D1 input-threading tests,
+  author_fixed unchanged, no-page-ref hard-fail, P2-API response wiring.
+
 ---
 
 ## A. The Observed Failure

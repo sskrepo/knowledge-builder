@@ -435,7 +435,20 @@ class WorkflowExecutor:
         # 10. Eval gold-set recording
         self._record_eval_entry(skill_name, inputs, output_path)
 
-        return {
+        # ADR-032 P2-API: detect ephemeral fetch from passages metadata.
+        # Any passage with metadata.ephemeral=True indicates an ask_parameterized
+        # ephemeral fetch occurred.  Propagate to caller (ask.py response builder).
+        ephemeral_fetched = any(
+            p.get("metadata", {}).get("ephemeral") is True for p in passages
+        )
+        ephemeral_page_id = ""
+        if ephemeral_fetched:
+            for p in passages:
+                if p.get("metadata", {}).get("ephemeral") is True:
+                    ephemeral_page_id = str(p.get("metadata", {}).get("page_id", ""))
+                    break
+
+        result: dict = {
             "skill": skill_name,
             "persona": persona,
             "inputs": inputs,
@@ -448,6 +461,11 @@ class WorkflowExecutor:
                 "deliver_ms": deliver_ms,
             },
         }
+        # ADR-032 P2-API response fields — present only for ephemeral fetches.
+        if ephemeral_fetched:
+            result["source_fetched_on_demand"] = True
+            result["source_fetched_page_id"] = ephemeral_page_id
+        return result
 
     # ------------------------------------------------------------------
     def _record_cost(self, skill_name: str, persona: str, metrics: dict) -> None:
@@ -654,14 +672,32 @@ class WorkflowExecutor:
 
         This method implements Option C (ADR-032 §C) for ask_parameterized skills.
 
-        Trust enforcement order (all checks BEFORE any network call):
+        Trust enforcement order:
           1. ingest_on_demand must be true in source_binding.
           2. self.confluence_adapter must not be None (adapter must be configured).
-          3. space_allow_list check: the page's Confluence space must be in the
-             allow-list.  If the space cannot be determined from the URL alone,
-             we fetch metadata-only to learn the space, then enforce (per
-             ADR-032-impl-plan.md §Known Gaps: "fetch metadata-only to learn
-             the space then enforce").  On violation: hard-fail BEFORE extraction.
+          3. TTL cache check — return cached passages if present (skip fetch).
+          4. Single adapter.fetch() call — obtains both space metadata and content
+             in one round-trip (D2 fix: no fetch_metadata(); emcp_direct.fetch()
+             returns RawItem where metadata["space"] is already the space key string).
+          5. space_allow_list check on the fetched space key — enforced BEFORE any
+             LLM extraction.  If the page is fetched but its space is not allow-
+             listed: discard the content, hard-fail, never extract, never cache.
+          6. LLM extraction on the already-fetched content — no second fetch.
+
+        One round-trip total (D2 fix — ADR-032 D2).
+
+        The space check (step 5) runs AFTER the single fetch but BEFORE extraction.
+        If the space is not allow-listed the fetched content is discarded immediately
+        (never passed to the LLM, never written to the cache).  This preserves the
+        no-persist and no-extract-before-allow-list invariants even with the
+        single-fetch model.
+
+        emcp_direct.fetch() return shape (confirmed from emcp_direct.normalize()):
+          raw_item.metadata["space"] = str  — the space key (e.g. "FA")
+            extracted from meta["space"]["key"] in the MCP server response.
+          raw_item.metadata["title"]  = str
+          raw_item.metadata["url"]    = str | None
+          raw_item.payload["body"]["storage"]["value"] = str  — page body (markdown)
 
         NEVER writes to WikiMetadataStore, IncidentVectorStore, or any other
         persistent store.  Ephemeral content is cached in-process only
@@ -715,88 +751,35 @@ class WorkflowExecutor:
             )
 
         # ----------------------------------------------------------------
-        # Trust check 3: space allow-list — enforced BEFORE any extraction.
-        #
-        # Per ADR-032-impl-plan.md §Known Gaps: if the space key cannot be
-        # determined from the URL (bare numeric page_id supplied), we fetch
-        # metadata-only first to learn the space, then enforce the allow-list.
-        # This adds one API call before extraction on first fetch (before TTL
-        # cache is warm), but is safe: no extraction occurs before the check.
+        # Space key from URL — fast path (no API call needed).
+        # For bare numeric IDs the space cannot be determined without a fetch;
+        # we defer the space check to AFTER the single fetch (step 5 below).
         # ----------------------------------------------------------------
-        if space_allow_list:
-            space_key = _extract_space_key_from_url(page_ref)
-            if space_key is None:
-                # Bare numeric ID — must fetch metadata to determine space.
-                # Fetch is metadata-only at this point; extraction has NOT started.
-                log.debug(
-                    "ask_parameterized: cannot determine space from bare page_id=%s; "
-                    "fetching metadata to enforce space allow-list before extraction.",
-                    page_id,
-                )
-                try:
-                    raw_meta = self.confluence_adapter.fetch_metadata(page_id)
-                    space_key = (raw_meta or {}).get("space") or (raw_meta or {}).get("spaceKey")
-                except AttributeError:
-                    # Adapter does not support fetch_metadata — fall back to full fetch
-                    # and extract space from payload.  Trust check still runs before extraction.
-                    try:
-                        raw_item = self.confluence_adapter.fetch(
-                            _make_raw_item_ref(page_id)
-                        )
-                        space_key = (
-                            (raw_item.metadata or {}).get("space")
-                            or (raw_item.metadata or {}).get("spaceKey")
-                        )
-                        # Cache the full item to avoid a second fetch below
-                        _prefetched_item = raw_item  # noqa: F841  (used in fast path)
-                    except Exception as exc:
-                        raise ConfluencePageNotInKBError(
-                            page_id=page_id,
-                            skill_name=skill_name,
-                            reason=(
-                                f"Could not fetch Confluence page {page_id} to determine "
-                                f"its space for allow-list enforcement: {type(exc).__name__}. "
-                                "Verify the page exists and you have access."
-                            ),
-                        ) from None
-                except Exception as exc:
-                    raise ConfluencePageNotInKBError(
-                        page_id=page_id,
-                        skill_name=skill_name,
-                        reason=(
-                            f"Could not fetch metadata for Confluence page {page_id} to "
-                            f"determine its space: {type(exc).__name__}. "
-                            "Verify the page exists and you have access."
-                        ),
-                    ) from None
+        space_key_from_url = _extract_space_key_from_url(page_ref)
 
-            if space_key and space_key not in space_allow_list:
+        # Early space check: if space is deducible from URL and is not allowed,
+        # reject BEFORE making any API call (trust check before network call).
+        if space_allow_list and space_key_from_url is not None:
+            if space_key_from_url not in space_allow_list:
                 log.warning(
-                    "ask_parameterized trust check FAILED: page_id=%s space=%r not in "
-                    "allow-list %s for skill=%s. Hard-failing — adapter NOT called.",
-                    page_id, space_key, space_allow_list, skill_name,
+                    "ask_parameterized trust check FAILED (pre-fetch): page_id=%s "
+                    "space=%r not in allow-list %s for skill=%s. "
+                    "Hard-failing — adapter NOT called.",
+                    page_id, space_key_from_url, space_allow_list, skill_name,
                 )
                 raise ConfluencePageNotInKBError(
                     page_id=page_id,
                     skill_name=skill_name,
                     reason=(
-                        f"Confluence space '{space_key}' is not in the skill's allow-list "
-                        f"{space_allow_list}. Contact the skill author to add this space "
-                        "to source_binding.space_allow_list."
+                        f"Confluence space '{space_key_from_url}' is not in the skill's "
+                        f"allow-list {space_allow_list}. Contact the skill author to add "
+                        "this space to source_binding.space_allow_list."
                     ),
-                )
-            elif space_key is None:
-                # Could not determine space even after metadata fetch — log warning
-                # and proceed (space_allow_list is a best-effort check for unknown spaces).
-                log.warning(
-                    "ask_parameterized: could not determine space key for page_id=%s — "
-                    "proceeding without space allow-list check (space_allow_list=%s).",
-                    page_id, space_allow_list,
                 )
 
         # ----------------------------------------------------------------
         # In-process TTL cache check — skip fetch if recently fetched.
-        # Key: "ephemeral:{page_id}" (content_hash added after fetch).
+        # Key: "ephemeral:{page_id}".
         # ----------------------------------------------------------------
         cache_key = f"ephemeral:{page_id}"
         cached = _ephemeral_cache.get(cache_key, ttl)
@@ -809,8 +792,13 @@ class WorkflowExecutor:
             return cached
 
         # ----------------------------------------------------------------
-        # Ephemeral fetch — NEVER writes to WikiMetadataStore or any
-        # persistent store.  Only _ephemeral_cache.put() below stores this.
+        # D2 FIX — Single adapter.fetch() call (ADR-032 D2).
+        #
+        # emcp_direct.fetch() returns a RawItem where metadata["space"] is
+        # already the space key string (e.g. "FA") — emcp_direct.normalize()
+        # sets meta_dict["space"] = (meta.get("space") or {}).get("key").
+        # No fetch_metadata() method exists on ANY adapter (D2 root cause).
+        # One round-trip total: fetch() provides both space info and content.
         #
         # INVARIANT: do NOT add calls to WikiMetadataStore.add(),
         # IncidentVectorStore.upsert(), or any other persistent store in
@@ -830,6 +818,49 @@ class WorkflowExecutor:
                 ),
             ) from None
 
+        # ----------------------------------------------------------------
+        # Space allow-list check on fetched space key — BEFORE any extraction.
+        #
+        # emcp_direct sets raw_item.metadata["space"] to the space key string.
+        # We also handle the dict form {"key": "FA"} defensively.
+        # If the space is not allow-listed: discard fetched content, hard-fail,
+        # never extract, never cache.  The content is NOT passed to the LLM.
+        # ----------------------------------------------------------------
+        raw_meta = raw_item.metadata or {}
+        space_val = raw_meta.get("space") or raw_meta.get("spaceKey") or ""
+        # Handle both string form ("FA") and dict form ({"key": "FA"})
+        if isinstance(space_val, dict):
+            fetched_space: str = space_val.get("key") or space_val.get("spaceKey") or ""
+        else:
+            fetched_space = str(space_val)
+
+        if space_allow_list and fetched_space and fetched_space not in space_allow_list:
+            log.warning(
+                "ask_parameterized trust check FAILED (post-fetch): page_id=%s "
+                "space=%r not in allow-list %s for skill=%s. "
+                "Discarding fetched content — never extracted, never cached.",
+                page_id, fetched_space, space_allow_list, skill_name,
+            )
+            # Discard fetched content — trust invariant: extraction never started.
+            raise ConfluencePageNotInKBError(
+                page_id=page_id,
+                skill_name=skill_name,
+                reason=(
+                    f"Confluence space '{fetched_space}' is not in the skill's allow-list "
+                    f"{space_allow_list}. Contact the skill author to add this space "
+                    "to source_binding.space_allow_list."
+                ),
+            )
+
+        if space_allow_list and not fetched_space:
+            # Could not determine space from fetch response — log warning and proceed.
+            log.warning(
+                "ask_parameterized: could not determine space key for page_id=%s from "
+                "fetch response — proceeding without space allow-list check "
+                "(space_allow_list=%s).",
+                page_id, space_allow_list,
+            )
+
         # Extract page body text from adapter response shape.
         body_text = _extract_body_text(raw_item)
         if not body_text:
@@ -844,14 +875,6 @@ class WorkflowExecutor:
 
         # Content hash for cache key refinement (used in audit log + future dedup).
         content_hash = hashlib.sha256(body_text.encode("utf-8", errors="replace")).hexdigest()[:16]
-
-        # Determine space from fetched metadata (if not already known from URL).
-        fetched_space = (
-            (raw_item.metadata or {}).get("space")
-            or (raw_item.metadata or {}).get("spaceKey")
-            or space_key
-            or ""
-        )
 
         # Schema-bounded LLM extraction — uses the skill's authored schema.
         # Same _llm_extract_fields path as the INGEST/synthesize flow.

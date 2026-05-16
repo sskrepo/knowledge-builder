@@ -100,13 +100,15 @@ async def ask_knowledge_base(req: Request):
     )
 
     # Single choke point — used by both REST + MCP handlers.
-    maybe_render_artifact(req.app.state, result, question)
+    # Pass body so maybe_render_artifact can read explicit page_id field (D1).
+    maybe_render_artifact(req.app.state, result, question, body=body)
 
     response = _build_ask_response(result, consumer)
     return to_camel_response(response)
 
 
-def maybe_render_artifact(app_state, result: dict, question: str) -> None:
+def maybe_render_artifact(app_state, result: dict, question: str,
+                          body: dict | None = None) -> None:
     """If tier-1 matched a workflow_skill with response_mode=artifact_url,
     run the WorkflowExecutor to render the artifact (PPT/DOCX/etc.) and
     mutate `result` in place with a `delivery` dict for the response builder.
@@ -115,6 +117,18 @@ def maybe_render_artifact(app_state, result: dict, question: str) -> None:
     the MCP tool handler can use a single call without re-plumbing return
     values. Failures are logged and the result is left untouched — the
     text answer always reaches the user even if rendering fails.
+
+    ADR-032 D1 fix: for ask_parameterized skills, the skill's
+    source_binding.input_param is resolved and threaded into the executor
+    inputs dict.  The page reference is resolved with this precedence:
+      1. Explicit body field matching input_param (e.g. body["page_id"]).
+      2. Extracted from the question string using _extract_confluence_page_ids.
+    If no page ref can be resolved for an ask_parameterized skill, the call
+    hard-fails with an actionable message (never executes with an empty page id).
+
+    ADR-032 P2-API: when the executor signals source_fetched_on_demand=True,
+    the response fields sourceFetchedOnDemand, sourceFetchedPageId, and
+    latencyNote are populated in `result` for the response builder.
 
     Implementation notes:
       - WorkflowExecutor.execute() runs its own retrieve → synthesize →
@@ -163,20 +177,98 @@ def maybe_render_artifact(app_state, result: dict, question: str) -> None:
         log.warning("render: app.state.workflow_executor missing — cannot render")
         return
 
+    # -----------------------------------------------------------------------
+    # ADR-032 D1 fix: build the inputs dict with the page ref threaded in
+    # for ask_parameterized skills.
+    #
+    # author_fixed skills: inputs={"input": question} — unchanged behavior.
+    # ask_parameterized skills: inputs={"input": question, input_param: page_ref}
+    #   where page_ref is resolved with precedence:
+    #     1. Explicit body field matching input_param (highest priority).
+    #     2. Extracted from the question string via _extract_confluence_page_ids.
+    #   If neither yields a page ref: hard-fail with actionable message.
+    #   Never execute with an empty page id (no silent substitution).
+    # -----------------------------------------------------------------------
+    source_binding = cfg.get("source_binding") or {}
+    sb_mode = source_binding.get("mode", "author_fixed")
+    inputs: dict = {"input": question}
+
+    if sb_mode == "ask_parameterized":
+        from ...workflow_runtime.executor import (
+            ConfluencePageNotInKBError,
+            _extract_confluence_page_ids,
+        )
+        input_param = source_binding.get("input_param", "page_id")
+
+        # Priority 1: explicit body field (e.g. body["page_id"])
+        page_ref: str = ""
+        if body and input_param in body and body[input_param]:
+            page_ref = str(body[input_param]).strip()
+            log.debug(
+                "render: ask_parameterized page_ref from body[%r]=%r",
+                input_param, page_ref,
+            )
+
+        # Priority 2: extract from question string
+        if not page_ref:
+            extracted_ids = _extract_confluence_page_ids({"input": question})
+            if extracted_ids:
+                # Use the full question text as the page_ref so _resolve_page_id
+                # in the executor can extract the numeric ID from the URL/pageId= form.
+                # _extract_confluence_page_ids already extracted the ID; pass it directly.
+                page_ref = extracted_ids[0]
+                log.debug(
+                    "render: ask_parameterized page_ref extracted from question: %r",
+                    page_ref,
+                )
+
+        if not page_ref:
+            # No page ref resolvable — hard-fail, never execute with empty id.
+            log.warning(
+                "render: ask_parameterized skill %s.%s requires a page ref "
+                "(input_param=%r) but none found in body or question — "
+                "hard-failing (no silent substitution).",
+                persona, skill_name, input_param,
+            )
+            result["answer"] = {
+                "Answer": (
+                    f"Skill '{skill_name}' requires a Confluence page reference "
+                    f"(field: '{input_param}'). Include the page URL or pageId in "
+                    "your request and retry."
+                )
+            }
+            result["tier"] = 4
+            result["tier_description"] = "source_not_available"
+            result["source_not_available"] = {
+                "page_id": "",
+                "skill": skill_name,
+                "resolution": (
+                    f"Provide '{input_param}' in the request body or embed the "
+                    "Confluence URL in your question."
+                ),
+            }
+            return
+
+        inputs[input_param] = page_ref
+        log.info(
+            "render: ask_parameterized skill %s.%s inputs[%r]=%r threaded",
+            persona, skill_name, input_param, page_ref,
+        )
+
     log.info(
         "render: invoking WorkflowExecutor for tier-1 skill %s.%s (response_mode=%s)",
         persona, skill_name, response_mode,
     )
     try:
-        exec_result = executor.execute(skill_yaml_path, inputs={"input": question})
+        exec_result = executor.execute(skill_yaml_path, inputs=inputs)
     except Exception as exc:  # noqa: BLE001
         from ...workflow_runtime.executor import ConfluencePageNotInKBError
         if isinstance(exc, ConfluencePageNotInKBError):
-            # ADR-032 P3: source-not-available hard-fail — mutate result so the
+            # ADR-032 P3/D1: source-not-available hard-fail — mutate result so the
             # consumer receives the actionable message rather than a silent empty
-            # artifact. Override the tier-1 answer with the P3 error text.
+            # artifact. Override the tier-1 answer with the error text.
             log.warning(
-                "render: P3 guard triggered for page %s (skill=%s) — "
+                "render: source-not-available hard-fail for page %s (skill=%s) — "
                 "surfacing source_not_available to consumer",
                 exc.page_id, exc.skill_name,
             )
@@ -205,6 +297,23 @@ def maybe_render_artifact(app_state, result: dict, question: str) -> None:
         result["delivery"].get("path") or result["delivery"].get("url"),
         persona, skill_name, result["delivery"].get("render_ms"),
     )
+
+    # ADR-032 P2-API: wire ephemeral fetch disclosure fields into result.
+    # The executor sets source_fetched_on_demand=True when an ask_parameterized
+    # ephemeral fetch occurred.  The response builder (_build_ask_response) will
+    # emit sourceFetchedOnDemand/sourceFetchedPageId/latencyNote to the caller.
+    if exec_result.get("source_fetched_on_demand"):
+        result["source_fetched_on_demand"] = True
+        result["source_fetched_page_id"] = exec_result.get("source_fetched_page_id", "")
+        result["latency_note"] = (
+            "This request fetched a Confluence page on demand (+2–15s). "
+            "The page was not written to the knowledge base."
+        )
+        log.info(
+            "render: ephemeral fetch disclosed — sourceFetchedOnDemand=true "
+            "page_id=%r skill=%s.%s",
+            result["source_fetched_page_id"], persona, skill_name,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -261,12 +370,27 @@ def _build_ask_response(result: dict, consumer) -> dict:
 
     # Surface the rendered artifact (PPT/DOCX/etc.) when WorkflowExecutor ran
     # for a tier-1 skill that declared response_mode=artifact_url. See
-    # _maybe_render_artifact in this file.
+    # maybe_render_artifact in this file.
     delivery = result.get("delivery") or {}
     if delivery.get("path") or delivery.get("url"):
         response["artifact_url"] = delivery.get("url") or ""
         response["artifact_path"] = delivery.get("path") or ""
         response["artifact_kind"] = delivery.get("kind") or ""
+
+    # ADR-032 P2-API: surface ephemeral fetch disclosure fields.
+    # Emitted only when maybe_render_artifact flagged an ask_parameterized
+    # ephemeral fetch.  Absent/false for author_fixed skills.
+    # Serializer (to_camel_response) converts these to camelCase:
+    #   source_fetched_on_demand  → sourceFetchedOnDemand
+    #   source_fetched_page_id    → sourceFetchedPageId
+    #   latency_note              → latencyNote
+    if result.get("source_fetched_on_demand"):
+        response["source_fetched_on_demand"] = True
+        response["source_fetched_page_id"] = result.get("source_fetched_page_id", "")
+        response["latency_note"] = result.get(
+            "latency_note",
+            "This request fetched a Confluence page on demand (+2–15s).",
+        )
 
     # Tier 4: attach skill suggestion and/or requestId (content-filter path)
     if tier == 4:

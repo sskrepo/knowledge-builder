@@ -4,6 +4,32 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] backend-dev | ADR-032 Phase-4 e2e D1+D2 fixed + P2-API response wired
+
+**D1 (ask route input threading):** `maybe_render_artifact` in
+`framework/deploy/routes/ask.py` now detects `ask_parameterized` mode, resolves the
+page ref (body field > question extraction), and passes `inputs={..., input_param: page_ref}`
+to `executor.execute()`. Hard-fails with actionable message if no page ref resolvable.
+Author_fixed skills: `inputs={"input": question}` unchanged. No silent substitution.
+
+**D2 (single-fetch space model):** `_retrieve_ask_parameterized` in
+`framework/workflow_runtime/executor.py` now uses a single `adapter.fetch()` call
+(no `fetch_metadata()` — that method does not exist on any adapter). Space key is read
+from `raw_item.metadata["space"]` (string, e.g. "FA") as returned by
+`emcp_direct.normalize()`. Space allow-list enforced AFTER fetch but BEFORE extraction.
+Disallowed content is discarded immediately — never extracted, never cached, never persisted.
+One round-trip total; no double-fetch.
+
+**P2-API wiring:** `executor.execute()` returns `source_fetched_on_demand: True` and
+`source_fetched_page_id` when ephemeral fetch occurred. `maybe_render_artifact` threads
+these into `result`; `_build_ask_response` emits them as snake_case for camelCase
+serialization (`sourceFetchedOnDemand`, `sourceFetchedPageId`, `latencyNote`).
+
+**Tests:** 281 pass (0 failures) in the 6-file specified suite; 8 pre-existing
+failures in `test_smoke_validate.py` (7) and `test_code_wiki.py` (1) unchanged.
+New: `framework/tests/unit/test_ask_route_ask_parameterized.py` (13 tests).
+Updated: `framework/tests/unit/test_executor_ephemeral.py` (D2 single-fetch model).
+
 ## [2026-05-16] backend-dev | ADR-032 P2-API — source_fetched_on_demand added to OpenAPI AskResponse contract
 
 **Task P2-API complete.** Single commit to origin/main.
