@@ -1,19 +1,46 @@
 ---
-title: authorSkill conversation flow — state-by-state map (post-ADR-028)
+title: authorSkill conversation flow — state-by-state map (post-ADR-029 S5)
 owner: architect
 created: 2026-05-14
 updated: 2026-05-15
-related: [ADR-015, ADR-026, ADR-027, ADR-028, ADR-016, ADR-017]
+related: [ADR-015, ADR-026, ADR-027, ADR-028, ADR-029, ADR-016, ADR-017]
 supersedes: authorskill-flow-pre-adr-027.md
 ---
 
 # authorSkill conversation flow — state-by-state map (post-ADR-028)
 
-> This file describes the **ADR-028 17-state machine** (Stream A S1-S4 implementation).
+> This file describes the **ADR-028/ADR-029 17-state machine** (ADR-028 Stream A S1-S4 +
+> ADR-029 Phase 1 S5 implementation).
 > The pre-ADR-027 15-state machine is archived at `docs/wiki/authorskill-flow-pre-adr-027.md`.
 > The ADR-027 16-state machine is superseded by this document (CLARIFY added as 17th state).
 > In-flight sessions at deploy time complete under the old machine (legacy handlers are
 > retained in `conversation.py`); all new sessions use the machine below.
+
+## ADR-029 changes (Phase 1 — S5)
+
+- **UPLOAD_ARTIFACT_EXAMPLE**: Image-only artifacts are now **hard-rejected** with verbatim
+  `IMAGE_ONLY_MESSAGE` and `must_show_human=True`. State does NOT advance. No vision-LLM
+  fallback (ADR-029 decision). Unsupported file types are also rejected. Artifact bytes
+  and type are **retained** in `_SessionData` (`artifact_reference_id`,
+  `artifact_reference_type`) through to EVAL for comparator use.
+- **EVAL**: `exit_criteria.passed` (recall@k + faithfulness thresholds) is now
+  **diagnostic-only** — it no longer gates PROMOTE (DECISION-010 superseded by ADR-029).
+  The primary EVAL signal is now the **ArtifactComparator gap report** (`structure_score`,
+  `density_score`, `missing_sections`, `thin_sections`). Gap report surfaced in EVAL turn
+  with `must_show_human=True`. PROMOTE gate is now **user acceptance only**.
+- **EVAL terminal gate — user acceptance**: options are `["accept", "ship as draft",
+  "review design", "configure sources", "stop here"]`. "accept" or "promote" → transitions
+  to PROMOTE (stamps `user_accepted=True`). "ship as draft" → DONE without promoting.
+  "stop" → DONE. Reject / "review design" / "configure sources" → stay at EVAL with a
+  labeled `# TODO-S6` seam (S6 not yet implemented).
+- **PROMOTE KB-resolvability gate** (Folded Fix 2, BUG-queue-e685d): before marking
+  production, `persona_builder_delta` must exist in ADB (hard-fail if absent). After
+  `upsert_persona_builder_kb`, a fresh `ShimKb` load must find the card (hard-fail only
+  when the store has cards — test env with 0 cards gets a warning and proceeds).
+- **Shared `_parse_llm_json_response` helper** (Folded Fix 1, BUG-573e3 parity):
+  `review._llm_extract` and `executor._llm_extract_fields` both use one canonical
+  JSON-parse function with full BUG-573e3 (bare control chars) + BUG-44364 (truncation)
+  fix sequence. Neither call site silently returns `{}` on parse failure.
 
 ## ADR-028 changes (Stream A S1–S4)
 
@@ -193,21 +220,31 @@ Transitions to UPLOAD_ARTIFACT_EXAMPLE.
 
 **Trigger.** INSPECT_SOURCES completes; user optionally uploads a reference artifact.
 
-**What runs.** If the user provides an artifact path (filesystem or `artifact:` ID),
-calls `analyze_artifact` (python-pptx/python-docx structural parse). Output is
-a **layout hint** only — section order, column structure, heading hierarchy.
-Field names are NOT derived from the artifact at this state; they come from
-DESIGN_SKILL.
+**What runs.** If the user provides an artifact path (filesystem or `artifact:<filename> id:<id>` format):
 
-If the user skips ("no artifact"), `_data.artifact_layout` remains `None`.
-Image-only PPTX hard-fails (ADR-026 Fix 1 still applies); no vision-LLM fallback
-(deferred to ADR-028).
+1. **Type check** — only `SUPPORTED_TYPES = {"pptx", "docx", "md", "txt"}` are accepted.
+   Unsupported types → hard-reject turn (`must_show_human=True`), state stays at this state.
+2. **Image-only check** (ADR-029 Phase 1) — calls `comparator.is_image_only(bytes, type)`.
+   If the artifact contains no extractable text (image-only PPTX/DOCX), returns verbatim
+   `IMAGE_ONLY_MESSAGE` with `must_show_human=True`. State does NOT advance. No vision-LLM
+   fallback (ADR-029 ADR decision — text comparator only in Phase 1).
+3. **Structural parse** — calls `analyze_artifact` (python-pptx/python-docx). Output is a
+   **layout hint** (section order, column structure, heading hierarchy). Field names are NOT
+   derived from the artifact at this state; they come from DESIGN_SKILL.
+4. **Retention** (ADR-029 S5) — `_SessionData.artifact_reference_id` and
+   `artifact_reference_type` are set. `artifact_reference_id` is either the ArtifactStore
+   ID or a `"file:<abs_path>"` prefix for filesystem paths. These fields survive
+   `to_dict`/`from_dict` (backward-compat: absent key → `None`).
 
-**LLM involvement.** None — structural parse only.
+If the user skips (`"no artifact"` or `"skip"`), `_data.artifact_layout` remains `None`
+and `artifact_reference_id/type` are cleared to `None`.
 
-**External I/O.** Reads artifact file from filesystem or ArtifactStore.
+**LLM involvement.** None — structural parse and image-only detection only.
 
-**Output / next state.** Sets `_data.artifact_layout`. Transitions to DESIGN_SKILL.
+**External I/O.** Reads artifact file from filesystem or ArtifactStore (`resolve()` → local path).
+
+**Output / next state.** Sets `_data.artifact_layout`, `artifact_reference_id`, `artifact_reference_type`.
+Transitions to DESIGN_SKILL.
 
 ---
 
@@ -426,18 +463,41 @@ Hard-fail on zero pages. No LLM.
    LLM answers `{"faithful": true/false, "reason": "..."}` per field.
    `faithfulness = faithful_fields / total_fields`. Average across samples.
 
-6. **Gate PROMOTE.** Read `exit_criteria` from the workflow YAML
-   (`synthesis.exit_criteria.recall_threshold`, default 0.85;
-   `synthesis.exit_criteria.faithfulness_threshold`, default 0.85).
-   If `recall@k < threshold` OR `faithfulness < threshold`: set
-   `eval_result.exit_criteria.passed = False`. Return a turn that blocks PROMOTE
-   and surfaces the failing metrics with actionable guidance.
-   If both thresholds are met: `passed = True`, offer PROMOTE.
+6. **Diagnostic gate (ADR-029 Phase 1 — no longer the PROMOTE gate).** Read
+   `exit_criteria` from the workflow YAML (`synthesis.exit_criteria.recall_threshold`,
+   default 0.85; `synthesis.exit_criteria.faithfulness_threshold`, default 0.85).
+   Compute whether thresholds are met and store in `eval_result.exit_criteria.passed`,
+   but this field is now **diagnostic-only** — it does NOT block PROMOTE.
+   The `eval_result.exit_criteria._note` field explains this explicitly.
 
 7. **Surface to user.** Show auto-generated gold rows, metrics, and the disclaimer:
    "kind=auto_generated — these were created from the same LLM that did the
    extraction, so they measure consistency, not correctness. Human review
    encouraged before promoting to production fleet-wide."
+
+8. **ArtifactComparator gap report (ADR-029 Phase 1 — the PRIMARY EVAL signal).**
+   If `_data.artifact_reference_id` is set:
+   - Read produced artifact bytes from the workflow output path (`wf_artifact_url`).
+   - Read reference bytes from `artifact_reference_id` (strip `"file:"` prefix for
+     filesystem paths, or use `artifact_store.resolve()` for ArtifactStore IDs).
+   - Call `comparator.compare(ref_bytes, produced_bytes, ref_type)` → `ComparatorResult`.
+   - Store `comparator_result.to_dict()` in `eval_result["comparator"]`.
+   - The gap report (`structure_score`, `density_score`, `missing_sections`,
+     `thin_sections`) is shown as the **primary signal** in the EVAL turn.
+   - Intrinsic recall@k + faithfulness are shown below as diagnostic notes.
+   If no reference artifact was uploaded, the intrinsic metrics are shown alone with
+   a note that no structural comparison was possible.
+
+9. **Terminal gate = user acceptance.** The EVAL turn options are always:
+   `["accept", "ship as draft", "review design", "configure sources", "stop here"]`.
+   - `"accept"` / `"promote"` / `"looks good"` → stamps `user_accepted=True` in
+     `eval_result`, transitions to PROMOTE.
+   - `"force promote"` → stamps `force_promoted=True`, transitions to PROMOTE
+     (force-promote is checked **before** accept to avoid substring collision).
+   - `"ship as draft"` → DONE immediately (no promote, no ADB write).
+   - `"stop"` / `"exit"` / `"pause"` → DONE.
+   - Reject / `"review design"` / `"configure sources"` → stay at EVAL,
+     `must_show_human=True`, seam labeled `# TODO-S6` (S6 not yet implemented).
 
 **LLM involvement.**
 - One `synthesis` call per sample for extraction (2-3 calls).
@@ -449,18 +509,38 @@ Hard-fail on zero pages. No LLM.
 - Writes gold set JSONL files to `eval/gold_sets/`.
 - Writes updated eval_extraction + eval_workflow artifact content back to
   ADB via `skill_store.write_artifacts` (so the gold rows are durable).
+- Reads produced artifact bytes from workflow output path (filesystem).
+- Reads reference artifact bytes from `artifact_reference_id`.
 
-**Output / next state.** Sets `_data.eval_result` with real metrics. If
-`exit_criteria.passed = True`: transitions to PROMOTE. If `False`: stays at
-EVAL, offers guidance for fixing low-scoring fields.
+**Output / next state.** Sets `_data.eval_result` with metrics + comparator result.
+Always stays at EVAL; transitions only on explicit user acceptance (see terminal gate above).
 
 ---
 
 ## PROMOTE
 
-Unchanged from pre-ADR-027 (ADB writes: KBF_SKILL_SESSIONS.status,
-KBF_PERSONA_BUILDERS upsert). Belt-and-suspenders guard refuses PROMOTE if
-`ingest_result.status == "failed"` **or** `eval_result.exit_criteria.passed != True`.
+ADB writes: `KBF_SKILL_SESSIONS.status`, `KBF_PERSONA_BUILDERS` upsert.
+
+**ADR-029 Phase 1 changes (Folded Fix 2 — BUG-queue-e685d):**
+
+1. **Invariant (a) — delta must exist.** Before calling `skill_store.promote()`,
+   reads `persona_builder_delta` from ADB via `skill_store.read_artifact`. If the
+   artifact is absent (root cause of BUG-queue-e685d), returns a hard-fail turn
+   with `must_show_human=True` and stays at PROMOTE. The delta is what seeds the
+   KB card; skipping it causes all-placeholder output.
+
+2. **Invariant (b) — KB must be resolvable after upsert.** After
+   `upsert_persona_builder_kb`, instantiates a fresh `ShimKb` and calls
+   `find_kb(f"{persona}.{skill_name}")`.
+   - If `ShimKb.all_cards()` is non-empty (real store) AND `find_kb` returns `None`
+     → HARD-FAIL, stays at PROMOTE with `must_show_human=True`.
+   - If `ShimKb.all_cards()` is empty (test env / empty store) → warning logged,
+     proceed to DONE (cannot verify in test env).
+
+**Belt-and-suspenders guard still applies:** refuses PROMOTE if
+`ingest_result.status == "failed"`.
+
+Note: `eval_result.exit_criteria.passed` is no longer a PROMOTE gate (ADR-029 S5).
 
 ---
 
@@ -472,12 +552,24 @@ Terminal. Unchanged.
 
 ## _SessionData changes (ADR-027)
 
-**New fields:**
+**New fields (ADR-027):**
 - `normalised_intent: dict` — CAPTURE_INTENT output
 - `source_samples: dict[str, list[dict]]` — cached from INSPECT_SOURCES (keyed by source_id)
 - `source_capability: list[dict]` — LLM inventory from INSPECT_SOURCES
 - `artifact_layout: dict | None` — structural parse from UPLOAD_ARTIFACT_EXAMPLE
 - `design: dict | None` — full DESIGN_SKILL output
+
+**New fields (ADR-028 S3):**
+- `_clarify_questions: list[str] | None` — pending clarification questions
+- `_clarify_next_state: str | None` — state to resume after CLARIFY
+- `clarification_log: list[dict]` — Q&A log from all CLARIFY rounds
+
+**New fields (ADR-029 Phase 1 S5):**
+- `artifact_reference_id: str | None` — ArtifactStore ID or `"file:<abs_path>"` for filesystem
+  paths. Set at UPLOAD_ARTIFACT_EXAMPLE; read at EVAL for comparator. `None` if user skipped.
+  Backward-compat: absent key in serialised dict → `None`.
+- `artifact_reference_type: str | None` — file extension without dot (e.g. `"pptx"`, `"docx"`).
+  `None` if user skipped. Backward-compat: absent key in serialised dict → `None`.
 
 **Removed fields:**
 - `llm_suggested_specs` — folded into `design["schema"]`

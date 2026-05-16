@@ -4,6 +4,38 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-15] backend-dev | ADR-029 Phase 1 S5 implemented: artifact retention, image hard-reject, comparator at EVAL, user-accept gate; Folded Fix 1 + Folded Fix 2
+
+**S5 — ADR-029 Phase 1 (conversation.py)**
+
+1. **Artifact Retention**: `_SessionData` gains `artifact_reference_id: str | None` and `artifact_reference_type: str | None`. Retained through `to_dict`/`from_dict` with backward-compat defaults (`None`). `artifact_reference_id` is either an ArtifactStore ID or a `"file:<abs_path>"` prefix for filesystem paths.
+
+2. **Image Hard-Reject**: `_handle_upload_artifact_example` now calls `comparator.is_image_only(bytes, type)`. Image-only or unsupported file type → `ConversationTurn(must_show_human=True)` with verbatim `IMAGE_ONLY_MESSAGE`. State stays at `UPLOAD_ARTIFACT_EXAMPLE`. No silent degradation.
+
+3. **Comparator at EVAL**: `_run_eval` step 8 reads produced artifact bytes from `wf_artifact_url` and reference bytes from `artifact_reference_id`, calls `comparator.compare(ref, produced, type)`, stores `ComparatorResult.to_dict()` in `eval_result["comparator"]`. Gap report is the PRIMARY EVAL signal. `exit_criteria.passed` is now diagnostic-only (ADR-029 supersedes DECISION-010); `_note` field explains this.
+
+4. **Terminal Gate = User Acceptance**: `_handle_eval_response` options: `["accept", "ship as draft", "review design", "configure sources", "stop here"]`. Accept/promote → PROMOTE (stamps `user_accepted=True`). Force-promote checked BEFORE accept (substring collision fix). Ship as draft → DONE. Stop → DONE. Reject → stay at EVAL, `must_show_human=True`, labeled `# TODO-S6` seam.
+
+**Folded Fix 1 — shared `_parse_llm_json_response` (BUG-573e3 parity)**
+
+Extracted a canonical JSON-parse helper into `review.py` implementing the full strict→sanitize(BUG-573e3)→slice→raise sequence + BUG-44364 truncation detection. Both `review._llm_extract` and `executor._llm_extract_fields` now call it. Neither silently returns `{}` on parse failure.
+
+**Folded Fix 2 — PROMOTE KB-resolvability gate (BUG-queue-e685d)**
+
+`_handle_promote_response` now enforces two invariants before marking production:
+(a) `persona_builder_delta` must exist in ADB — hard-fail with `must_show_human=True` if absent.
+(b) After `upsert_persona_builder_kb`, fresh `ShimKb` must find the card. Hard-fail only when `all_cards()` is non-empty (real store). Zero-card store (test env) → warning + proceed.
+
+**Tests**: `framework/tests/unit/test_adr029_s5.py` (new file, 31 tests across 7 classes). All 31 pass. No new regressions against `test_adr028_stream_a.py` (54/54) or `test_skill_builder_conversation.py` (151/160 — 9 pre-existing ShimKb-patch + behavior-change failures unchanged).
+
+**Wiki**: `docs/wiki/authorskill-flow.md` UPLOAD_ARTIFACT_EXAMPLE + EVAL + PROMOTE + _SessionData sections updated.
+
+Commits: `6740065` (Folded Fix 1), `0c21e2d` (S5 conversation.py), `09f893f` (S5 tests).
+
+S5 complete. S6 NOT started. Reject-path seam at `framework/skill_builder/conversation.py _handle_eval_response` labeled `# TODO-S6`.
+
+---
+
 ## [2026-05-15] backend-dev | ADR-028 S3+S4 implemented (CLARIFY state + persona injection); S3 2 bugs fixed
 
 S3 CLARIFY state: fixed two bugs discovered by Stream C TDD tests before committing. (1) `_handle_clarify_response` now rejects non-substantive replies (`ok`, `yes`, `no`, `continue`, `proceed`, etc.) via `_NON_ANSWERS` frozenset — re-displays the question and prompts for a real answer. (2) `_advance_to_capture_intent` now auto-advances to CONFIGURE_SOURCES only when `nice_to_know_ambiguities` are present (no blocking ones); zero-ambiguity path still returns CAPTURE_INTENT confirmation turn (preserves S2 contract). All 9 `TestClarifyState` tests in Stream C's test_skill_builder_conversation.py now GREEN. Stream A's test_adr028_stream_a.py: 3 test fixes (prompt format kwargs updated for S4 placeholders; patch paths corrected for local imports). 54/54 tests GREEN. Pre-existing 6 failures unchanged (Stream B/C scope, ShimKb local-import patching issue). S3 commit pushed to origin/main (952ed07). S4 was already committed in the S3 commit (persona loader added early to avoid format() KeyErrors). docs/wiki/authorskill-flow.md updated: 17-state machine description, CLARIFY state entry, CAPTURE_INTENT routing logic. docs/wiki/authorskill-prompts.md updated: _CAPTURE_INTENT_PROMPT (S3+S4), _INSPECT_SOURCES_PROMPT (S1), _DESIGN_SKILL_PROMPT (S1+S3+S4), new _CLARIFY_PROMPT entry, summary table updated.
