@@ -4,6 +4,32 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-15] architect | ADR-029 classifier validation gate — PASS (3/3 runs MISSING_FIELDS)
+
+**Task: Design + validate _FAILURE_CLASSIFIER_PROMPT before S6 routing is enabled.**
+
+- Added `_FAILURE_CLASSIFIER_PROMPT` constant to `framework/skill_builder/conversation.py`
+  (after `_CLARIFY_PROMPT`, before STATES list). Marked S6-pending, not wired.
+  Input contract: normalised_intent, schema_properties, capability_inventory,
+  gap_report, missing_sections, thin_sections. Output: failure_class, confidence,
+  evidence, alternative_class, why_not_alternative.
+- Added anti-bias guard in prompt: "No verbatim labelled row for X does NOT mean
+  the source lacks X if synthesisable evidence exists" — directly counters the
+  observed misclassification (DESIGN_SKILL/INSPECT_SOURCES labelled WBS content
+  as unavailable when it was synthesisable).
+- Added `framework/tests/unit/test_failure_classifier_gate.py`: LIVE LLM gate test
+  (3 runs against OCI GenAI) + structural contract tests (7, no LLM).
+
+**Gate result: PASS**
+- Run 1: MISSING_FIELDS (high confidence) — evidence cited synthesisable WBS fields
+- Run 2: MISSING_FIELDS (high confidence) — evidence cited synthesisable WBS fields
+- Run 3: MISSING_FIELDS (high confidence) — evidence cited synthesisable WBS fields
+- All 3 runs referenced synthesisable evidence in evidence field
+- 0/3 runs returned SOURCE_COVERAGE or WRONG_SOURCE
+- S6 (constrained routing + loop guardrails) may proceed.
+
+---
+
 ## [2026-05-15] backend-dev | fix S5 stale tests + gold-set write None guard (commit 4167ce7)
 
 **Task 1 — 3 stale tests updated to ADR-029 / Folded Fix 2 contract**

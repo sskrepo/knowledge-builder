@@ -512,6 +512,15 @@ P3 (test suite green for S1-S4).
 
 ### ADR-029 Phase 1 classifier validation gate (explicit task — NOT optional)
 
+**STATUS: GATE PASSED — 2026-05-15**
+- Run 1: MISSING_FIELDS (high confidence)
+- Run 2: MISSING_FIELDS (high confidence)
+- Run 3: MISSING_FIELDS (high confidence)
+- 0/3 runs returned SOURCE_COVERAGE or WRONG_SOURCE
+- Prompt: `_FAILURE_CLASSIFIER_PROMPT` in `framework/skill_builder/conversation.py`
+- Gate test: `framework/tests/unit/test_failure_classifier_gate.py`
+- S6 may proceed.
+
 **Owner:** Backend Dev (same as S5) + QA. Must execute between S5 and S6.
 
 **Purpose:** The failure-class classifier in S6 is load-bearing. A bad diagnosis

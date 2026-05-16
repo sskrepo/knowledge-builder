@@ -493,6 +493,138 @@ the quality of the extraction schema.)
 """
 
 # ---------------------------------------------------------------------------
+# ADR-029 S6: Failure-class classifier prompt (S6-pending, not yet wired).
+#
+# PURPOSE: Receives the comparator gap report, the full source capability
+# inventory (with synthesisable confidence tags), and the current schema.
+# Returns a structured failure_class label + per-class evidence + confidence.
+# The routing map in S6 translates the label to a target state — the LLM
+# never picks the target state directly.
+#
+# VALIDATION GATE: This prompt MUST pass the gate test in
+# framework/tests/unit/test_failure_classifier_gate.py (gold case:
+# tpm.26ai_fa_db_upgrade_to_26ai_pptx — WBS content exists in source but
+# schema never asked for it → correct label = MISSING_FIELDS, NOT
+# SOURCE_COVERAGE) before being wired into _handle_eval_response at S6.
+#
+# INPUT CONTRACT (mandatory — S6 must honor all five inputs):
+#   {normalised_intent}   — the normalised intent dict from CAPTURE_INTENT
+#   {schema_properties}   — the current schema properties (JSON)
+#   {capability_inventory}— the full INSPECT_SOURCES output per source,
+#                           including available_fields with confidence tags
+#                           (especially synthesisable ones)
+#   {gap_report}          — the ArtifactComparator gap_report string
+#   {missing_sections}    — list of missing section names from the comparator
+#   {thin_sections}       — list of thin section names from the comparator
+#
+# DO NOT wire this into _handle_eval_response until the gate test passes.
+# The S6 seam in _handle_eval_response is labeled: # TODO-S6
+# ---------------------------------------------------------------------------
+_FAILURE_CLASSIFIER_PROMPT = """\
+You are a Knowledge Builder Framework failure-class classifier. Your job is to
+diagnose WHY a produced artifact does not match the reference, and return a
+structured, auditable classification so the framework can route the user to the
+correct fix state.
+
+=== INPUTS ===
+
+Normalised intent:
+{normalised_intent}
+
+Current schema (fields the skill was designed to extract):
+{schema_properties}
+
+Source capability inventory (what each source can provide, with confidence levels):
+{capability_inventory}
+
+Comparator gap report:
+{gap_report}
+
+Missing sections (present in reference, absent from produced artifact):
+{missing_sections}
+
+Thin sections (present in produced artifact but far less content than reference):
+{thin_sections}
+
+=== FAILURE CLASSES ===
+
+Choose exactly ONE failure class from this list:
+
+- MISSING_FIELDS: The missing/thin sections are absent because the SCHEMA never
+  included fields for them. The source capability inventory shows these fields
+  ARE available (confidence=high, medium, or synthesisable) — the data exists
+  in the source but the schema never asked for it.
+
+- THIN_FIELDS: The fields ARE in the schema, but their extraction instructions
+  produce thin or empty output. The source capability inventory shows the content
+  IS available (confidence=synthesisable is common here — the LLM must aggregate
+  across multiple rows/items but the instruction does not say so).
+
+- WRONG_LAYOUT: The required sections/fields are present in the schema and the
+  source, but the output artifact has wrong ordering, missing slide structure,
+  wrong column arrangement, or incorrect section grouping.
+
+- SOURCE_COVERAGE: The missing sections correspond to fields that the source
+  capability inventory marks as confidence=missing or confidence=low with reason
+  "content genuinely absent from source". The content does NOT exist in the
+  source pages in any form — not even as synthesisable fragments.
+
+- WRONG_SOURCE: A different source page or Confluence space likely has the
+  required content. The current source pages are the wrong ones — the content
+  exists somewhere else, not in the currently configured sources.
+
+- UNSUPPORTABLE: The missing content cannot be derived from any configured source
+  at all, even with synthesis. Human judgment is required. No automated fix will
+  help.
+
+=== CRITICAL REASONING RULE (anti-bias guard) ===
+
+Before choosing SOURCE_COVERAGE, you MUST verify: does the source capability
+inventory show confidence=synthesisable for ANY field related to the missing
+section? If YES, the content IS present in the source — it just requires synthesis
+(aggregation/combination) from scattered elements. In that case the correct class
+is MISSING_FIELDS (the schema never asked for the synthesis) or THIN_FIELDS
+(the schema asked for it but the instruction did not specify the synthesis logic).
+
+"No verbatim labelled row for X" does NOT mean the source lacks X. If the
+capability inventory shows synthesisable evidence (e.g. WBS table rows with
+status/notes/risk data), the content EXISTS. The failure is in the schema or
+extraction instruction — NOT in the source coverage.
+
+Only choose SOURCE_COVERAGE if the capability inventory explicitly shows
+confidence=missing or confidence=low with a reason stating the content is
+genuinely absent (e.g. "source page has no risk section", "no milestone dates
+found anywhere in the page").
+
+=== REQUIRED OUTPUT ===
+
+Return ONLY a valid JSON object with exactly these fields:
+
+{{
+  "failure_class": "MISSING_FIELDS|THIN_FIELDS|WRONG_LAYOUT|SOURCE_COVERAGE|WRONG_SOURCE|UNSUPPORTABLE",
+  "confidence": "high|medium|low",
+  "evidence": "Concrete reasoning (2-4 sentences). MUST reference specific fields
+               from the capability inventory and schema. For example: 'The capability
+               inventory shows risks (confidence=synthesisable, evidence=WBS rows with
+               blocked/at-risk notes). The schema has no risks field. Therefore the fix
+               is to add the field to the schema, not add more source pages.'",
+  "alternative_class": "the second most likely failure class",
+  "why_not_alternative": "1-2 sentences explaining why the alternative class is
+                          ruled out. MUST cite the capability inventory evidence
+                          that makes the alternative implausible."
+}}
+
+Rules:
+- failure_class and confidence are REQUIRED — do not omit them.
+- evidence and why_not_alternative are REQUIRED and must cite specific inventory entries.
+- If confidence=low, you are uncertain — note the ambiguity in evidence.
+- Do NOT choose SOURCE_COVERAGE unless the capability inventory explicitly confirms
+  the content is absent from all sources (confidence=missing with clear reason).
+- The routing map (code, not your choice) will translate your failure_class to a
+  target state. Your job is diagnosis, not routing.
+"""
+
+# ---------------------------------------------------------------------------
 # STATES list: ADR-027 + ADR-028 state machine
 # ---------------------------------------------------------------------------
 
