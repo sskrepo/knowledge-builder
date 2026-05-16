@@ -17,6 +17,8 @@ from typing import Any
 
 import yaml
 
+from framework.skill_builder.prompt_registry import get_registry  # ADR-030 C4
+
 log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -490,28 +492,22 @@ class WorkflowExecutor:
         # — typical 5-15k chars; we cap at 24k chars of passage text).
         snippet = text[:24000]
 
-        prompt = (
-            "You are extracting structured fields from a Confluence/wiki page "
-            "to populate an executive-review presentation. Return a single JSON "
-            "object with EXACTLY these keys (use empty string \"\" or empty "
-            "list [] when a field is genuinely absent — do not invent data):\n\n"
-            f"{chr(10).join(field_lines)}\n\n"
-            f"User request: {inputs.get('input', '')}\n\n"
-            "=== Source document ===\n"
-            f"{snippet}\n"
-            "=== End source ===\n\n"
-            "Respond with ONLY the JSON object, no prose, no markdown fences."
+        # ADR-030 C4: prompt via PromptRegistry.
+        # Caller pre-joins field_lines with chr(10); template uses {field_lines},
+        # {user_request}, {snippet} placeholders (not f-string variables).
+        spec = get_registry().get_prompt(
+            "executor_extract",
+            field_lines=chr(10).join(field_lines),
+            user_request=inputs.get("input", ""),
+            snippet=snippet,
         )
 
-        # max_tokens=4096 must stay in sync with _EXTRACT_MAX_TOKENS in
-        # skill_builder/review.py — see BUG-queue-44364.
-        _MAX_TOKENS = 4096
         try:
             result = self.llm.chat(
-                model="synthesis",
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                max_tokens=_MAX_TOKENS,
+                model=spec.model,
+                messages=[{"role": "user", "content": spec.text}],
+                response_format=spec.response_format,
+                max_tokens=spec.max_tokens,
             )
         except Exception as exc:  # noqa: BLE001
             if _is_content_filter_error(exc):
@@ -533,7 +529,7 @@ class WorkflowExecutor:
             return _parse_llm_json_response(
                 raw,
                 tokens_out=tokens_out,
-                max_tokens=_MAX_TOKENS,
+                max_tokens=spec.max_tokens,
                 n_fields=len(properties),
             )
         except ValueError as exc:
