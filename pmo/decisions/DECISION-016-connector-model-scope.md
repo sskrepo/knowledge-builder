@@ -165,3 +165,23 @@ neither replaces the other.
 ---
 
 *See also ADR-036 (connector registry design) and ADR-037 (write/orchestration roadmap).*
+
+---
+
+## Amendment note — 2026-05-17
+
+ADR-036 was amended (same date) to fold in three decided items: (1) a **New Connector
+Request demand-capture mechanism** — when the CONFIGURE_SOURCES gate hard-stops on an
+unsupported connector, the system also logs a `CONNECTOR-REQ-…` record into
+`KBF_BUG_REPORTS` (reusing DECISION-008/DECISION-013 ADB infrastructure; discriminated
+by `record_kind: "connector_request"` in `extra_json`; exported separately via
+`kb-cli export-bugs --kind connector_request`; grouped by connector identifier for
+demand signal); (2) a **formal adapter ABC and connector conformance test harness**
+folded into ADR-036 scope as a prerequisite for the registry's "supported" guarantee —
+existing adapters are retrofitted to the ABC and must pass the harness before their
+manifests are registered; (3) a **guided authorConnector codegen skill was considered
+and deliberately dropped** — connector/adapter authoring is done by KBF developers
+using Claude Code directly (LLM-auto-committed credential-handling network code
+contradicts the project's safety discipline); the framework's role is to gate
+unsupported connectors honestly and capture the demand backlog, not to auto-generate
+adapters. No ADR-039.

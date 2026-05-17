@@ -3,10 +3,11 @@ title: ADR-036 — Connector Registry (Read-Only) — Capability-Honest Authorin
 status: accepted
 created: 2026-05-17
 accepted: 2026-05-17
+amended: 2026-05-17
 owner: architect
 deciders: user, architect
-tags: [adr, connector, registry, capability, authoring, configure-sources, fail-fast]
-related: [ADR-035, ADR-037, DECISION-016, DECISION-015]
+tags: [adr, connector, registry, capability, authoring, configure-sources, fail-fast, adapter-abc, connector-request]
+related: [ADR-035, ADR-037, DECISION-016, DECISION-015, DECISION-008, DECISION-013]
 supersedes: ~
 ---
 
@@ -14,12 +15,18 @@ supersedes: ~
 
 ## Status
 
-**Accepted — 2026-05-17.** Fixes the capability-dishonesty defect where
-CONFIGURE_SOURCES silently accepts any `source_type` string and only fails at
-runtime when the connector does not exist, violating the framework's fail-fast,
-no-silent-degradation ethos. See DECISION-016 for the scoping decision that
-established this as the immediate deliverable (read-only registry now; write/
-orchestration as a phased roadmap in ADR-037).
+**Accepted — 2026-05-17. Amended — 2026-05-17** (three amendments folded in):
+(1) New Connector Request demand-capture mechanism added at the CONFIGURE_SOURCES
+gate hard-stop point; (2) formal adapter ABC + connector conformance test harness
+folded into ADR-036 scope as a prerequisite for the registry's "supported" guarantee;
+(3) authorConnector codegen skill considered and deliberately dropped.
+
+Original acceptance: fixes the capability-dishonesty defect where CONFIGURE_SOURCES
+silently accepts any `source_type` string and only fails at runtime when the
+connector does not exist, violating the framework's fail-fast, no-silent-degradation
+ethos. See DECISION-016 for the scoping decision that established this as the
+immediate deliverable (read-only registry now; write/orchestration as a phased
+roadmap in ADR-037).
 
 ---
 
@@ -466,11 +473,229 @@ check, not a soft LLM suggestion.
 
 ---
 
+---
+
+## L. Amendment 1 — New Connector Request Demand Capture
+
+### L.1 Overview
+
+When the CONFIGURE_SOURCES registry type-check gate (Section D.2) issues a
+HARD STOP for an unsupported connector, the system MUST ALSO auto-log a
+**New Connector Request** record so KBF_OPS developers accumulate a demand
+backlog for unregistered connectors. The user still receives the honest
+"not supported" message (unchanged from D.2). The demand capture is a
+side-effect of the same gate point — it does not alter the user-facing
+behavior or soften the hard stop.
+
+### L.2 Storage and Distinction from Bug Reports
+
+New Connector Requests reuse the existing ADB bug-record infrastructure
+established in DECISION-008 and DECISION-013:
+
+- **Table**: `KBF_BUG_REPORTS` (same table as `AdbErrorStore.record_user_bug`).
+  No schema migration. Non-standard fields ride in the `extra_json` CLOB,
+  consistent with the DECISION-013 precedent for `discovered_by`.
+
+- **Discriminator field** (in `extra_json`):
+  `record_kind: "connector_request"`. This distinguishes connector requests
+  from ordinary bug records (`record_kind` absent or `"bug"`) without adding
+  a new column.
+
+- **Queue ID prefix**: `CONNECTOR-REQ-<uuid4_hex[:5]>` (e.g.
+  `CONNECTOR-REQ-3a7f1`). This is structurally distinct from the bug prefix
+  `BUG-queue-…`, making connector requests immediately identifiable by ID
+  in exports and logs without parsing `extra_json`.
+
+### L.3 Captured Fields
+
+Each New Connector Request record MUST capture the following fields (carried
+in `extra_json`):
+
+| Field | Description |
+|---|---|
+| `record_kind` | `"connector_request"` (discriminator) |
+| `requested_connector_id` | The unsupported `source_type` string verbatim (e.g. `"lumberjack_logs"`). Structured field — used for dedup/grouping. |
+| `inferred_operation` | The operation the author was attempting: `"read"`, `"query"`, `"write"`, or `"unknown"` if not inferable from context. |
+| `supported_set_at_rejection` | Snapshot of `list_connectors()` output at the time of rejection (for context; list of `connector_id` strings). |
+| `user_request_text` | The original user question/request text that triggered CONFIGURE_SOURCES. |
+| `persona` | Persona label of the skill author session (if known; `null` otherwise). |
+| `session_id` | The authorSkill conversation session ID (if within a skill-authoring flow; `null` otherwise). |
+| `request_id` | Request-level correlation ID from the framework's structured logging context. |
+| `timestamp` | ISO-8601 UTC timestamp of the rejection event. |
+
+### L.4 Surfacing to KBF Developers
+
+The existing `kb-cli export-bugs` mechanism (DECISION-008: generated read-only
+snapshot from ADB) is extended to surface connector requests SEPARATELY from
+bug records:
+
+- **Separate section or file**: connector requests are exported to a distinct
+  section in the export output or a separate file. Suggested path:
+  `pmo/connector-requests/` (parallel to `pmo/bugs/`). The export mechanism
+  already owns this path — do NOT create a hand-maintained store alongside it.
+  The generated snapshot IS the authoritative view.
+
+- **Filter flag**: `kb-cli export-bugs --kind connector_request` MUST produce
+  only connector request records; the default (no `--kind` filter) produces
+  only ordinary bug records (existing behavior unchanged). Both may be emitted
+  together via `--kind all`.
+
+- **Demand grouping**: the export for connector requests MUST group records by
+  `requested_connector_id` and include a count per connector identifier. This
+  gives KBF developers a demand signal (e.g., "lumberjack_logs requested 7
+  times"). Dedup/aggregation is a required behavior of the export step, not
+  optional.
+
+### L.5 No Silent Drop
+
+If the connector-request ADB write fails (network error, ADB unavailable, etc.),
+the failure MUST be logged at ERROR level with the full record details. The write
+failure MUST NOT silently swallow the demand signal and MUST NOT be confused with
+the user-facing hard stop (which has already been issued at this point). The
+framework's no-silent-degradation rule applies to the demand capture path as
+strictly as to any retrieval path.
+
+### L.6 Gate Seam
+
+The demand capture fires at EXACTLY the same point as the existing CONFIGURE_SOURCES
+hard stop for an unsupported connector (Section D.1, Step 2b). The revised sequence
+at that point is:
+
+```
+2b. connector_id NOT FOUND in registry:
+    i.  Log New Connector Request to KBF_BUG_REPORTS via AdbErrorStore
+        (queue_id = CONNECTOR-REQ-<uuid>; extra_json fields per L.3)
+        → if write fails: log ERROR, continue to hard stop (do not suppress hard stop)
+    ii. Emit HARD STOP message to user (verbatim format per D.2, unchanged)
+    → skill design NOT started; no partial state saved
+```
+
+The same gate extension applies when a connector type IS found but the requested
+operation is not in `supported_operations` (Step 2d): log a connector request
+with `inferred_operation` set to the unsupported operation, then hard stop.
+
+---
+
+## M. Amendment 2 — Formal Adapter ABC and Connector Conformance Harness
+
+### M.1 Motivation
+
+The registry's declaration that a connector is "supported" is only meaningful
+if every adapter registered in the registry actually honors a defined interface
+contract. Currently `framework/adapters/_base.py` exists but is ad-hoc and
+unenforced: `confluence/`, `jira/`, `git_adapter.py`, and `udap_adapter.py`
+were built without a formal base class mandate. The registry's "supported"
+guarantee is hollow unless every registered adapter is verified to implement
+the required contract.
+
+A formal adapter ABC and a per-adapter conformance test harness are therefore
+**prerequisites for the registry to be trustworthy** and are folded into
+ADR-036 scope (not deferred to a separate ADR).
+
+### M.2 Adapter ABC Contract
+
+`framework/adapters/_base.py` MUST be elevated from its current ad-hoc state
+to a formal Abstract Base Class (ABC) defining the following interface:
+
+| Method / property | Signature (conceptual) | Required | Notes |
+|---|---|---|---|
+| `connector_id` | `@property → str` | Yes | Must match the `connector_id` in the registered manifest. |
+| `normalize(raw_item) → ContentItem` | Takes connector-specific raw output and produces a `ContentItem` per spec §6.1. | Yes | Output shape is the ContentItem schema — no adapter-specific shapes downstream. |
+| `emit_citation(raw_item) → str` | Returns a stable, resolvable source URL or path for the item. | Yes | Every ContentItem must carry a citation. No citation = bug (cross-cutting requirement). |
+| `content_hash_id(raw_item) → str` | Deterministic content-hash-based ID for idempotent ingestion. | Yes | Re-running ingestion on unchanged content must be a no-op (CLAUDE.md cross-cutting requirement). |
+| `incremental_update_hook()` | Called on webhook/push trigger; yields only changed items since last run. | Yes | Full re-index only on schema/model change. |
+| `map_error_to_rejection(exc) → ContentFilterRejection` | Maps connector-specific exceptions to the framework's `ContentFilterRejection` type. | Yes | Prevents connector-specific error types from leaking past the adapter boundary. |
+| `probe_access() → AccessProbeResult` | Lightweight connectivity/credential check. | Yes | Called by ADR-035 access-verify; replaces ad-hoc `probe.verify_access` functions. |
+
+Adapters that cannot implement a method (e.g., UDAP has no meaningful
+`incremental_update_hook` because it is read-through) MUST explicitly raise
+`NotImplementedError` with a clear message, NOT silently pass or return `None`.
+
+### M.3 Connector Conformance Test Harness
+
+Every adapter registered in the Connector Registry MUST pass a **connector
+conformance test harness** before it can be marked `supported` in the registry.
+The conformance harness is a test suite (part of the framework's eval/ layer)
+that verifies:
+
+| Conformance check | What it tests |
+|---|---|
+| ABC implementation | Adapter subclasses the formal ABC; all abstract methods are implemented (not just inherited). |
+| `normalize()` output shape | Output is a valid `ContentItem` per spec §6.1 schema. Tested with fixture raw items per connector type. |
+| `emit_citation()` non-empty | Citation is a non-empty string for every fixture item. |
+| `content_hash_id()` determinism | Same raw input produces the same ID on repeated calls; different raw inputs produce different IDs (collision test). |
+| `map_error_to_rejection()` coverage | At least the connector's documented error types are mapped; unmapped errors are caught and re-raised as `ContentFilterRejection` (no leakage). |
+| `probe_access()` return type | Returns `AccessProbeResult` (not `None`, not raw exception). |
+| `connector_id` manifest match | `adapter.connector_id` matches the `connector_id` in the registered manifest exactly. |
+
+The conformance harness runs in CI. A newly implemented adapter MUST pass
+the harness before the connector manifest is merged into the registry (i.e.,
+before it is visible to skill authors). An existing registered adapter that
+fails the conformance harness after a code change MUST NOT be left in the
+`supported` set — its registration is suspended until the conformance failure
+is resolved.
+
+### M.4 Migration Path for Existing Adapters
+
+The four existing adapters (`confluence/`, `jira/`, `git_adapter.py`,
+`udap_adapter.py`) are retrofitted to the ABC as part of the ADR-036
+implementation work. The migration is bounded and sequenced:
+
+1. Elevate `framework/adapters/_base.py` to formal ABC (implement abstract
+   method stubs with clear docstrings).
+2. For each existing adapter: subclass the ABC, implement all abstract methods,
+   migrate any existing `probe.verify_access` function into `probe_access()`.
+3. Write conformance test fixtures for each adapter (using mocked connector
+   responses for CI; real endpoints in staging).
+4. Pass conformance harness for each adapter.
+5. Register manifests (per Section C above) only after conformance passes.
+
+The migration does not require rewriting adapter business logic — only formalizing
+the interface boundary and adding the new required methods.
+
+---
+
+## N. Amendment 3 — Considered and Deferred: authorConnector Codegen Skill
+
+A guided "authorConnector" skill was considered during the design session for
+ADR-036: an LLM-driven workflow that would walk a user through specifying a new
+connector and auto-generate adapter code (credential handling, HTTP client,
+normalize() implementation) for direct commit.
+
+**This was deliberately NOT pursued.** Reasons:
+
+1. **Safety discipline**: LLM-authored credential-handling and network-client
+   code that is auto-committed to the framework violates the project's
+   deterministic-extraction discipline and the principle that load-bearing
+   infrastructure changes require human review. The blast radius of an
+   LLM-generated adapter with a subtly incorrect credential-handling pattern
+   or a missing error mapping is high.
+
+2. **Right tool**: KBF developers authoring new adapters use Claude Code directly
+   — a supervised, human-in-the-loop interaction — not an autonomous codegen
+   skill. The distinction is important: Claude Code with a human reviewing each
+   step is materially different from an auto-commit pipeline.
+
+3. **Framework role**: the framework's responsibility is (i) to honestly gate
+   unsupported connectors at authoring time (ADR-036 capability gate) and
+   (ii) to capture New Connector Requests as a structured demand backlog that
+   feeds human-led adapter development work (Amendment 1 above). The framework
+   does NOT own the adapter authoring workflow beyond that boundary.
+
+No ADR-039 or follow-on codegen skill is planned. Connector/adapter authoring
+remains a KBF developer task, informed by the demand signal from the
+`CONNECTOR-REQ-…` records in the export.
+
+---
+
 ## References
 
 - `framework/adapters/` — existing ad-hoc adapter implementations (migration target)
+- `framework/adapters/_base.py` — to be elevated to formal ABC (Amendment 2)
 - `framework/skill_builder/conversation.py:178-182` — current non-empty `source_type` check (to be replaced by registry gate)
-- DECISION-016 — scope decision
+- DECISION-016 — scope decision (amended with cross-ref to these amendments)
+- DECISION-008 — ADB bug-record export mechanism (extended by Amendment 1)
+- DECISION-013 — precedent for `extra_json` non-standard fields without schema migration
 - ADR-035 — concurrent instance access-verify design
 - ADR-037 — write/orchestration roadmap
-- spec §5 (component map), §6.2 (parser contract), §8 (open problems)
+- spec §5 (component map), §6.1 (ContentItem schema), §6.2 (parser contract), §8 (open problems)
