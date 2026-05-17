@@ -16,6 +16,8 @@ supersedes: ~
 
 **Accepted — 2026-05-17. Implemented in commit feat(authorskill+eval): consumer-facing card + routing_queries at DESIGN_SKILL (DECISION-018, ADR-038).**
 
+**Implementation Note (2026-05-17 — Option B correction):** `_generate_design_skill_card()` MUST be called AFTER the main design LLM call and AFTER `self._data.output_format` is set from `design["workflow_shape"]["output_format"]`; calling it before (as the b1adf33 workaround did) means `output_format` is the user's pre-design guess (`normalised_intent.output_kind`) rather than the design-authoritative value, corrupting the card's `example_invocations`, `routing_queries.negative`, and the `output_format` token in all three fields — degrading Tier-1 routing discrimination. The call ordering in `_run_design_skill` is therefore load-bearing. Additionally, the ADR-028 persona-injection test (`test_persona_fragments_injected_in_run_design_skill`) MUST locate the design_skill LLM call by inspecting prompt content (`persona_key_fields` / `exec-safe`, tokens structurally absent from `design_skill_card`) rather than by call order (`call_args` = last call), so that this brittleness cannot recur if the two LLM calls are ever reordered again.
+
 ---
 
 ## A. Context — The Defects Being Fixed

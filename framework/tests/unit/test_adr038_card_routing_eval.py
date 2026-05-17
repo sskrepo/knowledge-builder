@@ -96,13 +96,14 @@ def _make_design_llm():
         },
     }
 
-    # ADR-028 fix: card generation (§A) now runs BEFORE the design LLM call
-    # so the design_skill call remains the *last* self._llm.chat call.
-    # First call returns card; second call returns design.
+    # Restored 78307d1 ordering: design LLM call runs FIRST, card call runs SECOND.
+    # b1adf33 had swapped these to [card_resp, design_resp] as a workaround; that
+    # workaround is reversed by Option B (ADR-028 persona-injection test now locates
+    # the design_skill call by content, not call order).
     llm = MagicMock()
     llm.chat.side_effect = [
-        {"text": json.dumps(card_resp), "tokens_out": 100},
         {"text": json.dumps(design_resp), "tokens_out": 200},
+        {"text": json.dumps(card_resp), "tokens_out": 100},
     ]
     return llm
 

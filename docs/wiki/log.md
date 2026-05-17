@@ -4,6 +4,10 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-17] backend-dev | fix(adr-038): Option B — restore post-design card-gen ordering (output_format fidelity) + order-robust ADR-028 persona-injection test; BUG filed in ADB
+
+Reverted b1adf33 workaround: `_generate_design_skill_card()` moved back to AFTER main design LLM call + AFTER `self._data.output_format` is set from design response. ADR-028 S4 persona-injection test now locates design_skill call by content (`persona_key_fields`/`exec-safe`), not call order. `_make_design_llm` fixture side_effect restored to `[design_resp, card_resp]`. 8 failures = baseline. BUG-queue filed in ADB, ADR-038 note added.
+
 ## [2026-05-17] backend-dev | fix(adr-028): restore persona-fragment injection in DESIGN_SKILL path regressed by 78307d1 — BUG-queue-d1bda
 
 Moved `_generate_design_skill_card()` call to before the design_skill LLM call in `_run_design_skill()` so `mock_llm.chat.call_args` (last call) correctly points at the persona-overlay-bearing design_skill prompt. Updated `_make_design_llm` fixture in test_adr038 to match new order. Failures: 9→8 (back to baseline).

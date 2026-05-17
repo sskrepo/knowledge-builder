@@ -2196,23 +2196,6 @@ class SkillBuilderConversation:
                 persona_extraction_style="",
                 persona_few_shot_example="",
             )
-        # ADR-038 §A: generate the consumer-facing skill_card + routing_queries
-        # BEFORE the main design LLM call.  Must precede it so that the design_skill
-        # call remains the *last* self._llm.chat call — test_adr028_stream_a S4
-        # validates persona fragment injection by inspecting call_args (the most
-        # recent call), which must be the design_skill prompt.
-        # _generate_design_skill_card derives output_format from normalised_intent
-        # at this point (self._data.output_format is not yet set from the design
-        # response); after the design call, output_format is updated on _data and
-        # the stored card already has the correct pre-design hint.
-        _card_generated = self._generate_design_skill_card()
-        log.info(
-            "_run_design_skill: consumer-facing card generated (has routing_queries=%s). "
-            "persona=%s skill=%s",
-            bool((_card_generated or {}).get("routing_queries")),
-            self._data.persona, self._data.skill_name,
-        )
-
         try:
             result = self._llm.chat(
                 model=spec.model,
@@ -2334,6 +2317,24 @@ class SkillBuilderConversation:
         trigger = ws.get("trigger", {"on_request": True})
         self._data.trigger = trigger
 
+        # ADR-038 §A: generate the consumer-facing skill_card + routing_queries
+        # AFTER the main design LLM call and AFTER self._data.output_format is set
+        # from design["workflow_shape"]["output_format"].  This is the correct
+        # (78307d1-original) ordering: output_format in the card reflects the
+        # design-authoritative value, not the user's pre-design guess
+        # (normalised_intent.output_kind).  The b1adf33 workaround moved this call
+        # to before the design LLM call solely so the design_skill call was last in
+        # mock_llm.chat.call_args — that brittleness is removed; the ADR-028 test
+        # now locates the design_skill call by content (exec-safe / persona_key_fields),
+        # not call order.
+        _card_generated = self._generate_design_skill_card()
+        log.info(
+            "_run_design_skill: consumer-facing card generated (has routing_queries=%s). "
+            "persona=%s skill=%s",
+            bool((_card_generated or {}).get("routing_queries")),
+            self._data.persona, self._data.skill_name,
+        )
+
         # ADR-028 Item 3: route to CLARIFY if DESIGN_SKILL has blocking_questions
         blocking_questions_from_design = design.get("blocking_questions", [])
         log.info(
@@ -2369,8 +2370,11 @@ class SkillBuilderConversation:
         persona = self._data.persona
         skill_name = self._data.skill_name
         task_description = self._data.intent_description or skill_name
-        # output_format: prefer already-set value; fall back to normalised_intent output_kind
-        # (needed when called before the design LLM response has set self._data.output_format).
+        # output_format: use the design-authoritative value (self._data.output_format is
+        # set from design["workflow_shape"]["output_format"] before this call, per the
+        # restored 78307d1 ordering).  The defensive fallback to normalised_intent.output_kind
+        # then "markdown" covers only unexpected empty-string cases (should not occur in
+        # normal flow).
         output_format = (
             self._data.output_format
             or (self._data.normalised_intent or {}).get("output_kind")
