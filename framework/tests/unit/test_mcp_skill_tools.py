@@ -461,3 +461,180 @@ def _patched_delete_pw(password: str):
     """Patch KBF_SKILL_DELETE_PASSWORD env var for the duration of the block."""
     with patch.dict("os.environ", {"KBF_SKILL_DELETE_PASSWORD": password}):
         yield
+
+
+# ---------------------------------------------------------------------------
+# deleteSkill — BUG-queue-280f1 Part 2: asyncio.to_thread offload tests
+# ---------------------------------------------------------------------------
+
+class TestDeleteSkillEventLoopNonBlocking:
+    """Guard that the three blocking ADB calls in deleteSkill run THROUGH
+    asyncio.to_thread, not directly on the event loop.
+
+    This is a regression guard for the d3ec0-class bug: deleteSkill was added
+    by commit 601971a3 the day before the authorSkill to_thread fix (309db5d)
+    and was never covered.  Under a healthy ADB the calls are ~100 ms
+    (tolerable), but under bastion/ADB reconnect they freeze the event loop →
+    uvicorn kills the unresponsive worker → callers get "connection refused".
+    """
+
+    def _admin_consumer(self):
+        return _consumer(scopes=["read", "write", "admin"])
+
+    def _handler(self, skill_store, shim_kb=None):
+        app = _app(skill_store)
+        app.state.shim_kb = shim_kb
+        registry = build_external_tool_registry(app)
+        return registry["deleteSkill"]
+
+    def _store_with_skill(self):
+        store = MagicMock()
+        store.delete.return_value = ["workflow_skill", "persona_builder_delta"]
+        store.delete_persona_builder_kb.return_value = True
+        return store
+
+    # ------------------------------------------------------------------
+    # Test 1: blocking delete sequence runs through asyncio.to_thread
+    # ------------------------------------------------------------------
+
+    def test_blocking_delete_runs_through_to_thread(self):
+        """The three ADB I/O calls (delete, delete_persona_builder_kb, reload)
+        must be executed inside asyncio.to_thread, never directly on the event
+        loop.  We patch asyncio.to_thread and verify it is awaited with a
+        callable (the inner synchronous function) whose execution performs
+        skill_store.delete."""
+        import asyncio as _asyncio
+        from unittest.mock import AsyncMock, call
+
+        store = self._store_with_skill()
+        shim_kb = MagicMock()
+        handler = self._handler(store, shim_kb=shim_kb)
+
+        # Track what callable to_thread receives and actually run it so the
+        # handler can build a valid response.
+        to_thread_calls = []
+
+        async def fake_to_thread(fn, *args, **kwargs):
+            to_thread_calls.append(fn)
+            # Execute the blocking function so the handler gets a real result.
+            return fn(*args, **kwargs)
+
+        with patch.dict("os.environ", {"KBF_SKILL_DELETE_PASSWORD": "pw"}):
+            with patch.object(_asyncio, "to_thread", side_effect=fake_to_thread):
+                result = _run(handler(
+                    persona="tpm", skillName="weekly_ops",
+                    confirmationPassword="pw",
+                    _consumer=self._admin_consumer(),
+                ))
+
+        # asyncio.to_thread must have been called exactly once with a callable.
+        assert len(to_thread_calls) == 1, (
+            "asyncio.to_thread must be called exactly once for the blocking delete sequence"
+        )
+        assert callable(to_thread_calls[0]), "to_thread must receive a callable inner function"
+        # The handler must still succeed.
+        assert result.get("isError") is not True
+        assert result["status"] == "deleted"
+
+    # ------------------------------------------------------------------
+    # Test 2: valid delete calls store.delete, delete_persona_builder_kb,
+    #         shim_kb.reload in order and returns success response shape
+    # ------------------------------------------------------------------
+
+    def test_valid_delete_calls_all_three_in_order_and_returns_success(self):
+        """A valid delete must call skill_store.delete, delete_persona_builder_kb,
+        and shim_kb.reload in that order, and return isError=False with the
+        expected response fields."""
+        call_order = []
+
+        store = MagicMock()
+        store.delete.side_effect = lambda p, s: (call_order.append("delete"), ["workflow_skill"])[1]
+        store.delete_persona_builder_kb.side_effect = (
+            lambda p, s: (call_order.append("delete_persona_builder_kb"), True)[1]
+        )
+        shim_kb = MagicMock()
+        shim_kb.reload.side_effect = lambda: call_order.append("reload")
+
+        handler = self._handler(store, shim_kb=shim_kb)
+
+        with _patched_delete_pw("pw"):
+            result = _run(handler(
+                persona="tpm", skillName="weekly_ops",
+                confirmationPassword="pw",
+                _consumer=self._admin_consumer(),
+            ))
+
+        assert call_order == ["delete", "delete_persona_builder_kb", "reload"], (
+            f"Expected [delete, delete_persona_builder_kb, reload], got {call_order}"
+        )
+        # Response shape
+        assert result.get("isError") is not True
+        assert result["status"] == "deleted"
+        assert result["persona"] == "tpm"
+        assert result["skillName"] == "weekly_ops"
+        assert isinstance(result["deletedArtifacts"], list)
+        assert "pbEntryDeleted" in result
+        assert "content" in result
+
+    # ------------------------------------------------------------------
+    # Test 3: missing confirmationPassword rejects FAST — skill_store.delete
+    #         must NOT be called (pre-checks stay pre-offload)
+    # ------------------------------------------------------------------
+
+    def test_missing_password_rejects_fast_without_entering_to_thread(self):
+        """A request with the wrong confirmationPassword must be rejected
+        synchronously before entering the asyncio.to_thread offload path.
+        skill_store.delete must never be called."""
+        import asyncio as _asyncio
+
+        store = self._store_with_skill()
+        handler = self._handler(store)
+
+        to_thread_called = []
+
+        async def fake_to_thread(fn, *args, **kwargs):
+            to_thread_called.append(True)
+            return fn(*args, **kwargs)
+
+        with patch.dict("os.environ", {"KBF_SKILL_DELETE_PASSWORD": "correct-pw"}):
+            with patch.object(_asyncio, "to_thread", side_effect=fake_to_thread):
+                result = _run(handler(
+                    persona="tpm", skillName="weekly_ops",
+                    confirmationPassword="wrong-pw",
+                    _consumer=self._admin_consumer(),
+                ))
+
+        assert result.get("isError") is True, "Wrong password must return isError=True"
+        assert "Invalid confirmationPassword" in result["content"][0]["text"]
+        assert len(to_thread_called) == 0, (
+            "asyncio.to_thread must NOT be entered when password check fails"
+        )
+        store.delete.assert_not_called()
+
+    # ------------------------------------------------------------------
+    # Test 4: exception from skill_store.delete inside the thread surfaces
+    #         as isError with message (no swallow, no stub)
+    # ------------------------------------------------------------------
+
+    def test_exception_from_delete_inside_thread_surfaces_as_is_error(self):
+        """An exception raised by skill_store.delete inside the worker thread
+        must propagate out of asyncio.to_thread and be caught by the handler,
+        returning isError=True with the error message.  Exceptions must not be
+        swallowed."""
+        store = MagicMock()
+        store.delete.side_effect = RuntimeError("ADB connection lost")
+        handler = self._handler(store)
+
+        with _patched_delete_pw("pw"):
+            result = _run(handler(
+                persona="tpm", skillName="weekly_ops",
+                confirmationPassword="pw",
+                _consumer=self._admin_consumer(),
+            ))
+
+        assert result.get("isError") is True, (
+            "Exception from skill_store.delete must produce isError=True"
+        )
+        assert "ADB connection lost" in result["content"][0]["text"], (
+            "Exception message must appear in the response (no swallow)"
+        )

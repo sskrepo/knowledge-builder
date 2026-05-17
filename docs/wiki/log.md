@@ -4,6 +4,47 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] backend-dev | Fix deleteSkill event-loop blocking (BUG-queue-280f1 Part 2, d3ec0-class)
+
+**Bug:** `_make_delete_skill_handler` in `framework/deploy/mcp_tools.py` declared
+`async def delete_skill_handler` but performed three synchronous blocking ADB I/O calls
+directly on the asyncio event loop:
+- `skill_store.delete(persona, skill_name)` (~line 951)
+- `skill_store.delete_persona_builder_kb(persona, skill_name)` (~line 996)
+- `shim_kb.reload()` → `self._skill_store.list_persona_builder_kbs()` (~line 1012)
+
+Same d3ec0-class bug as authorSkill (fixed by 309db5d). deleteSkill was added by 601971a3
+the day before that fix and was never covered. Under bastion/ADB reconnect these calls
+freeze the event loop → uvicorn kills the unresponsive worker → callers get
+"connection refused"/HTTP 000. This is an availability violation per the no-silent-degradation
+rule.
+
+**Fix (Option A — architect-confirmed):** Collected all three blocking calls into a single
+synchronous inner function `_do_delete_blocking()` and offloaded it via
+`result = await asyncio.to_thread(_do_delete_blocking)`. The fast pre-checks
+(admin-scope check, confirmationPassword check, arg validation, skill_store availability)
+remain synchronous and *before* the offload — bad requests still fail instantly without
+spawning a thread. Filesystem artifact cleanup stays inside `_do_delete_blocking` so
+ordering and logging are preserved. Exceptions propagate out of `asyncio.to_thread`
+and are caught by the handler (same isError + message surface as before).
+
+**Tests added** (`framework/tests/unit/test_mcp_skill_tools.py`,
+class `TestDeleteSkillEventLoopNonBlocking`):
+1. `test_blocking_delete_runs_through_to_thread` — patches `asyncio.to_thread`, verifies
+   it is awaited exactly once with a callable; callable is executed to confirm correct result.
+2. `test_valid_delete_calls_all_three_in_order_and_returns_success` — asserts call order
+   [delete → delete_persona_builder_kb → reload] and validates the full response shape.
+3. `test_missing_password_rejects_fast_without_entering_to_thread` — wrong password returns
+   isError=True; `to_thread` never entered; `skill_store.delete` never called.
+4. `test_exception_from_delete_inside_thread_surfaces_as_is_error` — RuntimeError from
+   `skill_store.delete` inside the thread surfaces as isError=True with the message (no swallow).
+
+56 tests passed (targeted run). 8 pre-existing baseline failures unchanged.
+
+**Closes:** BUG-queue-280f1 Part 2 (Part 1 was a server-down transport artifact, no code fix needed).
+
+---
+
 ## [2026-05-16] backend-dev | Fix ops_skill_auditor LLM-review content-filter misclassification and provider-internals leak
 
 **Root cause (synth-tpm-fe0f9e9f investigation):** `_run_llm_review` in

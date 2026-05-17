@@ -885,6 +885,7 @@ def _make_delete_skill_handler(app):
 
     Both checks must pass — the password is a second factor on top of the token.
     """
+    import asyncio
     import os
 
     async def delete_skill_handler(
@@ -897,6 +898,7 @@ def _make_delete_skill_handler(app):
         consumer = _consumer or _anonymous_consumer()
 
         # Layer 1: admin scope required.
+        # FAST pre-check — no ADB I/O, must remain before the to_thread offload.
         if "admin" not in consumer.scopes:
             return {
                 "isError": True,
@@ -904,6 +906,8 @@ def _make_delete_skill_handler(app):
             }
 
         # Layer 2: confirmation password check.
+        # FAST pre-check — reads only env var, no ADB I/O; bad requests fail
+        # immediately without spawning a thread.
         delete_password = os.environ.get("KBF_SKILL_DELETE_PASSWORD", "")
         if not delete_password:
             return {
@@ -926,7 +930,7 @@ def _make_delete_skill_handler(app):
                 "content": [{"type": "text", "text": "Invalid confirmationPassword."}],
             }
 
-        # Input validation.
+        # Input validation — FAST pre-check, no ADB I/O.
         persona = (persona or "").strip()
         skill_name = (skillName or "").strip()
         if not persona or not skill_name:
@@ -942,13 +946,84 @@ def _make_delete_skill_handler(app):
                 "content": [{"type": "text", "text": "Skill store not available."}],
             }
 
+        shim_kb = getattr(app.state, "shim_kb", None)
+
         log.warning(
             "mcp:deleteSkill persona=%s skill=%s consumer=%s — destructive delete initiated",
             persona, skill_name, consumer.name,
         )
 
-        try:
+        # CRITICAL: skill_store.delete(), delete_persona_builder_kb(), and
+        # shim_kb.reload() are all synchronous blocking ADB/filesystem I/O.
+        # Running them directly on the asyncio event loop would freeze the entire
+        # uvicorn worker — this is the same d3ec0-class bug that was fixed for
+        # authorSkill by commit 309db5d. deleteSkill was added by 601971a3 the
+        # day before that fix and was never covered.
+        #
+        # Fix: collect all three blocking calls into a single synchronous inner
+        # function and offload it via asyncio.to_thread so the event loop stays
+        # responsive while the ADB round-trips are in flight.
+        # oracledb thin-driver pools are thread-safe (same assumption 309db5d
+        # relied on for authorSkill ADB calls).
+        def _do_delete_blocking():
+            from pathlib import Path as _Path
+
+            # 1. Delete ADB skill artifacts (primary blocking ADB call).
             deleted_types = skill_store.delete(persona, skill_name)
+
+            if not deleted_types:
+                return {"not_found": True}
+
+            # 2. Mirror delete to filesystem so _list_available_personas() stays
+            # accurate (BUG-queue-4fd5e — ADB delete alone leaves disk stale).
+            _fs_root = _Path(__file__).resolve().parents[2]
+            _FS_TEMPLATES = {
+                "workflow_skill":  "framework/workflow_skills/{persona}/{skill_name}.yaml",
+                "eval_extraction": "eval/gold_sets/{persona}-{skill_name}-extraction.jsonl",
+                "eval_workflow":   "eval/gold_sets/{persona}-{skill_name}-workflow.jsonl",
+            }
+            for _tmpl in _FS_TEMPLATES.values():
+                _fp = _fs_root / _tmpl.format(persona=persona, skill_name=skill_name)
+                if _fp.exists():
+                    try:
+                        _fp.unlink()
+                        log.info("mcp:deleteSkill removed filesystem artifact: %s", _fp.name)
+                    except OSError as _exc:
+                        log.warning("mcp:deleteSkill fs cleanup failed for %s: %s", _fp.name, _exc)
+
+            # 3. Remove the promoted KB entry from KBF_PERSONA_BUILDERS so ShimKb
+            # stops routing queries to this skill's KB (blocking ADB call).
+            pb_deleted = False
+            try:
+                pb_deleted = skill_store.delete_persona_builder_kb(persona, skill_name)
+                if pb_deleted:
+                    log.info(
+                        "mcp:deleteSkill removed KBF_PERSONA_BUILDERS entry "
+                        "persona=%s kb_name=%s", persona, skill_name,
+                    )
+            except Exception as exc:
+                log.warning(
+                    "mcp:deleteSkill delete_persona_builder_kb failed "
+                    "(artifacts already deleted): %s", exc,
+                )
+
+            # 4. Hot-reload ShimKb so the card is immediately gone from routing
+            # (blocking I/O — shim_kb.reload() calls list_persona_builder_kbs()).
+            if shim_kb is not None:
+                try:
+                    shim_kb.reload()
+                    log.info("mcp:deleteSkill ShimKb reloaded after deletion")
+                except Exception as exc:
+                    log.warning("mcp:deleteSkill shim_kb.reload() failed: %s", exc)
+
+            return {"deleted_types": deleted_types, "pb_deleted": pb_deleted}
+
+        # Offload all blocking ADB + filesystem I/O to a worker thread.
+        # Exceptions raised inside the thread propagate naturally out of
+        # asyncio.to_thread and are caught by the handler below, preserving
+        # the same isError surface as before.
+        try:
+            result = await asyncio.to_thread(_do_delete_blocking)
         except Exception as exc:
             log.error("mcp:deleteSkill failed: %s", exc)
             return {
@@ -956,7 +1031,7 @@ def _make_delete_skill_handler(app):
                 "content": [{"type": "text", "text": f"Delete failed: {exc}"}],
             }
 
-        if not deleted_types:
+        if result.get("not_found"):
             return {
                 "isError": False,
                 "content": [{
@@ -971,48 +1046,8 @@ def _make_delete_skill_handler(app):
                 "status": "not_found",
             }
 
-        # Mirror delete to filesystem so _list_available_personas() stays accurate
-        # (BUG-queue-4fd5e — ADB delete alone leaves disk stale)
-        from pathlib import Path as _Path
-        _fs_root = _Path(__file__).resolve().parents[2]
-        _FS_TEMPLATES = {
-            "workflow_skill":  "framework/workflow_skills/{persona}/{skill_name}.yaml",
-            "eval_extraction": "eval/gold_sets/{persona}-{skill_name}-extraction.jsonl",
-            "eval_workflow":   "eval/gold_sets/{persona}-{skill_name}-workflow.jsonl",
-        }
-        for _tmpl in _FS_TEMPLATES.values():
-            _fp = _fs_root / _tmpl.format(persona=persona, skill_name=skill_name)
-            if _fp.exists():
-                try:
-                    _fp.unlink()
-                    log.info("mcp:deleteSkill removed filesystem artifact: %s", _fp.name)
-                except OSError as _exc:
-                    log.warning("mcp:deleteSkill fs cleanup failed for %s: %s", _fp.name, _exc)
-
-        # Remove the promoted KB entry from KBF_PERSONA_BUILDERS so ShimKb
-        # stops routing queries to this skill's KB.
-        pb_deleted = False
-        try:
-            pb_deleted = skill_store.delete_persona_builder_kb(persona, skill_name)
-            if pb_deleted:
-                log.info(
-                    "mcp:deleteSkill removed KBF_PERSONA_BUILDERS entry "
-                    "persona=%s kb_name=%s", persona, skill_name,
-                )
-        except Exception as exc:
-            log.warning(
-                "mcp:deleteSkill delete_persona_builder_kb failed "
-                "(artifacts already deleted): %s", exc,
-            )
-
-        # Hot-reload ShimKb so the card is immediately gone from routing.
-        shim_kb = getattr(app.state, "shim_kb", None)
-        if shim_kb is not None:
-            try:
-                shim_kb.reload()
-                log.info("mcp:deleteSkill ShimKb reloaded after deletion")
-            except Exception as exc:
-                log.warning("mcp:deleteSkill shim_kb.reload() failed: %s", exc)
+        deleted_types = result["deleted_types"]
+        pb_deleted = result["pb_deleted"]
 
         log.warning(
             "mcp:deleteSkill COMPLETED persona=%s skill=%s deleted=%s pb_deleted=%s consumer=%s",
