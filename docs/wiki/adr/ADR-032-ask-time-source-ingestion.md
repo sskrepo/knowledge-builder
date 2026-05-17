@@ -113,6 +113,46 @@ Tests updated:
 - `test_ask_route_ask_parameterized.py` (NEW, 13 tests): D1 input-threading tests,
   author_fixed unchanged, no-page-ref hard-fail, P2-API response wiring.
 
+### D1 MCP gap closed — Priority-1 now live on both REST and MCP paths
+
+**Residual defect (architect-confirmed RCA):** The D1 fix above wired `body=` on
+the REST route (`framework/deploy/routes/ask.py` line ~104) but the MCP path
+(`framework/deploy/mcp_tools.py`, `_make_ask_handler`) called
+`maybe_render_artifact(app.state, result, question)` with no `body=` kwarg.
+The Priority-1 branch (`if body and input_param in body and body[input_param]`)
+was therefore structurally dead for all MCP consumers. Additionally, the
+`askKnowledgeBase` tool schema had no `page_id` parameter, giving MCP callers no
+structured way to pass a page reference (forced exclusive reliance on Priority-2
+question-string regex — one miss away from hard-fail).
+
+**Fix (Option A, `framework/deploy/mcp_tools.py` only, scope-contained):**
+
+1. `ask_handler` (in `_make_ask_handler`) gains `page_id: str = ""` parameter.
+   Default `""` → fully backward-compatible; no change for existing callers.
+2. Synthetic body construction:
+   `body = {"page_id": page_id} if page_id else None`
+3. `maybe_render_artifact(app.state, result, question, body=body)` — Priority-1
+   now reachable on the MCP path exactly as on the REST path.
+4. `EXTERNAL_TOOLS_SCHEMA` `askKnowledgeBase.inputSchema.properties` gains an
+   optional `page_id` string property (not in `required`) with description
+   referencing ADR-032.
+5. Priority-2 (question-string regex fallback) unchanged — still the sole path
+   when `page_id` is empty. `author_fixed` skills unaffected. Existing hard-fail
+   for no-page-ref ask_parameterized skills preserved.
+
+**Tests:** 13 new tests in `framework/tests/unit/test_mcp_ask_handler_page_id.py`:
+- `TestExplicitPageId` (2 tests): explicit page_id → body={"page_id": ...} passed.
+- `TestNoPageIdPriority2Fallback` (3 tests): no page_id → body=None; Priority-2 operative.
+- `TestToolSchemaPageId` (5 tests): schema introspection — page_id present, optional, typed.
+- `TestBackwardCompat` (3 tests): question+persona only → no error; URL-in-question still works.
+
+Full required suite: **242 passed, 0 failures** (test_mcp_ask_handler_page_id +
+test_ask_route_ask_parameterized + test_skill_builder_conversation + test_prompt_registry).
+
+This closes the MCP consumption gap that made req-7d351fb1's class of issue possible
+on the MCP path (ask_parameterized MCP consumers can now pass `page_id` explicitly;
+Priority-2 fallback unchanged for consumers that embed the URL in the question).
+
 ---
 
 ## A. The Observed Failure

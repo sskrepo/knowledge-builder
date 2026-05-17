@@ -4,6 +4,34 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] backend-dev | ADR-032 MCP ask_handler body=/page_id gap fixed (D1 Priority-1 now live on MCP path)
+
+**Root cause (architect-confirmed):** `_make_ask_handler` in `framework/deploy/mcp_tools.py`
+called `maybe_render_artifact(app.state, result, question)` with no `body=` kwarg.
+The D1 Priority-1 branch in `maybe_render_artifact` (`if body and input_param in body
+and body[input_param]`) was therefore structurally unreachable on the MCP path — all MCP
+consumers of `ask_parameterized` skills fell through exclusively to Priority-2 (question-string
+regex extraction), one regex-miss away from a hard-fail or wrong-page result.
+Additionally, the `askKnowledgeBase` tool schema had no `page_id` parameter, so MCP callers
+had no structured way to pass a page reference at all.
+
+**Fix (Option A, `framework/deploy/mcp_tools.py` only):**
+
+1. `ask_handler` gains `page_id: str = ""` parameter (default `""` — fully backward-compatible).
+2. Synthetic body: `body = {"page_id": page_id} if page_id else None`.
+3. `maybe_render_artifact(app.state, result, question, body=body)` — Priority-1 now reachable
+   on the MCP path exactly as on the REST path (commit 4330bd0 / D1 REST fix).
+4. `EXTERNAL_TOOLS_SCHEMA` `askKnowledgeBase.inputSchema.properties` gains optional `page_id`
+   string property with ADR-032 reference in description.
+5. Priority-2 (question-string regex) unchanged — still the fallback when `page_id` is empty.
+   `author_fixed` skills unaffected (body only consulted inside the `ask_parameterized` branch).
+
+**Tests:** 13 new tests in `framework/tests/unit/test_mcp_ask_handler_page_id.py`.
+Full required suite (test_mcp_ask_handler_page_id + test_ask_route_ask_parameterized +
+test_skill_builder_conversation + test_prompt_registry): **242 passed, 0 failures**.
+
+---
+
 ## [2026-05-16] backend-dev | reviewSkillSession KB-ref check false-positive fix (ADR-023)
 
 **Root cause:** `_check_kb_references_resolve` in `framework/deploy/ops/review_engine.py`

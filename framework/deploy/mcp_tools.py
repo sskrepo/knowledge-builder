@@ -122,6 +122,15 @@ EXTERNAL_TOOLS_SCHEMA = [
                     "default": 10,
                     "description": "Max citations to return",
                 },
+                "page_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional Confluence pageId or page URL for ask_parameterized "
+                        "skills that fetch the source page at query time (ADR-032). "
+                        "If omitted, the page reference is extracted from the question "
+                        "text."
+                    ),
+                },
             },
         },
     },
@@ -344,6 +353,7 @@ def _make_ask_handler(app):
         serviceId: str = "",
         functionalArea: str = "",
         maxResults: int = 10,
+        page_id: str = "",
         _consumer=None,
     ) -> dict:
         """MCP handler for askKnowledgeBase.
@@ -358,6 +368,13 @@ def _make_ask_handler(app):
             serviceId:      Optional service ID filter.
             functionalArea: Optional functional area filter.
             maxResults:     Max citations to return (default 10).
+            page_id:        Optional Confluence pageId or page URL for
+                            ask_parameterized skills (ADR-032 D1 Priority-1).
+                            When provided, threads the explicit page reference
+                            into maybe_render_artifact via body= so Priority-1
+                            is reached before the question-string regex fallback.
+                            Default "" → fully backward-compatible (Priority-2
+                            question-string extraction still applies as fallback).
             _consumer:      ConsumerManifest injected by MCP dispatch.
                             Falls back to a minimal anonymous consumer if None.
         """
@@ -389,7 +406,18 @@ def _make_ask_handler(app):
         # so a tier-1 skill with response_mode=artifact_url actually produces
         # the PPT/DOCX/etc. Without this the MCP path silently returned only
         # the extracted text (the trap I fell into on the first fix attempt).
-        maybe_render_artifact(app.state, result, question)
+        #
+        # ADR-032 D1 fix (MCP path): build a synthetic body dict so that
+        # Priority-1 (explicit page_id field) in maybe_render_artifact is
+        # reachable for ask_parameterized skills.  When page_id is provided by
+        # the MCP caller, body={"page_id": page_id} lets the D1 Priority-1
+        # branch (`if body and input_param in body and body[input_param]`) fire.
+        # When page_id is empty (omitted), body=None is passed so Priority-2
+        # (question-string regex) remains the sole fallback — identical to the
+        # pre-fix behaviour.  author_fixed skills are unaffected: body is only
+        # consulted inside the ask_parameterized branch.
+        body = {"page_id": page_id} if page_id else None
+        maybe_render_artifact(app.state, result, question, body=body)
 
         response = _build_ask_response(result, consumer)
         return response
