@@ -8,6 +8,11 @@ When data["layout"] == "weekly_exec_review_v1", delegates to
 _render_weekly_exec_review_v1() which builds the single-slide two-column
 Oracle-style layout programmatically (no binary template dependency).
 
+ADR-034: Layout dispatch now goes through layout_catalog.LAYOUT_PRESETS.
+The catalog is the single source of truth for which internal_ids are valid.
+Unknown layout ids fall through to _render_default (no hard-fail, just
+default multi-slide rendering with a WARNING logged).
+
 All other layouts follow the original multi-slide path.
 """
 from __future__ import annotations
@@ -16,6 +21,7 @@ import logging
 import re
 from pathlib import Path
 from ._base import BaseRenderer
+from .layout_catalog import get_preset
 
 log = logging.getLogger(__name__)
 
@@ -44,8 +50,20 @@ class PptxRenderer(BaseRenderer):
 
     def render(self, data: dict, template: str | Path | None = None) -> bytes:
         layout = data.get("layout", "")
-        if layout == "weekly_exec_review_v1":
-            return self._render_weekly_exec_review_v1(data)
+        # ADR-034: dispatch via layout_catalog — catalog is the single source of truth.
+        # Dispatch keys are internal_ids; callers must not assume hard-coded strings.
+        if layout:
+            preset = get_preset(layout)
+            if preset is None:
+                log.warning(
+                    "PptxRenderer: unknown layout id %r (not in layout_catalog); "
+                    "falling back to default multi-slide rendering.",
+                    layout,
+                )
+            elif preset.internal_id == "weekly_exec_review_v1":
+                return self._render_weekly_exec_review_v1(data)
+            # "default" and any future catalog entry with no special handler
+            # falls through to _render_default below.
         return self._render_default(data, template)
 
     # ------------------------------------------------------------------

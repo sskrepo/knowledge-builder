@@ -59,6 +59,7 @@
       }
     ],
     "artifact_layout": null,
-    "existing_kb_cards": []
+    "existing_kb_cards": [],
+    "layout_preset_catalog": "(ADR-034 test placeholder — catalog injected at runtime)"
   }
 }

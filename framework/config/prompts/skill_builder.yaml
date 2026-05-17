@@ -190,12 +190,12 @@ prompts:
   # ---------------------------------------------------------------------------
   design_skill:
     id: design_skill
-    version: "1.1"
+    version: "1.2"
     model: synthesis
     max_tokens: 8192
     response_format: json_object
     description: "Design a complete skill from intent, source capability inventory, artifact layout, and reusable KB cards."
-    required_vars: [persona, normalised_intent, source_capability, artifact_layout, existing_kb_cards, persona_key_fields, persona_extraction_style, persona_few_shot_example]
+    required_vars: [persona, normalised_intent, source_capability, artifact_layout, existing_kb_cards, persona_key_fields, persona_extraction_style, persona_few_shot_example, layout_preset_catalog]
     template: |
       You are a Knowledge Builder Framework skill architect. Design a complete skill from
       the user's intent, the source capability inventory, the artifact layout, and the
@@ -216,6 +216,9 @@ prompts:
       Worked example of a well-designed field for this persona:
       {persona_few_shot_example}
 
+      Available layout presets (described by purpose — select by fit to the user ask):
+      {layout_preset_catalog}
+
       Produce a single JSON design object:
       {{
         "schema": {{
@@ -234,7 +237,8 @@ prompts:
         }},
         "workflow_shape": {{
           "output_format": "pptx|docx|markdown|email|slack",
-          "layout": "weekly_exec_review_v1 | default",
+          "layout": "<layout_id_selected_from_catalog_or_null>",
+          "layout_rationale": "<one-sentence plain-language explanation of why this layout fits>",
           "trigger": {{"on_request": true, "schedule": "cron_or_null"}},
           "retriever": "search_wiki"
         }},
@@ -266,12 +270,14 @@ prompts:
         or place them in "unsupportable_fields" with a clear reason.
       - Source bindings must reference source IDs from the capability inventory.
       - Reuse plan covers must reference real KB cards from "existing_kb_cards".
-      - If artifact layout is provided, align the output_format and layout accordingly.
-      - Choose "weekly_exec_review_v1" layout only for exec-review PPTX skills.
       - "required" list should contain only fields critical to the skill's purpose.
       - maxLength: 200 for IDs/statuses, 500 for summaries, 2000 for detailed content.
       - "blocking_questions": ONLY include questions where the answer would change the schema
         structure, field types, or source bindings. These trigger CLARIFY before REVIEW_DESIGN.
+        CRITICAL: do NOT add a blocking_question about layout selection unless the user's
+        intent is completely ambiguous AND no artifact layout hint was provided. When an
+        artifact is uploaded or the intent clearly implies a specific output style, proceed
+        with the best-fit layout from the catalog and record your reasoning in layout_rationale.
       - "open_questions": advisory items — show at REVIEW_DESIGN but do not block.
       - Persona key fields above are strong hints — always attempt to include them if the
         source capability inventory can support them.
@@ -280,6 +286,19 @@ prompts:
         if the normalised intent implies dynamic source supply. Emit "author_fixed" if specific
         page IDs from INSPECT_SOURCES are already in the source_bindings. When "ask_parameterized",
         do NOT include page IDs in source_bindings — the source is dynamic, not fixed.
+      - Layout selection rules (ADR-034 — STRICTLY FOLLOW):
+        * Reason over the user ask, the artifact layout hint, and the "best for" guidance
+          in each catalog entry above.
+        * Select the catalog entry whose description and "best for" clause best matches
+          the intent. Emit its layout_id in "layout".
+        * If the output_format is not "pptx", set "layout" to null — layout presets only
+          apply to PPTX output.
+        * If no catalog entry is a clear fit, set "layout" to null (default rendering).
+        * NEVER emit a layout value that is not present in the catalog above.
+        * Do NOT add a blocking_question whose answer is a layout preset name or id.
+          If you must ask about presentation style, phrase the question in plain language
+          describing the structural alternatives (e.g. "single dense summary slide vs.
+          one slide per topic") — never reference an internal preset identifier.
 
   # ---------------------------------------------------------------------------
   # review_design_replan

@@ -52,6 +52,9 @@ from .prompt_registry import get_registry  # noqa: E402
 #   `from framework.skill_builder.conversation import _build_confluence_adapter`
 # continue to work without modification.
 from ..adapters.confluence.factory import build_confluence_adapter as _build_confluence_adapter  # noqa: E402
+# ADR-034: layout catalog — provides plain-language preset descriptions injected
+# into design_skill prompt so LLM reasons over descriptions, never over hardcoded ids.
+from ..renderers.layout_catalog import catalog_for_prompt as _layout_catalog_for_prompt  # noqa: E402
 
 
 # ADR-030 C1: All prompt constants moved to framework/config/prompts/skill_builder.yaml.
@@ -984,6 +987,30 @@ class SkillBuilderConversation:
 
     # -- CLARIFY state (ADR-028 Item 3) ----------------------------------
 
+    @staticmethod
+    def _sanitize_clarify_question(question: str) -> str:
+        """ADR-034: Strip any internal layout preset identifiers from clarify question text.
+
+        The LLM may inadvertently include an internal_id (e.g. 'weekly_exec_review_v1')
+        in a generated clarify question.  This guard replaces every known internal_id
+        with the corresponding human_label so the user never sees a machine identifier.
+
+        This is a defense-in-depth guard — the prompt already instructs the LLM not to
+        emit internal ids.  Here we enforce it at the surface.
+        """
+        from ..renderers.layout_catalog import all_presets as _all_presets
+        sanitized = question
+        for preset in _all_presets():
+            if preset.internal_id in sanitized:
+                log.warning(
+                    "_sanitize_clarify_question: internal preset id %r found in clarify "
+                    "question — replacing with human label %r (ADR-034 guard)",
+                    preset.internal_id,
+                    preset.human_label,
+                )
+                sanitized = sanitized.replace(preset.internal_id, preset.human_label)
+        return sanitized
+
     def _advance_to_clarify(self, blocking_questions: list, next_state: str = "CONFIGURE_SOURCES") -> ConversationTurn:
         """Transition to CLARIFY state with a list of blocking questions.
 
@@ -998,17 +1025,22 @@ class SkillBuilderConversation:
                         Can be "REVIEW_DESIGN" (after DESIGN_SKILL blocking_questions).
         """
         self._state = "CLARIFY"
-        self._data._clarify_questions = blocking_questions
+        # ADR-034: sanitize all question texts before storing — ensure no internal ids
+        sanitized_questions = [
+            {**q, "question": self._sanitize_clarify_question(q.get("question", ""))}
+            for q in blocking_questions
+        ]
+        self._data._clarify_questions = sanitized_questions
         self._data._clarify_next_state = next_state
 
         # Find the first unresolved question
-        pending = [q for q in blocking_questions if not q.get("resolved")]
+        pending = [q for q in sanitized_questions if not q.get("resolved")]
         if not pending:
             # All resolved — advance to next state
             return self._clarify_advance()
 
         question = pending[0]["question"]
-        total = len(blocking_questions)
+        total = len(sanitized_questions)
         resolved_count = total - len(pending)
 
         progress_note = f"({resolved_count + 1}/{total})" if total > 1 else ""
@@ -1860,7 +1892,11 @@ class SkillBuilderConversation:
         # persona_extraction_style, persona_few_shot_example from persona_overlays.yaml.
         # For unknown personas not in persona_overlays.yaml, the overlay falls through (WARNING)
         # and we supply empty-string defaults to preserve the old graceful-degradation behavior.
+        # ADR-034: layout_preset_catalog is injected here so the LLM reasons over
+        # plain-language descriptions, never over hardcoded preset identifiers.
         from .prompt_registry import MissingVarsError as _MissingVarsError
+        # Derive output_format hint from normalised_intent for catalog filtering
+        _output_fmt_hint = (self._data.normalised_intent or {}).get("output_kind")
         _design_base_kwargs = dict(
             normalised_intent=json.dumps(self._data.normalised_intent, indent=2),
             source_capability=json.dumps(self._data.source_capability, indent=2),
@@ -1868,6 +1904,7 @@ class SkillBuilderConversation:
             if self._data.artifact_layout
             else "null",
             existing_kb_cards=json.dumps(cards_summary, indent=2),
+            layout_preset_catalog=_layout_catalog_for_prompt(_output_fmt_hint),
         )
         try:
             spec = get_registry().get_prompt(

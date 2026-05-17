@@ -64,6 +64,8 @@ _DESIGN_SKILL_BASE = dict(
     source_capability="[]",
     artifact_layout="null",
     existing_kb_cards="[]",
+    # ADR-034: layout_preset_catalog is now a required_var in design_skill
+    layout_preset_catalog="(test placeholder — no presets)",
 )
 
 

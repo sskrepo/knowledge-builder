@@ -4,6 +4,36 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-17] architect | ADR-034 — layout preset catalog; stop leaking internal preset ids to users (DECISION-014)
+
+**Root cause confirmed.** Session synth-tpm-3b2c2c71, JSON-RPC id 69: CLARIFY question
+shown to skill author contained the bare internal renderer dispatch key
+`weekly_exec_review_v1`.  Traced to two hardcoded leaks in `skill_builder.yaml`
+design_skill v1.1: (1) `"layout": "weekly_exec_review_v1 | default"` in the schema
+example, (2) rule `Choose "weekly_exec_review_v1" layout only for exec-review PPTX
+skills.`  LLM parroted the identifier into `workflow_shape.layout` and into a
+blocking_question.
+
+**Fix (DECISION-014 + ADR-034):**
+- `framework/renderers/layout_catalog.py` (NEW): single source of truth for layout
+  presets.  Each entry has `internal_id` (never user-facing), `human_label`,
+  `description`, `when_to_use`, `output_format`, `structural_shape`.
+  `catalog_for_prompt()` returns human descriptions for prompt injection — no ids.
+- `skill_builder.yaml` design_skill v1.2: removed hardcoded preset rule and enum;
+  added `{layout_preset_catalog}` required var; LLM now reasons over catalog
+  descriptions to select best-fit; added confidence gate (no layout question when
+  artifact provided + clear intent).
+- `pptx_renderer.py`: dispatch via `get_preset()` catalog lookup; unknown ids → WARNING
+  + default fallback.
+- `conversation.py`: `_sanitize_clarify_question()` static method replaces any
+  internal_id in question text with human_label before storage and surface;
+  `_advance_to_clarify()` applies sanitizer to all blocking questions; imports
+  `catalog_for_prompt` and injects it into both primary and fallback `get_prompt` calls.
+- 23 new tests in `test_adr034_layout_catalog.py`; all 8 pre-existing failures only;
+  zero new.  Existing tests updated to supply `layout_preset_catalog` kwarg.
+- Bug filed: BUG-queue-<see ADB> | `discovered_by=architect` | `status=fixed` |
+  `severity=MEDIUM` | `tool=authorSkill`.
+
 ## [2026-05-17] architect | BUG-queue-f4987: fix authorSkill silent swallow of artifact: ref at CLARIFY
 
 **Root cause confirmed via live ADB read.** Session `synth-tpm-3b2c2c71` (tpm, state=CLARIFY,

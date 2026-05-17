@@ -114,6 +114,7 @@ class TestSynthesisableFieldPrompts:
             persona_key_fields="- risk_summary\n- orm_status",
             persona_extraction_style="Extract as structured table rows.",
             persona_few_shot_example="Example: risk_summary: 'P1 open items'",
+            layout_preset_catalog="(ADR-034 test placeholder — catalog injected at runtime)",
         )
         assert "synthesisable" in formatted
 
@@ -574,7 +575,8 @@ class TestPersonaLoaderExists:
         """tpm overlay must supply persona_extraction_style."""
         spec = _get_registry().get_prompt("design_skill", persona="tpm",
                                           normalised_intent="{}", source_capability="[]",
-                                          artifact_layout="null", existing_kb_cards="[]")
+                                          artifact_layout="null", existing_kb_cards="[]",
+                                          layout_preset_catalog="(ADR-034 test placeholder)")
         assert "exec" in spec.text.lower(), (
             "tpm extraction_style (exec-safe language) not injected into design_skill"
         )
@@ -583,7 +585,8 @@ class TestPersonaLoaderExists:
         """tpm overlay must supply persona_few_shot_example."""
         spec = _get_registry().get_prompt("design_skill", persona="tpm",
                                           normalised_intent="{}", source_capability="[]",
-                                          artifact_layout="null", existing_kb_cards="[]")
+                                          artifact_layout="null", existing_kb_cards="[]",
+                                          layout_preset_catalog="(ADR-034 test placeholder)")
         # few_shot_example is in overlay; design_skill template uses {persona_few_shot_example}
         assert "{persona_few_shot_example}" not in spec.text, (
             "persona_few_shot_example placeholder not substituted in design_skill for tpm"
