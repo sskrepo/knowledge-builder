@@ -5,8 +5,14 @@ Verifies that:
 - The 4 TPM project-tracking email skills have source_binding.mode == ask_parameterized,
   ingest_on_demand True, input_param that matches a declared trigger input name, and
   a non-empty space_allow_list.
-- The 3 non-email TPM skills (26ai_confluence_pptx, 26ai_fa_db_upgrade_pptx,
+- The tracked non-email TPM skills (26ai_fa_db_upgrade_pptx,
   weekly_exec_review) have NO source_binding block (author_fixed default).
+
+Note: 26ai_confluence_pptx is promoted in ADB but its on-disk authoring
+YAML was never committed (ADB is the source of truth for promoted
+skills). It was removed from NON_EMAIL_SKILLS so this suite asserts only
+against tracked, on-disk canonical skills — not transient authoring
+byproducts that are legitimately cleaned off disk.
 """
 
 import pathlib
@@ -22,8 +28,10 @@ EMAIL_SKILLS = [
     "project_tracking_weekly_stakeholder_status_email.yaml",
 ]
 
+# Only tracked, on-disk canonical non-email skills. 26ai_confluence_pptx
+# is ADB-only (its authoring YAML was never committed) — asserting its
+# on-disk presence here was brittle and is intentionally not done.
 NON_EMAIL_SKILLS = [
-    "26ai_confluence_pptx.yaml",
     "26ai_fa_db_upgrade_pptx.yaml",
     "weekly_exec_review.yaml",
 ]
