@@ -5113,7 +5113,7 @@ class SkillBuilderConversation:
     def _synthesize_preview(self) -> dict[str, Any]:
         from .synthesize_schema import synthesize_extraction_schema
         from .synthesize_builder import synthesize_persona_builder_diff
-        from .synthesize_workflow import synthesize_workflow_skill
+        from .synthesize_workflow import synthesize_workflow_skill, derive_space_allow_list
         from .gold_seed import seed_gold_set, seed_workflow_gold
 
         persona = self._data.persona
@@ -5167,12 +5167,39 @@ class SkillBuilderConversation:
             "layout": ws_design.get("layout"),
             "reuse": self._data.reuse_result,
         }
+
+        # ADR-032: derive space_allow_list for ask_parameterized skills.
+        # The derivation reads session state populated by INSPECT_SOURCES:
+        # source_samples carries live-fetched space metadata (most reliable).
+        # URL-form sources and explicit source.space fields are fallbacks.
+        # An empty result means the space is underivable — VALIDATE will hard-fail
+        # with an actionable message (space_allow_list check in
+        # _validate_source_binding_contract), which is better than guessing wrong.
+        # See derive_space_allow_list() docstring for full derivation priority.
+        sb_mode = self._data.source_binding_mode
+        derived_space_allow_list: list[str] = []
+        if sb_mode == "ask_parameterized":
+            derived_space_allow_list = derive_space_allow_list(
+                sources=self._data.sources,
+                source_samples=self._data.source_samples,
+            )
+            log.info(
+                "_synthesize_preview: ask_parameterized skill=%s derived space_allow_list=%r "
+                "(from %d source_samples keys, %d sources)",
+                skill_name,
+                derived_space_allow_list,
+                len(self._data.source_samples),
+                len(self._data.sources),
+            )
+
         wf_struct = synthesize_workflow_skill(
             persona=persona,
             skill_name=skill_name,
             intent=intent,
             fields=self._data.fields,
             template_path=None,
+            source_binding_mode=sb_mode,
+            space_allow_list=derived_space_allow_list if sb_mode == "ask_parameterized" else None,
         )
         artifacts[f"framework/workflow_skills/{persona}/{skill_name}.yaml"] = wf_struct
 

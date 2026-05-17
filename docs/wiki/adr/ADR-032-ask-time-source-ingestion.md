@@ -827,3 +827,92 @@ an un-ingested pageId is supplied.
 - `framework/skill_builder/conversation.py` — CAPTURE_INTENT/CLARIFY/DESIGN_SKILL/VALIDATE target
 - `framework/config/prompts/skill_builder.yaml` — prompt version bumps (P1)
 - `framework/workflow_skills/tpm/project_tracking_confluence_stakeholder_status_meeting_email.yaml` — primary affected skill
+
+---
+
+## P1 Synthesizer Gap Closed — 2026-05-16
+
+**Root cause confirmed:** `framework/skill_builder/synthesize_workflow.py:synthesize_workflow_skill()`
+contained no `source_binding` emission anywhere.  Every newly authored ask_parameterized
+skill was committed with `author_fixed` defaults and immediately failed the P1-D
+`_validate_source_binding_contract` check with "source_binding.mode must be
+'ask_parameterized' … YAML has mode='author_fixed'".
+
+**Fix (two files):**
+
+1. `framework/skill_builder/synthesize_workflow.py`:
+   - New `derive_space_allow_list(sources, source_samples)` function derives
+     Confluence space keys from session state populated by INSPECT_SOURCES.
+   - `synthesize_workflow_skill()` gains five new keyword parameters:
+     `source_binding_mode`, `space_allow_list`, `input_param`, `ephemeral_ttl_seconds`,
+     `source_type`.
+   - When `source_binding_mode == "ask_parameterized"`: emits a complete 6-field
+     `source_binding` block (mode, input_param, ingest_on_demand, source_type,
+     space_allow_list, ephemeral_ttl_seconds) and replaces the generic trigger
+     input with a typed `confluence_page_ref` input whose name matches `input_param`.
+   - When `source_binding_mode == "author_fixed"` (default): no `source_binding`
+     block emitted; trigger input unchanged.  Pre-ADR-032 call sites produce
+     byte-identical output (backward-compatible).
+
+2. `framework/skill_builder/conversation.py` (`_synthesize_preview`):
+   - Imports `derive_space_allow_list` from `synthesize_workflow`.
+   - Calls `derive_space_allow_list(self._data.sources, self._data.source_samples)`
+     when `source_binding_mode == "ask_parameterized"`.
+   - Passes `source_binding_mode` and `space_allow_list` to `synthesize_workflow_skill`.
+   - Logs the derived space list at INFO level for auditability.
+
+**space_allow_list derivation rule (design decision):**
+
+Derivation priority (highest first):
+1. `source_samples` — the INSPECT_SOURCES step fetches live pages and stores
+   their space metadata in `source_samples[key][*].space` (from `sampler.fetch_samples()`
+   which reads `meta.get("space")` from the adapter response).  This is the most
+   reliable source: it reflects the *actual* space of the pages the author configured,
+   confirmed by a live Confluence API call during authoring.
+2. URL-form sources — Confluence URLs encode the space key in `/wiki/spaces/{SPACE}/`
+   or `/display/{SPACE}/` path segments.  Used as fallback when source_samples is
+   empty (e.g. session restored from checkpoint).
+3. Explicit `source.space` key — used when the author configured a Confluence space
+   descriptor (e.g. "confluence OCIFACP").
+
+**Underivable-case behavior (option b — VALIDATE error):**
+
+When all three derivation paths yield nothing (e.g. bare numeric page IDs with no
+prior INSPECT_SOURCES call and no space configuration), `derive_space_allow_list`
+returns `[]`.  `synthesize_workflow_skill` emits `space_allow_list: []`, which the
+existing `_validate_source_binding_contract` check catches and surfaces as an
+actionable VALIDATE error:
+> "source_binding.space_allow_list is missing or empty.  Provide at least one
+>  Confluence space key to restrict ephemeral fetch (e.g. space_allow_list: [FA, PROJ])."
+
+This is option (b) from the ADR-032 design choices.  Option (a) — CLARIFY prompt
+asking for the space key before COMMIT — was considered but rejected because the
+underivable case is rare in practice (INSPECT_SOURCES always fetches live pages and
+populates `source_samples.space`), and adding a new CLARIFY branch solely for this
+fallback path adds state machine complexity disproportionate to the benefit.  The
+VALIDATE error is actionable: the author sees exactly which field to add.
+
+**Why option (b) is safe (ADR-031 no-silent-degradation preserved):**
+
+A wrong space_allow_list (e.g. the P1-E hardcoded [FA, PROJ] bug) is MORE dangerous
+than an empty one — it commits a YAML that appears valid but causes a hard
+"space not in allow-list" failure at runtime for all consumers.  `derive_space_allow_list`
+NEVER guesses or hardcodes.  The empty-return → VALIDATE-error path is the correct
+fail-safe behavior.
+
+**End-to-end proof:**
+
+A freshly synthesized ask_parameterized YAML now passes `_validate_source_binding_contract`
+with session mode `ask_parameterized` (verified by `TestAskParameterizedPassesValidateContract`
+in `test_synthesize_workflow_skillcard.py`).  The synth-tpm-5b3e690f class of authoring
+sessions can now proceed through VALIDATE to PROMOTE.
+
+**Tests added:**
+
+- `framework/tests/unit/test_synthesize_workflow_skillcard.py`:
+  - `TestAskParameterizedSourceBinding` (14 tests) — ask_parameterized emission,
+    author_fixed output unchanged, input_param/trigger contract, all 6 fields present.
+  - `TestAskParameterizedPassesValidateContract` (4 tests) — end-to-end regression
+    that synthesized YAML passes `_validate_source_binding_contract`.
+  - `TestDeriveSpaceAllowList` (12 tests) — derivation from source_samples, URLs,
+    explicit space key; OCIFACP session derivation; underivable returns []; no hardcoded guess.

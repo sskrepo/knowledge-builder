@@ -4,6 +4,51 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] architect | ADR-032 synthesizer source_binding gap closed (P1 synthesizer wiring)
+
+**Gap:** `synthesize_workflow_skill()` in `framework/skill_builder/synthesize_workflow.py`
+never emitted a `source_binding` block.  Every newly authored ask_parameterized skill
+was committed with author_fixed defaults and immediately failed the P1-D
+`_validate_source_binding_contract` check, making the ADR-032 core use case unreachable
+via the conversational authoring flow.
+
+**Fix (two files):**
+
+- `framework/skill_builder/synthesize_workflow.py`:
+  - New `derive_space_allow_list(sources, source_samples)` function.  Derivation priority:
+    (1) `source_samples[*][*].space` from live-fetched INSPECT_SOURCES metadata,
+    (2) `/wiki/spaces/{SPACE}/` or `/display/{SPACE}/` patterns in URL-form sources,
+    (3) explicit `source.space` key.  Returns `[]` for underivable case — never guesses.
+  - `synthesize_workflow_skill()` gains `source_binding_mode`, `space_allow_list`,
+    `input_param`, `ephemeral_ttl_seconds`, `source_type` parameters.
+  - `ask_parameterized`: emits complete 6-field `source_binding` block + typed
+    `confluence_page_ref` trigger input whose name matches `input_param`.
+  - `author_fixed` (default): no `source_binding` block, generic trigger input unchanged
+    (byte-identical to pre-ADR-032 output).
+
+- `framework/skill_builder/conversation.py` (`_synthesize_preview`):
+  - Calls `derive_space_allow_list(self._data.sources, self._data.source_samples)`.
+  - Passes `source_binding_mode` and derived `space_allow_list` to `synthesize_workflow_skill`.
+
+**space_allow_list derivation:** uses actual session data (source_samples from INSPECT_SOURCES).
+Underivable case (bare numeric IDs, no INSPECT_SOURCES data) returns `[]`, which triggers
+the existing VALIDATE error "space_allow_list is missing or empty" — never a silent wrong
+default (ADR-031 preserved).
+
+**Tests:** 30 new tests in `test_synthesize_workflow_skillcard.py`:
+- `TestAskParameterizedSourceBinding` (14): full source_binding block emission, all 6 fields,
+  typed trigger input, author_fixed unchanged.
+- `TestAskParameterizedPassesValidateContract` (4): end-to-end regression — synthesized
+  ask_parameterized YAML passes `_validate_source_binding_contract`.
+- `TestDeriveSpaceAllowList` (12): derivation from source_samples, URLs, explicit space key;
+  OCIFACP session → [OCIFACP]; underivable → []; no hardcoded guess.
+
+**Verified:** 16 total failures = 8 pre-existing baseline (test_smoke_validate x7 +
+test_code_wiki x1) + 8 pre-existing baseline (test_source_binding_yaml missing YAML).
+Zero new regressions.
+
+---
+
 ## [2026-05-16] backend-dev | Fix deleteSkill event-loop blocking (BUG-queue-280f1 Part 2, d3ec0-class)
 
 **Bug:** `_make_delete_skill_handler` in `framework/deploy/mcp_tools.py` declared
