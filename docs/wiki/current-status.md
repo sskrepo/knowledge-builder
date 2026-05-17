@@ -11,7 +11,9 @@ status: current
 # Current Status
 
 ## Where we are
-**Phase 1-3 + V3 deployment layer + laptop mode code complete. ADR-028 S1-S6 live. ADR-029 Phases 1+2 complete. ADR-030 P2 complete. ADR-035 access-gate + single-truth artifact binding (DECISION-015) landed.** 160+ Python files, ~18K+ LOC, 1502+ tests passing (8 pre-existing failures).
+**Phase 1-3 + V3 deployment layer + laptop mode code complete. ADR-028 S1-S6 live. ADR-029 Phases 1+2 complete. ADR-030 P2 complete. ADR-035 access-gate + single-truth artifact binding (DECISION-015) landed. ADR-038 + DECISION-018 (consumer-facing card + routing self-test) landed.** 160+ Python files, ~18K+ LOC, 1528+ tests passing (9 pre-existing failures).
+
+DECISION-018 / ADR-038 landed (2026-05-17): consumer-facing card generated at DESIGN_SKILL (LLM, `design_skill_card` prompt); `routing_queries.positive/negative` dual-use as Tier-1 classifier signal (D) and EVAL Path B self-test (E); `synthesize_workflow` no-clobber invariant (B); must_show_human card review gate at DESIGN time (C); EVAL Path B (`ShimWorkflows.resolve_only`, ingest-or-later scope); EVAL Path A (`WorkflowExecutor.execute_from_config`); three-section EVAL report always present; PROMOTE hard-blocked on routing self-test failure (no override). Bugs fixed: BUG-queue-2ad9b (routing-miss, HIGH), BUG-queue-5f2a1 (EVAL null, HIGH). Open: BUG-queue-a3f7e (kb-cli KeyError, LOW). 27 new tests. Zero new failures.
 
 ADR-035 (DECISION-015) landed (2026-05-17): authoring-flow FSM redesign — access-verify gate; conditional-required reference artifact (pptx/docx/template-referenced = required, no skip; text/email/markdown = not gated); `has_bound_reference_artifact()` single-source-of-truth for REVIEW_DESIGN and _run_eval; `_bind_reference_artifact`/`_clear_reference_artifact` atomic helpers; `artifact_reference_name` field (REVIEW_DESIGN reads name, not design text); re-entry guard preserves binding on skip. Session `synth-tpm-c3ef4ef2` recovered (`framework/cli/recover_bound_artifact_session.py`). Bug BUG-queue-18bc6 filed (HIGH severity, ADB-confirmed). 38 new tests. Zero new failures.
 

@@ -443,6 +443,16 @@ class _SessionData:
     # Schema: {"filename": str, "artifact_id": str}
     # Persisted across ADB round-trips so resume across client restarts works.
     _pending_artifact_stash: dict | None = field(default=None)
+    # ADR-038: consumer-facing skill_card produced by DESIGN_SKILL LLM call.
+    # Contains summary, use_when, example_invocations, routing_queries.
+    # Persisted so _synthesize_preview can carry it through to the committed
+    # workflow_skill artifact (synthesize_workflow.py must NOT overwrite it).
+    # None for pre-ADR-038 sessions (backward-compat).
+    design_skill_card: dict | None = field(default=None)
+    # ADR-038 Path B: routing self-test results stored in eval_result.
+    # True when routing self-test passed (all positives route to this skill,
+    # no negatives route to it). None = self-test not yet run.
+    routing_self_test_passed: bool | None = field(default=None)
 
 
 class SkillBuilderConversation:
@@ -658,6 +668,10 @@ class SkillBuilderConversation:
         # BUG-queue-f4987: artifact stash — None when nothing pending; dict when
         # user supplied "artifact:<filename> id:<artifact_id>" at a pre-upload state.
         d["pending_artifact_stash"] = self._data._pending_artifact_stash
+        # ADR-038: consumer-facing skill card produced at DESIGN_SKILL.
+        # Backward-compat default None for pre-ADR-038 sessions.
+        d["design_skill_card"] = self._data.design_skill_card
+        d["routing_self_test_passed"] = self._data.routing_self_test_passed
         return d
 
     @classmethod
@@ -739,6 +753,10 @@ class SkillBuilderConversation:
             # BUG-queue-f4987: artifact stash.
             # Backward-compat default None — pre-fix sessions have no stash.
             _pending_artifact_stash=d.get("pending_artifact_stash"),
+            # ADR-038: consumer-facing skill card produced at DESIGN_SKILL.
+            # Backward-compat default None for pre-ADR-038 sessions.
+            design_skill_card=d.get("design_skill_card"),
+            routing_self_test_passed=d.get("routing_self_test_passed"),
         )
         return obj
 
@@ -2311,6 +2329,20 @@ class SkillBuilderConversation:
             len(blocking_questions_from_design),
         )
 
+        # ADR-038 §A: generate the consumer-facing skill_card + routing_queries
+        # at DESIGN_SKILL time.  This is an LLM call on a new prompt that is
+        # NOT gate-locked (it is NOT failure_classifier).  Hot-reload-safe.
+        # The card is stored on session data so _synthesize_preview can carry
+        # it through to the committed workflow_skill artifact (synthesize_workflow.py
+        # MUST NOT overwrite it — see ADR-038 §B).
+        _card_generated = self._generate_design_skill_card()
+        log.info(
+            "_run_design_skill: consumer-facing card generated (has routing_queries=%s). "
+            "persona=%s skill=%s",
+            bool((_card_generated or {}).get("routing_queries")),
+            self._data.persona, self._data.skill_name,
+        )
+
         if blocking_questions_from_design:
             log.info(
                 "_run_design_skill: routing to CLARIFY — %d blocking questions before REVIEW_DESIGN",
@@ -2319,16 +2351,207 @@ class SkillBuilderConversation:
             bq_dicts = [{"question": q, "resolved": False} for q in blocking_questions_from_design]
             return self._advance_to_clarify(bq_dicts, next_state="REVIEW_DESIGN")
 
-        return self._prompt_review_design()
+        # ADR-038 §C: must_show_human gate — author must review/confirm the
+        # generated skill card (incl. routing_queries) before proceeding.
+        return self._prompt_review_skill_card()
+
+    def _generate_design_skill_card(self) -> dict:
+        """Generate the consumer-facing skill card at DESIGN_SKILL time (ADR-038 §A).
+
+        Calls the design_skill_card prompt (ADR-030 externalized, hot-reload-safe).
+        Returns the card dict and stores it on self._data.design_skill_card.
+        Falls back to a minimal card if the LLM call fails so the FSM never halts
+        silently — the fallback card has no routing_queries (detected at EVAL).
+        """
+        persona = self._data.persona
+        skill_name = self._data.skill_name
+        task_description = self._data.intent_description or skill_name
+        output_format = self._data.output_format or "markdown"
+        intent_summary = json.dumps(self._data.normalised_intent or {}, indent=2)
+
+        if not self._llm:
+            log.warning(
+                "_generate_design_skill_card: no LLM — using minimal fallback card. "
+                "persona=%s skill=%s",
+                persona, skill_name,
+            )
+            fallback = {
+                "summary": task_description[:200],
+                "use_when": f"User asks for: {task_description[:200]} (produces {output_format} output)",
+                "example_invocations": [
+                    f"{task_description[:300]} Output: {output_format}."
+                ],
+                "routing_queries": {"positive": [], "negative": []},
+            }
+            self._data.design_skill_card = fallback
+            return fallback
+
+        try:
+            card_spec = get_registry().get_prompt(
+                "design_skill_card",
+                skill_name=skill_name,
+                persona=persona,
+                task_description=task_description[:500],
+                output_format=output_format,
+                intent_summary=intent_summary[:1000],
+            )
+            result = self._llm.chat(
+                model=card_spec.model,
+                messages=[{"role": "user", "content": card_spec.text}],
+                response_format=card_spec.response_format,
+                max_tokens=card_spec.max_tokens,
+            )
+            raw = result.get("text", "") if isinstance(result, dict) else str(result)
+            tokens_out = result.get("tokens_out") if isinstance(result, dict) else None
+            card = _parse_llm_json_response(raw, tokens_out=tokens_out, max_tokens=card_spec.max_tokens)
+
+            # Validate card structure — must have routing_queries
+            if not isinstance(card.get("routing_queries"), dict):
+                log.warning(
+                    "_generate_design_skill_card: LLM returned card without routing_queries "
+                    "— injecting empty structure. persona=%s skill=%s card_keys=%s",
+                    persona, skill_name, list(card.keys()),
+                )
+                card["routing_queries"] = {"positive": [], "negative": []}
+
+            # Ensure example_invocations always includes output_format token
+            # (BUG-queue-2ad9a regression guard)
+            if card.get("example_invocations"):
+                first_ex = card["example_invocations"][0]
+                if output_format and output_format.lower() not in first_ex.lower():
+                    card["example_invocations"][0] = f"{first_ex} (Output: {output_format})"
+
+            self._data.design_skill_card = card
+            log.info(
+                "_generate_design_skill_card: card stored. positives=%d negatives=%d "
+                "persona=%s skill=%s",
+                len(card["routing_queries"].get("positive", [])),
+                len(card["routing_queries"].get("negative", [])),
+                persona, skill_name,
+            )
+            return card
+
+        except Exception as exc:
+            log.warning(
+                "_generate_design_skill_card: LLM call failed (%s) — using fallback card. "
+                "persona=%s skill=%s",
+                exc, persona, skill_name,
+            )
+            fallback = {
+                "summary": task_description[:200],
+                "use_when": f"User asks for: {task_description[:200]} (produces {output_format} output)",
+                "example_invocations": [
+                    f"{task_description[:300]} Output: {output_format}."
+                ],
+                "routing_queries": {"positive": [], "negative": []},
+            }
+            self._data.design_skill_card = fallback
+            return fallback
+
+    def _prompt_review_skill_card(self) -> ConversationTurn:
+        """ADR-038 §C: must_show_human gate — surface generated card to author.
+
+        The author must review/edit/confirm the consumer-facing skill card
+        (incl. routing_queries) before proceeding to REVIEW_DESIGN. This is a
+        blocking human review turn per the locked design.
+        """
+        card = self._data.design_skill_card or {}
+        rq = card.get("routing_queries", {})
+        positives = rq.get("positive", [])
+        negatives = rq.get("negative", [])
+
+        lines = [
+            "=== Consumer-Facing Skill Card (review before proceeding) ===\n",
+            f"Summary: {card.get('summary', '(not generated)')}",
+            f"Use when: {card.get('use_when', '(not generated)')}",
+        ]
+        if card.get("example_invocations"):
+            lines.append("Example invocations:")
+            for ex in card["example_invocations"]:
+                lines.append(f"  - {ex}")
+        lines.append("")
+        lines.append("Routing queries (used for EVAL self-test + runtime classifier signal):")
+        lines.append("  POSITIVE (should route to this skill):")
+        for q in positives:
+            lines.append(f"    + {q}")
+        if not positives:
+            lines.append("    (none generated — EVAL Path-B self-test will not run)")
+        lines.append("  NEGATIVE (should NOT route to this skill):")
+        for q in negatives:
+            lines.append(f"    - {q}")
+        if not negatives:
+            lines.append("    (none generated — no negative routing guard at EVAL)")
+        lines.append("")
+        lines.append(
+            "Review the card above. Type 'ok' to confirm, or provide edits as JSON:\n"
+            '  e.g. {"summary": "Updated summary text"}\n'
+            '  or   {"routing_queries": {"positive": ["query 1", "query 2"], "negative": ["query 3"]}}'
+        )
+
+        return ConversationTurn(
+            state="DESIGN_SKILL",
+            message="\n".join(lines),
+            data={"skill_card": card},
+            options=["ok"],
+            must_show_human=True,   # ADR-038 §C: author MUST review this turn
+            awaiting_user=True,
+        )
 
     def _handle_design_skill_response(self, user_input: str) -> ConversationTurn:
-        """Handle user response at DESIGN_SKILL state (rare — usually auto-transitions)."""
-        # This state auto-transitions via _run_design_skill; the handler is
-        # here to catch any edge cases where the state machine lands here
-        # from a session restore without a design having run yet.
+        """Handle user response at DESIGN_SKILL state.
+
+        ADR-038 §C: covers the skill-card review turn that follows card generation.
+        The author can confirm ('ok') or provide JSON edits to the card before
+        proceeding to REVIEW_DESIGN.
+
+        Also handles edge cases where the state machine lands here from a session
+        restore without a design having run yet.
+        """
+        # Edge case: session restored without design yet — re-run design
         if self._data.design is None:
             return self._run_design_skill()
-        return self._prompt_review_design()
+
+        lowered = user_input.lower().strip()
+
+        # If no card yet (backward compat restore), skip card review
+        if self._data.design_skill_card is None:
+            return self._prompt_review_design()
+
+        # Check if user is confirming ('ok', 'yes', 'looks good', 'confirm')
+        if any(kw in lowered for kw in ("ok", "yes", "looks good", "confirm", "proceed")):
+            log.info(
+                "_handle_design_skill_response: author confirmed skill card. "
+                "persona=%s skill=%s routing_queries_positive=%d",
+                self._data.persona, self._data.skill_name,
+                len((self._data.design_skill_card.get("routing_queries") or {}).get("positive", [])),
+            )
+            return self._prompt_review_design()
+
+        # Try to apply JSON edits to the card
+        try:
+            edits = json.loads(user_input)
+            if isinstance(edits, dict):
+                card = dict(self._data.design_skill_card or {})
+                for key, val in edits.items():
+                    if key == "routing_queries" and isinstance(val, dict):
+                        rq = dict(card.get("routing_queries") or {})
+                        rq.update(val)
+                        card["routing_queries"] = rq
+                    else:
+                        card[key] = val
+                self._data.design_skill_card = card
+                log.info(
+                    "_handle_design_skill_response: author edited card fields=%s. "
+                    "persona=%s skill=%s",
+                    list(edits.keys()), self._data.persona, self._data.skill_name,
+                )
+                # Re-show the updated card for confirmation
+                return self._prompt_review_skill_card()
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # Non-JSON, non-confirm input — re-show the card with guidance
+        return self._prompt_review_skill_card()
 
     # -- REVIEW_DESIGN ---------------------------------------------------
 
@@ -4223,6 +4446,8 @@ class SkillBuilderConversation:
         import os as _os
         import time
 
+        # Capture entering state BEFORE mutating — used for INGEST-or-later gate below.
+        _entering_state = self._state
         self._state = "EVAL"
 
         if not self._llm:
@@ -4415,64 +4640,192 @@ class SkillBuilderConversation:
         faithfulness = round(faithful_count / max(faithfulness_total, 1), 3)
         log.info("_run_eval: faithfulness=%.3f (%d/%d faithful)", faithfulness, faithful_count, faithfulness_total)
 
-        # Step 6: workflow scoring — call /api/v1/ask
+        # Step 6: ADR-038 — Path B routing self-test + Path A in-process execution.
+        # Replaces the old /api/v1/ask HTTP call (chicken-and-egg defect, BUG-queue-2ad9a).
+        # See ADR-038 §B.2 (Path A) and §B.3 (Path B) for full design.
         workflow_gold_rows: list[dict] = []
-        ask_result: dict = {}
-        ask_latency_ms = None
-        wf_tier = None
+        expected_skill = f"{persona}.{skill_name}"
         wf_artifact_url = None
+        ask_latency_ms = None
 
-        mcp_base = _os.environ.get("KBF_MCP_URL", "http://localhost:8080")
-        bearer = _os.environ.get("KBF_BEARER_TOKEN", "dev-only-token-replace-me")
-        # Build a canonical question from the normalised intent
-        domains = (self._data.normalised_intent or {}).get("scope_domains", [skill_name])
-        canonical_question = f"What is the status of the {' '.join(domains)} project for this week?"
+        # --- ADR-038 §B.3: Path B — routing self-test (resolve-only mode) ---
+        # INGEST-or-later gate (ADR-038 §B.4): the FSM naturally ensures this
+        # at EVAL state, but check explicitly to guard against future FSM changes.
+        # _entering_state is captured before self._state was mutated to "EVAL".
+        _pre_ingest_states = {"COMMITTED", "VALIDATE"}
+        if _entering_state in _pre_ingest_states:
+            # Hard fail — do NOT silently skip (no-silent-degradation rule)
+            raise RuntimeError(
+                f"EVAL: INGEST-or-later gate failed. Skill is at state={_entering_state!r}. "
+                f"EVAL cannot run before INGEST — the KB does not exist yet. "
+                f"Per ADR-038 §B.4, this is a hard failure (not a silent skip)."
+            )
+
+        # Path B routing self-test: use routing_queries from the design_skill_card.
+        # These are curated consumer queries from the author's review at DESIGN_SKILL.
+        routing_results: list[dict] = []
+        routing_self_test_passed: bool = True  # default true; set False on any failure
+
+        skill_card = self._data.design_skill_card or {}
+        rq = skill_card.get("routing_queries") or {}
+        positive_queries = rq.get("positive") or []
+        negative_queries = rq.get("negative") or []
+
+        # Load the ShimWorkflows for resolve-only routing
+        try:
+            from ..orchestrator.shim_workflows import ShimWorkflows
+            wf_dir = REPO_ROOT / "framework" / "workflow_skills"
+            _shim = ShimWorkflows(wf_dir, skill_store=self._skill_store)
+        except Exception as exc:
+            log.warning("_run_eval: could not load ShimWorkflows for Path-B: %s", exc)
+            _shim = None
+
+        this_skill_id = f"{persona}.{skill_name}"
+
+        if _shim and positive_queries:
+            log.info(
+                "_run_eval: Path-B routing self-test — %d positive, %d negative queries. "
+                "persona=%s skill=%s",
+                len(positive_queries), len(negative_queries), persona, skill_name,
+            )
+            for q in positive_queries:
+                resolved = _shim.resolve_only(q, scope="ingest_or_later")
+                resolved_id = resolved.get("skill_id")
+                resolved_name = resolved.get("skill_name")
+                passed = (
+                    resolved.get("matched")
+                    and resolved.get("tier") == 1
+                    and resolved_id == this_skill_id
+                )
+                if not passed:
+                    routing_self_test_passed = False
+                routing_results.append({
+                    "type": "positive",
+                    "query": q,
+                    "passed": passed,
+                    "resolved_skill_id": resolved_id,
+                    "resolved_skill_name": resolved_name,
+                    "tier": resolved.get("tier"),
+                })
+                log.info(
+                    "_run_eval: Path-B positive q=%r → %s tier=%s pass=%s",
+                    q, resolved_id, resolved.get("tier"), passed,
+                )
+            for q in negative_queries:
+                resolved = _shim.resolve_only(q, scope="ingest_or_later")
+                resolved_id = resolved.get("skill_id")
+                # Negative: should NOT route to this skill
+                passed = (not resolved.get("matched")) or (resolved_id != this_skill_id)
+                if not passed:
+                    routing_self_test_passed = False
+                routing_results.append({
+                    "type": "negative",
+                    "query": q,
+                    "passed": passed,
+                    "resolved_skill_id": resolved_id,
+                    "resolved_skill_name": resolved.get("skill_name"),
+                    "tier": resolved.get("tier"),
+                })
+                log.info(
+                    "_run_eval: Path-B negative q=%r → %s tier=%s pass=%s",
+                    q, resolved_id, resolved.get("tier"), passed,
+                )
+        elif not positive_queries:
+            log.info(
+                "_run_eval: Path-B skipped — no routing_queries.positive in skill card. "
+                "routing_self_test_passed defaults True (no queries to fail). "
+                "persona=%s skill=%s",
+                persona, skill_name,
+            )
+        else:
+            log.warning("_run_eval: Path-B skipped — ShimWorkflows failed to load.")
+
+        # Store routing self-test result on session
+        self._data.routing_self_test_passed = routing_self_test_passed
+
+        # --- ADR-038 §B.2: Path A — in-process execution via execute_from_config ---
+        # Uses the session's committed/design config + real inputs, bypassing the
+        # promoted-only router. Never exposed as a public HTTP flag or endpoint.
+        execution_status: str = "not_run"  # "success" | "failure" | "not_run"
+        execution_error: str | None = None
+        produced_artifact_bytes: bytes | None = None
 
         try:
-            import urllib.request
-            ask_payload = json.dumps({
-                "question": canonical_question,
-                "persona": persona,
-            }).encode()
-            req = urllib.request.Request(
-                f"{mcp_base}/api/v1/ask",
-                data=ask_payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {bearer}",
-                },
-                method="POST",
+            from ..workflow_runtime.executor import WorkflowExecutor
+            wf_cfg_text = self._skill_store.read_artifact(
+                persona=persona, skill_name=skill_name, artifact_type="workflow_skill"
             )
-            t0 = time.monotonic()
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            if wf_cfg_text:
+                wf_cfg = yaml.safe_load(wf_cfg_text) or {}
+                # Build inputs from session state
+                domains = (self._data.normalised_intent or {}).get("scope_domains", [skill_name])
+                canonical_question = f"What is the status of the {' '.join(domains)} project for this week?"
+                exec_inputs = {"input": canonical_question, "persona": persona}
+                t0 = time.monotonic()
+                _executor = WorkflowExecutor(llm=self._llm)
+                exec_result = _executor.execute_from_config(wf_cfg, exec_inputs)
                 ask_latency_ms = int((time.monotonic() - t0) * 1000)
-                ask_result = json.loads(resp.read().decode())
-            wf_tier = ask_result.get("tierUsed") or ask_result.get("tier_used")
-            wf_artifact_url = ask_result.get("artifactUrl") or ask_result.get("artifact_url")
-            log.info(
-                "_run_eval: /api/v1/ask tier=%s latency_ms=%d artifact_url=%s",
-                wf_tier, ask_latency_ms or 0, wf_artifact_url,
-            )
+                execution_status = "success"
+                wf_artifact_url = (
+                    exec_result.get("artifact_url")
+                    or exec_result.get("artifact_path")
+                    or exec_result.get("output_path")
+                )
+                log.info(
+                    "_run_eval: Path-A execution SUCCESS latency_ms=%d artifact_url=%s",
+                    ask_latency_ms, wf_artifact_url,
+                )
+            else:
+                execution_status = "failure"
+                execution_error = (
+                    f"workflow_skill artifact not found in ADB for {persona}.{skill_name}. "
+                    f"Re-commit the skill before running EVAL."
+                )
+                log.warning("_run_eval: Path-A skipped — no workflow_skill artifact in ADB.")
         except Exception as exc:
-            log.warning(
-                "_run_eval: /api/v1/ask call failed (%s) — workflow scoring skipped. "
-                "This is non-fatal; extraction metrics are still valid.",
-                exc,
+            # ADR-038 §B.2: execution failure is HIGH-severity; NOT collapsed to soft note.
+            execution_status = "failure"
+            execution_error = f"{type(exc).__name__}: {exc}"
+            log.error(
+                "_run_eval: Path-A EXECUTION FAILURE [HIGH] — persona=%s skill=%s error=%s",
+                persona, skill_name, exc, exc_info=True,
             )
 
-        # Build workflow gold row
-        expected_skill = f"{persona}.{skill_name}"
+        # Try to read produced artifact bytes from the delivered path
+        if wf_artifact_url:
+            try:
+                produced_path = Path(wf_artifact_url) if not wf_artifact_url.startswith("http") else None
+                if produced_path and produced_path.exists():
+                    produced_artifact_bytes = produced_path.read_bytes()
+                    log.info(
+                        "_run_eval: read produced artifact bytes (%d bytes) from %s",
+                        len(produced_artifact_bytes), produced_path,
+                    )
+                else:
+                    log.info(
+                        "_run_eval: produced artifact URL %r is remote or not found "
+                        "on filesystem — comparator skipped",
+                        wf_artifact_url,
+                    )
+            except Exception as exc:
+                log.warning("_run_eval: could not read produced artifact bytes: %s", exc)
+
+        # Build workflow gold row (updated to reflect ADR-038 Path-A/B results)
+        domains_for_gold = (self._data.normalised_intent or {}).get("scope_domains", [skill_name])
+        canonical_question_for_gold = (
+            f"What is the status of the {' '.join(domains_for_gold)} project for this week?"
+        )
         wf_gold_row = {
             "kind": "auto_generated",
-            "question": canonical_question,
+            "question": canonical_question_for_gold,
             "expected_skill": expected_skill,
             "expected_tier": 1,
             # C10/ADR-031: no cap — eval quality gate must cover the whole schema
-            # (e.g. 32 fields), not just the first 5. Arbitrary :5 cap means
-            # 27 of 32 fields are never checked in the eval gold row.
             "expected_fields": list(all_fields),
-            "actual_tier_used": wf_tier,
-            "actual_artifact_url": wf_artifact_url,
+            "path_a_status": execution_status,
+            "path_a_artifact_url": wf_artifact_url,
+            "path_b_routing_results": routing_results,
+            "path_b_passed": routing_self_test_passed,
             "ask_latency_ms": ask_latency_ms,
             "created_at": _now_iso(),
         }
@@ -4544,31 +4897,11 @@ class SkillBuilderConversation:
         )
         total_cost_est = faithfulness_total * 0.002  # rough estimate at $0.002/call
 
-        # Step 9: ADR-029 Phase 1 — run ArtifactComparator if a reference artifact
-        # is available.  The comparator result REPLACES exit_criteria.passed as the
-        # terminal signal at EVAL.  The gap report is surfaced with must_show_human=True.
+        # Step 9: ADR-029 Phase 1 + ADR-038 §B.2 — run ArtifactComparator.
+        # produced_artifact_bytes is set above by Path-A execution (or None on failure).
+        # The comparator gate requires BOTH produced_artifact_bytes AND ref_bytes.
         comparator_result = None
         comparator_error: str | None = None
-        produced_artifact_bytes: bytes | None = None
-
-        if wf_artifact_url:
-            # Try to read produced artifact bytes from the delivered path
-            try:
-                produced_path = Path(wf_artifact_url) if not wf_artifact_url.startswith("http") else None
-                if produced_path and produced_path.exists():
-                    produced_artifact_bytes = produced_path.read_bytes()
-                    log.info(
-                        "_run_eval: read produced artifact bytes (%d bytes) from %s",
-                        len(produced_artifact_bytes), produced_path,
-                    )
-                else:
-                    log.info(
-                        "_run_eval: produced artifact URL %r is remote or not found "
-                        "on filesystem — comparator skipped",
-                        wf_artifact_url,
-                    )
-            except Exception as exc:
-                log.warning("_run_eval: could not read produced artifact bytes: %s", exc)
 
         # ADR-035 (DECISION-015): use single-source-of-truth method for artifact bound check.
         # EVAL and REVIEW_DESIGN now agree by construction — both call has_bound_reference_artifact().
@@ -4668,52 +5001,125 @@ class SkillBuilderConversation:
                     "gates PROMOTE. User explicit accept at EVAL gap-report is the gate."
                 ),
             },
-            "workflow_score": {
-                "tier_used": wf_tier,
+            # ADR-038: Path-A execution result (replaces old workflow_score/wf_tier dict)
+            "path_a_execution": {
+                "status": execution_status,
                 "artifact_url": wf_artifact_url,
-                "expected_skill": expected_skill,
-                "skill_matched": wf_tier == 1,
+                "latency_ms": ask_latency_ms,
+                "error": execution_error,
+            },
+            # ADR-038: Path-B routing self-test results
+            "path_b_routing": {
+                "passed": routing_self_test_passed,
+                "results": routing_results,
+                "positive_count": len(positive_queries),
+                "negative_count": len(negative_queries),
             },
             # ADR-029 Phase 1: comparator result (None when no reference was uploaded)
             "comparator": comparator_result.to_dict() if comparator_result else None,
+            # ADR-038 §F: routing_self_test_passed is a HARD BLOCKER on PROMOTE.
+            # If False, PROMOTE is refused with an actionable message.
+            "routing_self_test_passed": routing_self_test_passed,
         }
 
-        # Build user message — ADR-029 Phase 1 EVAL turn.
-        # Comparator gap report is the PRIMARY signal; diagnostic metrics are shown
-        # below it but do NOT control the PROMOTE gate.
+        # Build user message — ADR-038 §B.6: THREE mandatory sections.
+        # Each section is ALWAYS present; silent omission of any section is prohibited.
         lines: list[str] = []
 
-        if comparator_result:
-            # PRIMARY: gap report from the comparator (must_show_human=True)
-            lines.append("=== ADR-029 EVAL Gap Report ===\n")
-            lines.append(comparator_result.gap_report)
-            lines.append("")
+        # ----------------------------------------------------------------
+        # SECTION 1 — ROUTING ASSERTIONS (Path B)
+        # ----------------------------------------------------------------
+        lines.append("=== SECTION 1: ROUTING ASSERTIONS (Path B) ===\n")
+        if positive_queries or negative_queries:
+            pass_count = sum(1 for r in routing_results if r["passed"])
+            fail_count = len(routing_results) - pass_count
             lines.append(
-                "Review the gap report above. "
-                "If the produced artifact meets your quality bar, type 'accept' to promote. "
-                "If it needs changes, review the guidance below and choose an option."
+                f"Positive queries tested: {len(positive_queries)}  "
+                f"Negative queries tested: {len(negative_queries)}"
             )
-        elif comparator_error:
+            for r in routing_results:
+                status_tag = "PASS" if r["passed"] else "FAIL  [HIGH]"
+                q_type = r["type"].upper()
+                resolved = r.get("resolved_skill_name") or r.get("resolved_skill_id") or "(none)"
+                tier_str = f" tier {r.get('tier', '?')}" if r.get("tier") else ""
+                lines.append(f"  {q_type} {status_tag}: {r['query']!r} → {resolved}{tier_str}")
+            if not routing_self_test_passed:
+                lines.append(
+                    f"\n  [HIGH] Routing self-test FAILED: {fail_count} assertion(s) failed. "
+                    "PROMOTE is BLOCKED until all routing assertions pass. "
+                    "Fix the skill card routing_queries or the skill's summary/use_when text, "
+                    "then re-run EVAL."
+                )
+            else:
+                lines.append(f"\n  Routing self-test PASSED ({pass_count}/{len(routing_results)} assertions passed).")
+        else:
             lines.append(
-                f"Note: artifact comparison failed ({comparator_error}). "
-                "Falling back to diagnostic metrics only."
+                "  N/A — no routing_queries in skill card (DESIGN_SKILL did not generate them "
+                "or they were cleared during review). Routing self-test did not run.\n"
+                "  Note: without routing_queries, routing correctness is UNVERIFIED. "
+                "Consider re-running DESIGN_SKILL to generate a consumer-facing card."
             )
-        elif self.has_bound_reference_artifact() and not produced_artifact_bytes:
+        lines.append("")
+
+        # ----------------------------------------------------------------
+        # SECTION 2 — EXECUTION RESULT (Path A)
+        # ----------------------------------------------------------------
+        lines.append("=== SECTION 2: EXECUTION (Path A) ===\n")
+        if execution_status == "success":
+            lines.append(f"  Status: SUCCESS")
+            if wf_artifact_url:
+                lines.append(f"  Artifact produced: {wf_artifact_url}")
+            if ask_latency_ms is not None:
+                lines.append(f"  Latency: {ask_latency_ms}ms")
+        elif execution_status == "failure":
+            lines.append(f"  Status: FAILURE  [HIGH]")
+            lines.append(f"  Error: {execution_error}")
             lines.append(
-                f"Note: reference artifact '{self._data.artifact_reference_name}' was bound "
-                "but the workflow did not deliver a local artifact file this run — "
-                "comparator skipped. Showing diagnostic metrics only."
+                "  The skill execution failed. PROMOTE requires execution success. "
+                "Review the error above and fix the skill configuration."
             )
         else:
-            # ADR-035: has_bound_reference_artifact() is False — both REVIEW_DESIGN
-            # and EVAL agree that no artifact is bound (single source of truth).
-            lines.append(
-                "No reference artifact was bound at UPLOAD_ARTIFACT_EXAMPLE — "
-                "structural comparison is not available. "
-                "Showing diagnostic metrics only."
-            )
-
+            lines.append("  Status: NOT RUN (no workflow_skill config available in ADB)")
         lines.append("")
+
+        # ----------------------------------------------------------------
+        # SECTION 3 — COMPARATOR SCORES (ADR-029)
+        # ----------------------------------------------------------------
+        lines.append("=== SECTION 3: COMPARATOR (ADR-029) ===\n")
+        if comparator_result:
+            lines.append(f"  Status: RAN")
+            lines.append(
+                f"  structure_score: {comparator_result.structure_score:.0%}  "
+                f"density_score: {comparator_result.density_score:.0%}"
+            )
+            if comparator_result.missing_sections:
+                lines.append(f"  Missing: {', '.join(comparator_result.missing_sections)}")
+            if comparator_result.thin_sections:
+                lines.append(f"  Thin:    {', '.join(comparator_result.thin_sections)}")
+            lines.append("")
+            lines.append(comparator_result.gap_report)
+        elif comparator_error:
+            lines.append(f"  Status: SKIPPED — comparator.compare() raised: {comparator_error}")
+        elif execution_status == "failure":
+            lines.append("  Status: SKIPPED — reason: execution failed in Section 2")
+        elif self.has_bound_reference_artifact() and not produced_artifact_bytes:
+            lines.append(
+                f"  Status: SKIPPED — reference artifact "
+                f"'{self._data.artifact_reference_name}' was bound "
+                "but execution did not deliver a local artifact file this run"
+            )
+        else:
+            # ADR-035: has_bound_reference_artifact() is False
+            lines.append(
+                "  Status: SKIPPED — reason: no bound reference artifact "
+                "(ADR-035 has_bound_reference_artifact()=False; "
+                "upload a reference at UPLOAD_ARTIFACT_EXAMPLE to enable comparator)"
+            )
+        lines.append("")
+
+        # ----------------------------------------------------------------
+        # Diagnostic Metrics (informational — not the PROMOTE gate)
+        # ----------------------------------------------------------------
         lines.append(
             "=== Diagnostic Metrics (informational — not the PROMOTE gate) ==="
         )
@@ -4727,9 +5133,9 @@ class SkillBuilderConversation:
             f"[DIAGNOSTIC ONLY]"
         )
         if ask_latency_ms is not None:
-            lines.append(f"  /api/v1/ask latency: {ask_latency_ms}ms, tier={wf_tier}")
+            lines.append(f"  Path-A execution latency: {ask_latency_ms}ms")
         else:
-            lines.append("  /api/v1/ask: not reached (server may be down)")
+            lines.append("  Path-A execution: not run")
 
         lines.append("")
         lines.append(
@@ -4738,36 +5144,36 @@ class SkillBuilderConversation:
         )
         lines.append("")
 
-        if comparator_result:
+        # Options — ADR-038 §F: if routing self-test failed, PROMOTE is blocked.
+        if not routing_self_test_passed and (positive_queries or negative_queries):
             lines.append(
-                "Comparator scores:\n"
-                f"  Structure: {comparator_result.structure_score:.0%} "
-                f"({len(comparator_result.missing_sections)} sections missing)\n"
-                f"  Density:   {comparator_result.density_score:.0%} "
-                f"({len(comparator_result.thin_sections)} thin sections)"
+                "Options (PROMOTE IS BLOCKED — routing self-test failed):\n"
+                "  'ship as draft'    — save as draft without promoting\n"
+                "  'review design'    — go back to REVIEW_DESIGN to update skill card\n"
+                "  'stop here'        — pause session\n\n"
+                "To unblock PROMOTE: fix the routing_queries in the skill card at DESIGN_SKILL, "
+                "re-commit, re-ingest, and re-run EVAL. No override is provided."
             )
-            if comparator_result.missing_sections:
-                lines.append(f"  Missing: {', '.join(comparator_result.missing_sections)}")
-            if comparator_result.thin_sections:
-                lines.append(f"  Thin:    {', '.join(comparator_result.thin_sections)}")
-            lines.append("")
+        else:
+            lines.append(
+                "Options:\n"
+                "  'accept'           — the produced artifact meets your quality bar → PROMOTE\n"
+                "  'ship as draft'    — save as draft without promoting\n"
+                "  'review design'    — go back to REVIEW_DESIGN (S6 routing — not yet active)\n"
+                "  'configure sources'— go back to CONFIGURE_SOURCES (S6 routing — not yet active)\n"
+                "  'stop here'        — pause session"
+            )
 
-        lines.append(
-            "Options:\n"
-            "  'accept'           — the produced artifact meets your quality bar → PROMOTE\n"
-            "  'ship as draft'    — save as draft without promoting\n"
-            "  'review design'    — go back to REVIEW_DESIGN (S6 routing — not yet active)\n"
-            "  'configure sources'— go back to CONFIGURE_SOURCES (S6 routing — not yet active)\n"
-            "  'stop here'        — pause session"
-        )
-
-        # ADR-029 S5: the EVAL turn ALWAYS has must_show_human=True — the user must
-        # explicitly respond after reading the gap report.
+        # ADR-029 S5 + ADR-038: the EVAL turn ALWAYS has must_show_human=True.
         eval_turn_data = {
             "structure_score": comparator_result.structure_score if comparator_result else None,
             "density_score": comparator_result.density_score if comparator_result else None,
             "missing_sections": comparator_result.missing_sections if comparator_result else [],
             "thin_sections": comparator_result.thin_sections if comparator_result else [],
+            # ADR-038: Path-A/B results
+            "path_a_status": execution_status,
+            "path_b_passed": routing_self_test_passed,
+            "routing_results": routing_results,
             # Diagnostic-only fields — present for observability but do not gate PROMOTE
             "intrinsic_recall": recall_at_k,
             "intrinsic_faithfulness": faithfulness,
@@ -4855,7 +5261,43 @@ class SkillBuilderConversation:
         # --- ACCEPT → PROMOTE ---
         # User acceptance is the ONLY gate for PROMOTE (ADR-029 Phase 1).
         # exit_criteria.passed is now diagnostic-only (DECISION-010 superseded).
+        # ADR-038 §F: HARD BLOCKER — if routing self-test failed, PROMOTE is refused.
+        # No override. This is a hard, no-escape blocker per the locked design.
         if any(kw in lowered for kw in ("accept", "looks good", "yes, promote", "promote")):
+            # ADR-038 §F: check routing self-test result before allowing PROMOTE
+            eval_result = self._data.eval_result or {}
+            path_b = eval_result.get("path_b_routing", {})
+            path_b_ran = bool(path_b.get("positive_count") or path_b.get("negative_count"))
+            routing_passed = eval_result.get("routing_self_test_passed", True)
+
+            if path_b_ran and not routing_passed:
+                fail_details = []
+                for r in (path_b.get("results") or []):
+                    if not r.get("passed"):
+                        q_type = r.get("type", "?").upper()
+                        resolved = r.get("resolved_skill_name") or r.get("resolved_skill_id") or "(none)"
+                        fail_details.append(f"  {q_type}: {r['query']!r} → {resolved}")
+                fail_msg = "\n".join(fail_details) or "  (see EVAL report above)"
+                log.warning(
+                    "_handle_eval_response: PROMOTE BLOCKED by routing self-test failure "
+                    "(ADR-038 §F hard blocker). persona=%s skill=%s",
+                    self._data.persona, self._data.skill_name,
+                )
+                return ConversationTurn(
+                    state="EVAL",
+                    message=(
+                        "PROMOTE BLOCKED — routing self-test failed (ADR-038 §F).\n\n"
+                        f"The following routing assertions failed:\n{fail_msg}\n\n"
+                        "To fix: update the skill_card routing_queries at DESIGN_SKILL "
+                        "so positive queries route to THIS skill and negative queries do not. "
+                        "Then re-commit, re-ingest, and re-run EVAL.\n\n"
+                        "No override is provided. This block cannot be bypassed."
+                    ),
+                    options=["ship as draft", "review design", "stop here"],
+                    must_show_human=True,
+                    awaiting_user=True,
+                )
+
             log.info(
                 "_handle_eval_response: user accepted — transitioning to PROMOTE. "
                 "persona=%s skill=%s",
@@ -5618,6 +6060,33 @@ class SkillBuilderConversation:
             source_binding_mode=sb_mode,
             space_allow_list=derived_space_allow_list if sb_mode == "ask_parameterized" else None,
         )
+
+        # ADR-038 §B: LOAD-BEARING carry-through.
+        # If DESIGN_SKILL generated a consumer-facing card (design_skill_card),
+        # OVERWRITE the skill_card in the synthesized workflow artifact with the
+        # DESIGN_SKILL-produced card — including routing_queries.
+        # This prevents synthesize_workflow.py's _build_skill_card (the static
+        # no-LLM template) from winning.  Without this, the committed ADB artifact
+        # would have the authoring-echo card and routing would silently fail.
+        if self._data.design_skill_card:
+            wf_struct["skill_card"] = dict(self._data.design_skill_card)
+            log.info(
+                "_synthesize_preview: ADR-038 §B — carried DESIGN_SKILL card into "
+                "workflow artifact (overriding static _build_skill_card template). "
+                "routing_queries.positive=%d routing_queries.negative=%d "
+                "persona=%s skill=%s",
+                len((self._data.design_skill_card.get("routing_queries") or {}).get("positive", [])),
+                len((self._data.design_skill_card.get("routing_queries") or {}).get("negative", [])),
+                persona, skill_name,
+            )
+        else:
+            log.info(
+                "_synthesize_preview: no design_skill_card on session — "
+                "using static _build_skill_card template (pre-ADR-038 session or fallback). "
+                "persona=%s skill=%s",
+                persona, skill_name,
+            )
+
         artifacts[f"framework/workflow_skills/{persona}/{skill_name}.yaml"] = wf_struct
 
         wf_gold = seed_workflow_gold(

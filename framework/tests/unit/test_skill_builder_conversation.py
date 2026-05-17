@@ -2130,6 +2130,9 @@ class TestDesignSkill:
         }
 
     def test_design_skill_calls_llm_and_populates_fields(self):
+        """ADR-038 §C: DESIGN_SKILL now returns a must_show_human card review turn
+        before proceeding to REVIEW_DESIGN. The turn state is still DESIGN_SKILL
+        (the card review gate), not REVIEW_DESIGN directly."""
         llm = _make_mock_llm_json(self._design_response())
         conv = self._make_conv(llm)
 
@@ -2139,7 +2142,11 @@ class TestDesignSkill:
             mock_shim_cls.return_value = mock_shim
             turn = conv._run_design_skill()
 
-        assert turn.state == "REVIEW_DESIGN"
+        # ADR-038 §C: DESIGN_SKILL now surfaces a card review turn (must_show_human)
+        # before transitioning to REVIEW_DESIGN. State remains DESIGN_SKILL.
+        assert turn.state == "DESIGN_SKILL"
+        assert turn.must_show_human is True
+        # Fields must be populated regardless of the intermediate card review step
         assert "rag_status" in conv._data.fields
         assert "blockers" in conv._data.fields
 

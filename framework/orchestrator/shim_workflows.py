@@ -278,7 +278,18 @@ class ShimWorkflows:
         return [c for c in out if c.get("on_request")]
 
     def render_for_persona_prompt(self, persona: str) -> str:
-        """Render promoted workflow skill cards for persona as a prompt block."""
+        """Render promoted workflow skill cards for persona as a prompt block.
+
+        ADR-038 §D: includes routing_queries from the skill_card as exemplar
+        matching signal for the Tier-1 classifier.  The routing_queries are
+        curated consumer queries produced at DESIGN_SKILL time and carried
+        through synthesis into the committed ADB workflow_skill artifact.
+
+        CRITICAL: this method ONLY returns promoted skills (all_cards() is
+        promoted-only per ADR-033 / BUG-queue-2ad9a invariant).  Adding
+        routing_queries here does NOT weaken the promoted-only guarantee —
+        it only enriches the matching signal for already-promoted skills.
+        """
         cards = self.cards_for(persona)
         if not cards:
             return f"# (no workflow skills registered for persona {persona})"
@@ -301,4 +312,110 @@ class ShimWorkflows:
                     for i in c["inputs"]
                 )
                 lines.append(f"  inputs: {ins}")
+            # ADR-038 §D: include routing_queries from the skill_card as
+            # exemplar matching signal.  These are curated positive consumer
+            # queries that SHOULD route to this skill.  Negative queries are
+            # not included here (they are used only in EVAL Path-B self-test).
+            # routing_queries is sourced from the committed ADB artifact's
+            # skill_card.routing_queries field.
+            skill_card = (c.get("_cfg") or {}).get("skill_card") or {}
+            rq = skill_card.get("routing_queries") or {}
+            positives = rq.get("positive") or []
+            if positives:
+                lines.append(f"  routing_queries:")
+                for rq_q in positives[:5]:  # cap to 5 for prompt size
+                    lines.append(f"    - {rq_q}")
         return "\n".join(lines)
+
+    def resolve_only(self, query: str, scope: str = "promoted_only") -> dict:
+        """Router resolve-only mode for EVAL Path-B routing self-test.
+
+        ADR-038 §B.3: Returns which skill + tier WOULD be selected for the
+        given query without executing the skill.  No side effects.  No output.
+        No artifact produced.
+
+        When scope="ingest_or_later" (used by EVAL Path-B), considers all
+        on-disk skills (all_cards_including_draft()), not only promoted skills.
+        The default scope="promoted_only" returns only promoted skills.
+
+        CRITICAL: this method MUST NOT modify all_cards() behaviour.  The
+        default consumption path (/api/v1/ask) is unaffected — it always calls
+        all_cards() which returns only promoted skills per ADR-033.  This
+        resolve_only method is a separate invocation path used only internally
+        by EVAL Path-B.
+
+        Args:
+            query:  The consumer query to resolve.
+            scope:  "promoted_only" (default) or "ingest_or_later" (EVAL Path-B).
+
+        Returns:
+            dict with keys: skill_id, skill_name, tier, confidence, matched
+        """
+        if scope == "ingest_or_later":
+            candidate_cards = self.all_cards_including_draft()
+        else:
+            candidate_cards = self.all_cards()
+
+        if not candidate_cards:
+            return {
+                "skill_id": None,
+                "skill_name": None,
+                "tier": 2,
+                "confidence": 0.0,
+                "matched": False,
+            }
+
+        # Simple embedding-free matching: score each card by term overlap between
+        # the query and the card's routing_queries.positive + example_invocations +
+        # summary + use_when.  This is sufficient for EVAL Path-B self-test where
+        # the positive queries are curated to be highly specific to the skill.
+        # A real vector search can be plugged in here when available.
+        query_lower = query.lower()
+        query_tokens = set(query_lower.split())
+
+        best_score = 0.0
+        best_card = None
+
+        for card in candidate_cards:
+            card_tokens: set[str] = set()
+
+            # Extract tokens from all routing signal fields
+            skill_card = (card.get("_cfg") or {}).get("skill_card") or {}
+            rq = skill_card.get("routing_queries") or {}
+
+            for pos_q in (rq.get("positive") or []):
+                card_tokens.update(pos_q.lower().split())
+            for ex in (card.get("example_invocations") or []):
+                card_tokens.update(ex.lower().split())
+            if card.get("summary"):
+                card_tokens.update(card["summary"].lower().split())
+            if card.get("use_when"):
+                card_tokens.update(card["use_when"].lower().split())
+
+            if not card_tokens:
+                continue
+
+            overlap = len(query_tokens & card_tokens)
+            score = overlap / max(len(query_tokens), 1)
+
+            if score > best_score:
+                best_score = score
+                best_card = card
+
+        if best_card and best_score > 0:
+            return {
+                "skill_id": f"{best_card.get('persona', '?')}.{best_card.get('name', '?')}",
+                "skill_name": best_card.get("name"),
+                "persona": best_card.get("persona"),
+                "tier": 1,
+                "confidence": round(best_score, 3),
+                "matched": True,
+            }
+
+        return {
+            "skill_id": None,
+            "skill_name": None,
+            "tier": 2,
+            "confidence": 0.0,
+            "matched": False,
+        }

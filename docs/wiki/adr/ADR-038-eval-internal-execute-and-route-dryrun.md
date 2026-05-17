@@ -1,381 +1,206 @@
 ---
-title: ADR-038 — EVAL Redesign: Internal Execute (Path A) + Route Dry-Run (Path B)
-status: proposed
+title: ADR-038 — Consumer-Facing Card at DESIGN_SKILL + EVAL Internal Execute (Path A) + Route Dry-Run (Path B)
+status: accepted
 created: 2026-05-17
+accepted: 2026-05-17
 owner: architect
 deciders: user
-tags: [adr, eval, skill-builder, routing, workflow-executor, fsm, correctness]
-related: [ADR-029, ADR-033, ADR-035, ADR-037, DECISION-017]
+tags: [adr, eval, skill-builder, routing, workflow-executor, fsm, correctness, card-gen, routing-queries]
+related: [ADR-029, ADR-030, ADR-033, ADR-035, ADR-037, DECISION-017, DECISION-018]
 supersedes: ~
 ---
 
-# ADR-038 — EVAL Redesign: Internal Execute (Path A) + Route Dry-Run (Path B)
+# ADR-038 — Consumer-Facing Card at DESIGN_SKILL + EVAL Internal Execute (Path A) + Route Dry-Run (Path B)
 
 ## Status
 
-**Proposed — 2026-05-17. Pending user approval before implementation.**
-
-No implementation has been done. This document records the design for review.
+**Accepted — 2026-05-17. Implemented in commit feat(authorskill+eval): consumer-facing card + routing_queries at DESIGN_SKILL (DECISION-018, ADR-038).**
 
 ---
 
-## A. Context — The Defect Being Fixed
+## A. Context — The Defects Being Fixed
 
-### A.1 Current `_run_eval` Behavior
+### A.1 Static Card Overwrote DESIGN_SKILL Card (BUG-queue-2ad9b)
 
-`_run_eval` (conversation.py ~line 4210) validates the workflow axis by calling:
+`synthesize_workflow._build_skill_card()` was called unconditionally in `synthesize_workflow_skill()`, which is called from `_synthesize_preview()`. This overwrote any LLM-generated `skill_card` with a static template using authoring-intent language ("This skill is designed to create…"). The static card produced low token-overlap scores in the Tier-1 classifier, causing real consumer queries to fall through to Tier-2. Severity: HIGH.
 
-```
-POST /api/v1/ask  { "query": <generic_canonical_question>, "persona": <persona> }
-```
+### A.2 EVAL Always-Null structure_score (BUG-queue-5f2a1)
 
-It reads `wf_tier` from the response and sets `skill_matched = (wf_tier == 1)` (~line 4675).
-If `skill_matched` is True, it uses the returned `artifact_url` for the ADR-029 comparator.
-The workflow-scoring block is ~lines 4420-4478.
-
-### A.2 Root Cause
-
-`shim_workflows.py` `all_cards()` (ADR-033, commit ee2740b) returns ONLY ADB-promoted skills.
-A skill under authoring is at FSM state `EVAL`, which is BEFORE `PROMOTE`:
-
-```
-… PREVIEW_EXTRACTION → CONFIRM → COMMITTED → VALIDATE → INGEST → EVAL → PROMOTE → DONE
-```
-
-Because the skill is not promoted, `/api/v1/ask` never routes to it. Result:
-- `wf_tier` is always 2 (fallback)
-- `skill_matched` is always False
-- `artifact_url` is always null
-- The ADR-029 comparator is always skipped
-- `structure_score` is always null during authoring EVAL
-
-The current code reports this as a soft note. Per DECISION-013 §Severity and the
-no-silent-degradation project rule, this is a HIGH-severity defect in the EVAL pipeline.
+`_run_eval` validated the workflow axis by calling `POST /api/v1/ask`. That endpoint calls `ShimWorkflows.all_cards()` which returns only ADB-promoted skills (ADR-033). A skill at EVAL state is not promoted, so it was invisible. Result: `wf_tier` always 2, `skill_matched` always False, `structure_score` always null. Severity: HIGH.
 
 ### A.3 Enabling Prior Art
 
-**ADR-033** added `WorkflowExecutor.execute_from_config(cfg, inputs)` as a public in-process
-method. This exists specifically as the hook for in-authoring execution without the promoted
-router. ADR-038 uses it.
-
-**ADR-035** established `has_bound_reference_artifact()` as the single truth for artifact
-binding. `_run_eval`'s comparator gate already calls this method. ADR-038 preserves this.
-
-**ADR-029** defines the structural comparator (candidate artifact vs bound reference).
-ADR-038 extends the pipeline to reliably produce a candidate artifact.
-
-### A.4 INGEST-or-Later Floor
-
-A skill's KB is ingested at the `INGEST` state. Executing the skill before INGEST is
-meaningless — the knowledge base does not exist. Both axes in ADR-038 require the skill
-to be at INGEST-or-later state. FSM order naturally enforces this for the `EVAL` state, but
-the gate is checked explicitly for defense against future FSM changes.
+- **ADR-033**: `WorkflowExecutor.execute_from_config(cfg, inputs)` — the in-process hook for authoring-time execution without the promoted router
+- **ADR-035**: `has_bound_reference_artifact()` — single truth for artifact binding
+- **ADR-029**: Structural comparator (candidate artifact vs bound reference)
+- **ADR-030**: Prompt externalization conventions (hot-reload-safe YAML prompts)
 
 ---
 
-## B. Decision
+## B. Decision — Eight Locked Components (DECISION-018)
 
-### B.1 Two Orthogonal EVAL Axes
+### B.1 Component A — Consumer Card Generated at DESIGN_SKILL
 
-EVAL splits workflow validation into two independent axes per DECISION-017:
+A new LLM call runs at the end of `_run_design_skill()` using the externalized prompt `design_skill_card` (ADR-030 convention; stored in `framework/config/prompts/skill_builder.yaml`). The prompt generates a consumer-facing card:
 
-| Axis | Name | Mechanism | Exposure | Produces |
-|---|---|---|---|---|
-| Path A | Execution-fidelity | `WorkflowExecutor.execute_from_config(cfg, inputs)` | Internal only | Candidate artifact |
-| Path B | Routing-correctness | Router resolve-only mode (INGEST+ scope) | Internal EVAL path only; default consumption unchanged | Routing decision only |
-
-### B.2 Path A — Internal Execution
-
-**Mechanism**: `_run_eval` calls `WorkflowExecutor.execute_from_config(cfg, inputs)` with:
-- `cfg`: the session's committed/design config (the config that will be promoted if the
-  skill passes EVAL)
-- `inputs`: the session's real configured inputs — e.g., the bound Confluence page(s),
-  the bound-reference artifact context
-
-This produces a candidate artifact in-process. The candidate artifact is handed directly
-to the ADR-029 comparator.
-
-**Public exposure**: None. This call is made inside `_run_eval` in the authoring/EVAL
-runtime. It is not accessible via any HTTP flag, query parameter, or endpoint. It does
-not appear on the public `/api/v1/ask` wire. The ADR-033 invariant — "drafts never
-consumable by real consumers" — is preserved because the execution is not on the
-consumption wire. Promotability is still gated on EVAL passing, which now actually runs.
-
-**INGEST-or-later gate**: `_run_eval` checks that the skill's FSM state is at INGEST
-or later before calling `execute_from_config`. If the check fails, `_run_eval` raises a
-loud error and halts. It does NOT silently skip.
-
-**Execution failure is HIGH-severity**: If `execute_from_config` raises an exception or
-returns an error, `_run_eval` surfaces the full error as a HIGH-severity EVAL failure
-item. It is NOT caught and collapsed into "comparator skipped." The consolidated gap report
-(§B.5) includes the execution failure prominently.
-
-**Hot-reload safety**: `execute_from_config` is called by reference at runtime; no import
-path changes are needed. If a new prompt is added to the execution path, it loads on the
-next call without restarting the authoring session (existing hot-reload conventions apply).
-
-### B.3 Path B — Router Resolve-Only Mode
-
-**Mechanism**: A new invocation mode on the router:
-
-```
-resolve_only(query, scope="ingest_or_later") → { skill_id, skill_name, tier, confidence, matched }
+```json
+{
+  "summary": "...",
+  "use_when": "...",
+  "example_invocations": ["...", "..."],
+  "routing_queries": {
+    "positive": ["...", "..."],
+    "negative": ["...", "..."]
+  }
+}
 ```
 
-This mode:
-- Evaluates routing logic (embedding similarity, tier scoring) for the query
-- Returns which skill + tier WOULD be selected
-- Does NOT call the skill, does NOT produce any output, does NOT modify any state
-- Considers skills in INGEST-or-later state when `scope="ingest_or_later"` (used by EVAL)
-- Returns only a routing decision record
+The card describes what the skill DOES at runtime and when a consumer should invoke it — NOT how it was created. 5 positive routing queries, 3 negative. NOT a `failure_classifier`-style locked prompt.
 
-**Default consumption path unchanged**: The default `/api/v1/ask` path continues to call
-`all_cards()` which returns only promoted skills. The resolve-only mode is a separate
-invocation path, not a flag on the existing consumption path. Passing any parameter to the
-existing `/api/v1/ask` endpoint does NOT trigger resolve-only behavior.
+### B.2 Component B — synthesize_workflow MUST NOT Clobber the Card (LOAD-BEARING)
 
-**Positive and negative assertions**:
-- Positive: `resolve_only(query)` for queries in the positive set → assert
-  `resolved.skill_id == this_skill_id` and `resolved.tier == 1`
-- Negative: `resolve_only(query)` for queries in the negative set → assert
-  `resolved.skill_id != this_skill_id`
+`_synthesize_preview()` explicitly replaces `wf_struct["skill_card"]` with `self._data.design_skill_card` after `synthesize_workflow_skill()` returns. This ensures the static `_build_skill_card` template does NOT overwrite the LLM-generated card. The `routing_queries` sub-key is preserved through the full ADB artifact. This is load-bearing — violating it silently regresses routing.
 
-**Per-query reporting**: Each assertion produces a pass/fail result with the resolved
-skill name and tier. Failures are reported loudly in the consolidated gap report.
+### B.3 Component C — must_show_human Gate at DESIGN Time
 
-**Interim scoping — no AUTH layer (known limitation)**:
+After card generation, `_run_design_skill()` returns `_prompt_review_skill_card()` — an interactive turn with `must_show_human=True` and `awaiting_user=True`. The FSM surfaces the card to the author for review/edit/confirm before transitioning to REVIEW_DESIGN. JSON edits to the card are applied and the review turn is re-shown. Persisted via `to_dict()`/`from_dict()` round-trip.
 
-Path B considers ALL skills in INGEST-or-later state when invoked by the EVAL path.
-Ideally this would be limited to the requesting author's own non-promoted skills, but no
-AUTH/identity layer exists yet (spec §8 ACLs-v2; `persona_visibility` and `classification`
-are placeholders per CLAUDE.md).
+### B.4 Component D — routing_queries as Tier-1 Classifier Signal
 
-This interim compromise is acceptable ONLY because:
-- (a) Path B does not execute or return skill output — only a routing decision
-- (b) There is no identity layer to scope by today
+`ShimWorkflows.render_for_persona_prompt()` injects `routing_queries.positive` entries (up to 5) into the per-skill prompt block alongside `summary`, `use_when`, and `example_invocations`. Negative queries are NOT injected — they are for EVAL Path B self-test only. The ADR-033/BUG-queue-2ad9a invariant (`all_cards()` promoted-only default consumption path) is unchanged.
 
-**This MUST be tightened when the AUTH layer is built**: at that point, resolve-only EVAL
-scope should be limited to `owner == requesting_author` (and filtered by
-`persona_visibility` as appropriate). A dedicated AUTH ADR is the prerequisite. Do NOT
-design the AUTH layer here.
+### B.5 Component E — EVAL Path B Self-Test
 
-The same AUTH-layer absence also gates the write-action roadmap in ADR-037.
+Path B uses `ShimWorkflows.resolve_only(query, scope="ingest_or_later")` to test each `routing_queries.positive` and `routing_queries.negative` entry without executing the skill:
 
-### B.4 Candidate Query Sub-step (New Interactive EVAL Step)
+- **Positive**: query must resolve to `this_skill_id` at tier 1
+- **Negative**: query must NOT resolve to this skill
+- `resolve_only` uses token-overlap scoring against `routing_queries.positive + example_invocations + summary + use_when`
+- `scope="ingest_or_later"` considers INGEST-or-later skills; does NOT modify `all_cards()`
 
-Before Path B runs, a new sub-step generates and curates candidate routing queries.
+### B.6 Component F — PROMOTE is a HARD BLOCKER on Routing Self-Test Failure
 
-**LLM prompt**: Given the skill's `intent`, `task_description`, `persona`, and
-`output_kind`, the LLM generates:
-- N positive phrasings: plausible end-user questions that SHOULD route to this skill
-  (default N = 5; configurable via prompt YAML if externalized per ADR-030)
-- M negative/out-of-scope phrasings: questions that should NOT route to this skill
-  (default M = 2-3)
+In `_handle_eval_response()`, when `path_b_ran` and `routing_self_test_passed == False`, PROMOTE is refused. A `must_show_human=True` turn is returned listing the failing assertions. NO override is provided. The user may "ship as draft", "review design", or "stop here". This cannot be bypassed.
 
-The prompt is a new externalized prompt (ADR-030 convention: stored as a named prompt
-YAML alongside the existing authoring prompts; hot-reload-safe). Prompt YAML key:
-`eval_candidate_query_generation`.
+### B.7 Component G — No Migration for Already-Promoted Broken Skills
 
-**Author interaction**:
-The generated candidate sets are shown to the author with edit affordances:
-- Add a query to either set
-- Remove a query from either set
-- Edit the text of a query
-- Confirm the curated sets to proceed
+Skills promoted before ADR-038 do not have `routing_queries` in their `skill_card`. This is DOCUMENTED ONLY. No migration is run. The Tier-1 classifier gracefully degrades to the existing `summary + use_when + example_invocations` signal for cards without `routing_queries`.
 
-The author-confirmed sets are stored on the session for the duration of the EVAL run.
-They are NOT persisted across EVAL re-runs (each EVAL re-run regenerates and re-curates).
+### B.8 Component H — Path A Unchanged
 
-**Ordering constraint**: The curation step precedes Path B. Path B does not run until the
-author confirms the curated sets.
+In-process execution via `WorkflowExecutor.execute_from_config`. The three-section EVAL report always contains:
 
-### B.5 Full EVAL Ordering
+1. `=== SECTION 1: ROUTING ASSERTIONS (Path B) ===`
+2. `=== SECTION 2: EXECUTION (Path A) ===`
+3. `=== SECTION 3: COMPARATOR (ADR-029) ===`
 
-```
-1. INGEST-or-later gate check (hard fail if not met)
-2. Candidate query generation (LLM) + author curation (interactive)
-3. Path B — routing assertions
-   a. Positive set: assert each query resolves to this skill at tier 1
-   b. Negative set: assert each query does NOT resolve to this skill
-4. Path A — in-process execution via execute_from_config
-   (execution failure → HIGH-severity; halt comparator step with loud report)
-5. ADR-029 comparator — candidate artifact vs ADR-035 bound reference
-   (skipped loudly if: execution failed in step 4, OR has_bound_reference_artifact() = False)
-6. Consolidated gap report (three distinct sections — see §B.6)
-```
-
-### B.6 Distinct Loud Reporting — Three Mandatory Sections
-
-The consolidated gap report has three separable sections. Each is always present in the
-report, even if the content is "N/A" with an explicit reason. Silent omission of any
-section is prohibited.
-
-**Section 1 — Routing Results (Path B)**
-
-```
-ROUTING ASSERTIONS
-  Positive queries tested: {count}
-    PASS: {query} → {skill_name} tier 1
-    FAIL: {query} → {resolved_skill_name} tier {tier}  [HIGH]
-  Negative queries tested: {count}
-    PASS: {query} → {other_skill_name} (not this skill)
-    FAIL: {query} → {this_skill_name} tier {tier}  [HIGH]
-```
-
-**Section 2 — Execution Result (Path A)**
-
-```
-EXECUTION
-  Status: SUCCESS | FAILURE [HIGH]
-  (on FAILURE) Error: {exception type and message}
-  (on SUCCESS) Artifact produced: {artifact_id or descriptor}
-```
-
-**Section 3 — Comparator Scores (ADR-029)**
-
-```
-COMPARATOR
-  Status: RAN | SKIPPED
-  (if SKIPPED) Reason: execution failed | no bound reference artifact
-  (if RAN) structure_score: {value}  density_score: {value}
-            Gap items: {list from ADR-029 output}
-```
-
-The current behavior — collapsing "no artifact" into a single soft note and marking
-`skill_matched = False` without distinguishing cause — is the explicit anti-pattern being
-replaced by this three-section report.
+Pre-INGEST skills: `_run_eval` raises `RuntimeError("EVAL: INGEST-or-later gate failed…")` with the entering FSM state. Execution failure is labeled `[HIGH]`. All three sections are always present even when Path A fails.
 
 ---
 
-## C. Non-Goals (Explicit)
+## C. INGEST-or-Later Floor
 
-These are out of scope for ADR-038 and must NOT be added during implementation:
-
-1. **No AUTH/identity layer.** Path B interim scoping (all INGEST-or-later skills) is
-   acceptable as-is until a dedicated AUTH ADR establishes the identity model.
-
-2. **No public execute flag.** `execute_from_config` is not exposed via HTTP in any form.
-   No `?execute_draft=true` or equivalent parameter on any endpoint.
-
-3. **No changes to default consumer routing.** `/api/v1/ask` with no special invocation
-   mode continues to use `all_cards()` (promoted-only). This is unchanged.
-
-4. **No new FSM states.** EVAL remains a single FSM state. The sub-steps (query curation,
-   Path B, Path A, comparator) are sub-steps within EVAL, not new FSM states.
-
-5. **No redesign of the comparator algorithm.** ADR-029 comparator runs as-is. ADR-038
-   only ensures it reliably receives a candidate artifact.
+`_run_eval` captures `_entering_state` before mutating `self._state` to "EVAL". If `_entering_state in {"COMMITTED", "VALIDATE"}`, `_run_eval` raises a loud `RuntimeError` (not a silent skip). This guards against future FSM changes that might expose `_run_eval` before INGEST.
 
 ---
 
-## D. Consequences
+## D. New Method Surface
+
+| Method | Where | Purpose |
+|---|---|---|
+| `_generate_design_skill_card()` | `conversation.py` | Call `design_skill_card` prompt; fallback static; store on `_data.design_skill_card` |
+| `_prompt_review_skill_card()` | `conversation.py` | must_show_human turn for card review |
+| `ShimWorkflows.resolve_only(q, scope)` | `shim_workflows.py` | Token-overlap routing decision without execution |
+
+New `_SessionData` fields (backward-compatible defaults):
+
+```python
+design_skill_card: dict | None = field(default=None)
+routing_self_test_passed: bool | None = field(default=None)
+```
+
+New `PromptMeta` field (backward-compatible default):
+
+```python
+required_vars: List[str] = field(default_factory=list)
+```
+
+New externalized prompt (ADR-030):
+
+```yaml
+# framework/config/prompts/skill_builder.yaml
+design_skill_card:
+  id: design_skill_card
+  version: "1.0"
+  model: synthesis
+  max_tokens: 1024
+  response_format: json_object
+  required_vars: [skill_name, persona, task_description, output_format, intent_summary]
+```
+
+---
+
+## E. Non-Goals (Explicit)
+
+1. No AUTH/identity layer — Path B considers all INGEST-or-later skills (interim)
+2. No public execute flag — `execute_from_config` is not exposed via HTTP
+3. No changes to default consumer routing — `/api/v1/ask` uses `all_cards()` (promoted-only)
+4. No new FSM states
+5. No redesign of ADR-029 comparator algorithm
+
+---
+
+## F. Consequences
 
 ### Positive
 
 - `structure_score` is no longer always-null during authoring EVAL
-- Routing coverage is added without putting drafts on the consumption wire
-- Three distinct outcome categories replace the current single soft note
-- Execution failures are surfaced loudly as HIGH-severity rather than silently skipped
-- The ADR-033 consumer-isolation invariant is fully preserved
-- The ADR-035 single-truth artifact check is preserved and used correctly
-- Author gains interactive control over which queries test their skill's routing
+- Consumer-facing cards replace authoring-intent text in the Tier-1 classifier signal
+- Routing self-test gates PROMOTE on routing correctness — no more routing-blind promotions
+- Hard PROMOTE gate prevents silent routing regressions reaching production
+- No migration needed for existing skills (graceful degradation on missing `routing_queries`)
+- EVAL gap report is now three distinct sections — no more single soft "comparator skipped" note
 
 ### Negative / Tradeoffs
 
-- `_run_eval` rework is substantial; the method grows in complexity
-- A new LLM prompt (eval_candidate_query_generation) is added to the authoring prompt
-  surface — must be externalized per ADR-030 conventions on first implementation
-- The candidate query curation sub-step adds an interactive turn before the route test,
-  increasing EVAL session length by one human-loop round
-- Path B in interim form considers all INGEST-or-later skills (not author-scoped) — this
-  is the known AUTH-layer gap documented above and in DECISION-017
+- One extra interactive turn added to DESIGN_SKILL (card review)
+- `_run_eval` grew in complexity (Path A + Path B + three-section report)
+- Path B in interim form considers all INGEST-or-later skills (not author-scoped) — AUTH-layer gap from DECISION-017/ADR-037
 
 ### Reversibility
 
-- Path A (execute_from_config call) can be reverted to the HTTP /ask call without any
-  schema changes; it is a runtime call-site change
-- Path B (resolve-only mode) is additive to the router; removing it reverts to the
-  current test-less behavior
-- The candidate query curation step is a new LLM prompt + author interaction; removing
-  it drops the step and runs Path B with no queries (effectively disabling Path B)
+- Path A is a call-site change (execute_from_config vs HTTP call) — trivially reversible
+- Path B is additive to the router — removing resolve_only reverts to test-less behavior
+- Card generation is a new method called from _run_design_skill — removing the call reverts to static card
 
 ---
 
-## E. Alternatives Considered
+## G. Alternatives Considered
 
-### E.1 Execute-Direct Only (Path A alone)
+### G.1 Execute-Direct Only (Path A alone)
 
-Replace HTTP `POST /api/v1/ask` with `execute_from_config`. No resolve-only mode.
+Rejected: no routing-correctness coverage (DECISION-017 requires both axes).
 
-**Rejected**: Provides execution coverage but zero routing-correctness coverage. A skill
-that executes correctly could still be unreachable by real users due to routing configuration
-issues. DECISION-017 establishes that both axes are required.
+### G.2 Privileged Public Flags on /api/v1/ask
 
-### E.2 Privileged Public Flags on /api/v1/ask
+Rejected: `include_unpromoted=true` violates ADR-033 consumer-isolation invariant.
 
-Add `?include_unpromoted=true` and `?dry_run_only=true` HTTP flags.
+### G.3 Separate Query-Generation Prompt (EVAL sub-step)
 
-**Rejected**: `include_unpromoted=true` puts in-authoring skill execution on the public
-consumption wire. Any misconfigured consumer or caller passing the flag gets draft output.
-This directly violates the ADR-033 consumer-isolation invariant. The invariant is
-foundational (established in response to a class of silent-wrong-output bugs) and must
-not be weakened.
+The original ADR-038 proposed a separate `eval_candidate_query_generation` prompt and an interactive curation step at EVAL time. Replaced by DECISION-018: queries are generated at DESIGN_SKILL time, curated by the author at card review, and persisted in the ADB artifact. This avoids a redundant interactive turn at EVAL and ensures routing queries are part of the committed skill card.
 
 ---
 
-## F. Implementation Notes
+## H. Cross-References
 
-### Files to Change (guidance for backend dev)
-
-- `framework/skill_builder/conversation.py`
-  - `_run_eval`: remove HTTP `POST /api/v1/ask` call; add Path A (`execute_from_config`)
-    and Path B (resolve-only); add INGEST-or-later gate; add three-section report
-  - Add candidate query curation sub-step as a new handler method called from `_run_eval`
-  - Preserve `has_bound_reference_artifact()` gate before comparator (ADR-035)
-- `framework/orchestrator/shim_workflows.py` (or router module)
-  - Add `resolve_only(query, scope)` method; scope parameter accepts `"promoted_only"`
-    (default, existing behavior) or `"ingest_or_later"` (used by EVAL Path B)
-  - `all_cards()` is NOT modified; default routing is NOT changed
-- `framework/prompts/eval_candidate_query_generation.yaml` (new, ADR-030 convention)
-  - New externalized prompt for candidate query generation; hot-reload-safe
-
-### No Changes To
-
-- `api/openapi.yaml` — no new public endpoints
-- Default `/api/v1/ask` handler — consumer routing unchanged
-- `all_cards()` in `shim_workflows.py` — promoted-only behavior unchanged
-- ADR-029 comparator algorithm — runs as-is
-
-### Test Strategy
-
-1. **Path B positive routing**: given a skill at INGEST-or-later state, a well-matched
-   query resolves to that skill at tier 1 in resolve-only mode
-2. **Path B negative routing**: a query for a different topic does NOT resolve to the
-   skill under test
-3. **Path A execution failure is loud**: mock `execute_from_config` to raise; assert
-   the gap report shows HIGH-severity execution failure (not "comparator skipped")
-4. **Path A success feeds comparator**: mock `execute_from_config` to return an artifact;
-   assert ADR-029 comparator is called with that artifact
-5. **INGEST floor gate**: attempt EVAL on a skill at COMMITTED state; assert hard failure
-   (not silent skip)
-6. **Resolve-only does not alter consumption path**: calling `resolve_only` does not
-   modify `all_cards()` output; a subsequent `/api/v1/ask` call sees only promoted skills
-7. **Three-section report always present**: even when Path A fails, the report has all
-   three sections (routing results, execution failure, comparator skipped-with-reason)
-8. **Candidate query curation**: mock LLM to return N positive + M negative queries;
-   assert author can add/remove/edit before proceeding to Path B
-
----
-
-## G. Cross-References
-
-- **ADR-033** — `WorkflowExecutor.execute_from_config`; foundational consumer-isolation
-  invariant (`all_cards()` = promoted-only); commit ee2740b
-- **ADR-035** — `has_bound_reference_artifact()` single truth; atomic bind/clear
-- **ADR-029** — structural comparator; candidate vs reference artifact pipeline
-- **ADR-030** — prompt externalization conventions (governs the new prompt YAML)
-- **ADR-037** — write-action roadmap; AUTH-layer dependency (shared with Path B scoping)
-- **DECISION-017** — the policy decision this ADR implements
-- **BUG-queue-2ad9a** (commit 8c2bec1) — formal record of the promoted-only routing defect
-- **DECISION-013** — severity classification rules (HIGH = loud, not soft note)
-- **spec §8** — open problems; ACLs-v2 listed as a v2 concern
+- **ADR-033** — `all_cards()` = promoted-only; `execute_from_config` hook; commit ee2740b
+- **ADR-035** — `has_bound_reference_artifact()` single truth
+- **ADR-029** — structural comparator; candidate vs reference artifact
+- **ADR-030** — prompt externalization conventions (governs `design_skill_card` prompt)
+- **ADR-037** — write-action roadmap; AUTH-layer dependency
+- **DECISION-017** — routing-vs-execution two-axis policy
+- **DECISION-018** — consumer-facing card + routing self-test (this implementation's governing decision)
+- **BUG-queue-2ad9b** — static `_build_skill_card` routing-miss defect (fixed)
+- **BUG-queue-5f2a1** — EVAL always-null structure_score (fixed)
+- **BUG-queue-a3f7e** — kb-cli export-skills KeyError: extraction_schema (open)
+- **DECISION-013** — severity classification + agent-discovery bug channel

@@ -399,6 +399,69 @@ prompts:
       the quality of the extraction schema.)
 
   # ---------------------------------------------------------------------------
+  # design_skill_card
+  # ADR-038 Amendment: consumer-facing skill card generation at DESIGN_SKILL.
+  # Produces summary, use_when, example_invocations (consumer-facing — NOT
+  # "create a skill that…") and routing_queries (positive + negative).
+  # ADR-030 compliant: hot-reload-safe; NOT gate-locked (not failure_classifier).
+  # ---------------------------------------------------------------------------
+  design_skill_card:
+    id: design_skill_card
+    version: "1.0"
+    model: synthesis
+    max_tokens: 1024
+    response_format: json_object
+    description: "Generate a consumer-facing skill card with routing_queries for the Tier-1 classifier."
+    required_vars: [skill_name, persona, task_description, output_format, intent_summary]
+    template: |
+      You are a Knowledge Builder Framework skill card writer. Generate a consumer-facing
+      skill card for a skill that has just been designed. The card must describe what the
+      skill DOES at runtime and when a consumer should invoke it — NOT how it was created.
+
+      Skill name: {skill_name}
+      Persona: {persona}
+      Task description: {task_description}
+      Output format: {output_format}
+      Intent summary: {intent_summary}
+
+      Return ONLY a JSON object:
+      {{
+        "summary": "One sentence: what this skill produces when invoked (consumer perspective).",
+        "use_when": "One sentence: the specific situation when a consumer should invoke this skill.",
+        "example_invocations": [
+          "A realistic consumer query that would route to this skill (includes output format hint)",
+          "A second realistic phrasing of the same consumer need"
+        ],
+        "routing_queries": {{
+          "positive": [
+            "consumer query 1 that SHOULD route to this skill",
+            "consumer query 2 that SHOULD route to this skill",
+            "consumer query 3 that SHOULD route to this skill",
+            "consumer query 4 that SHOULD route to this skill",
+            "consumer query 5 that SHOULD route to this skill"
+          ],
+          "negative": [
+            "consumer query that should NOT route here (different topic)",
+            "consumer query that should NOT route here (single-fact lookup)",
+            "consumer query that should NOT route here (different output type)"
+          ]
+        }}
+      }}
+
+      Rules:
+      - "summary" and "use_when" must be written from the CONSUMER perspective — describe
+        what the skill DOES, not what it was designed to do. Never start with "Create a skill".
+      - "example_invocations" must be realistic consumer phrasings. Include the output format
+        ({output_format}) so the Tier-1 classifier can distinguish this skill from similar
+        skills with different output types.
+      - "routing_queries.positive": 5 distinct phrasings of consumer queries that SHOULD
+        route to this skill. Must be specific enough to distinguish from other skills.
+      - "routing_queries.negative": 3 queries that SHOULD NOT route to this skill —
+        include at least one single-fact lookup, one that addresses a clearly different
+        topic, and one that implies a different output format.
+      - All queries must be realistic end-user phrasings, not internal system descriptions.
+
+  # ---------------------------------------------------------------------------
   # failure_classifier
   # Source: conversation.py _FAILURE_CLASSIFIER_PROMPT (line 525)
   # GATE-LOCKED — validated by test_failure_classifier_gate.py (live LLM, 3 runs)

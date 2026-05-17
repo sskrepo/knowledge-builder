@@ -934,12 +934,15 @@ class TestRunEvalGoldSetWrite:
     def test_gold_set_write_safe_persona_guard_prevents_none_path(self, tmp_path):
         """When persona/skill_name are non-empty, paths must be correctly formed.
         Regression: path was constructed before the `or 'unknown'` guard was added,
-        so a None persona would produce a misleading path. Now guarded."""
+        so a None persona would produce a misleading path. Now guarded.
+
+        ADR-038: gold row schema updated — actual_tier_used replaced by path_a_status
+        (Path-A in-process execution replaces the old /api/v1/ask HTTP call).
+        """
         conv = self._make_eval_ready_conv(persona="tpm", skill_name="weekly_report")
 
         with patch("framework.skill_builder.conversation.REPO_ROOT", tmp_path):
-            with patch("urllib.request.urlopen", side_effect=Exception("no server")):
-                turn = conv._run_eval()
+            turn = conv._run_eval()
 
         # Extraction gold set file must have been written
         ext_path = tmp_path / "eval" / "gold_sets" / "tpm-weekly_report-extraction.jsonl"
@@ -957,10 +960,13 @@ class TestRunEvalGoldSetWrite:
 
         # Extraction rows must carry kind=auto_generated
         assert ext_rows[0].get("kind") == "auto_generated"
-        # Workflow rows must also carry kind=auto_generated and the None fields safely
+        # Workflow rows must also carry kind=auto_generated and ADR-038 Path-A/B fields
         assert wf_rows[0].get("kind") == "auto_generated"
-        # None-valued fields must serialize to JSON null, not raise
-        assert "actual_tier_used" in wf_rows[0]  # present (JSON null for None is valid)
+        # ADR-038: path_a_status replaces old actual_tier_used field
+        assert "path_a_status" in wf_rows[0], (
+            f"ADR-038: workflow gold row must have path_a_status. "
+            f"Keys found: {list(wf_rows[0].keys())}"
+        )
         assert "ask_latency_ms" in wf_rows[0]
 
         assert turn.state == "EVAL"

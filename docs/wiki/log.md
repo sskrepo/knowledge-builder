@@ -4,6 +4,41 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-17] backend-dev | DECISION-018 + ADR-038 — consumer-facing card at DESIGN_SKILL, routing_queries dual-use, EVAL Path A/B, hard PROMOTE routing gate
+
+**Components implemented (A–H, all locked per DECISION-018):**
+
+**A. Consumer-facing card at DESIGN_SKILL:** New `design_skill_card` LLM prompt (ADR-030, `skill_builder.yaml`) generates `summary`, `use_when`, `example_invocations`, `routing_queries.positive` (5), `routing_queries.negative` (3) at end of `_run_design_skill()`. Consumer perspective — not authoring intent.
+
+**B. synthesize_workflow no-clobber (LOAD-BEARING):** `_synthesize_preview()` replaces `wf_struct["skill_card"]` with `self._data.design_skill_card` after `synthesize_workflow_skill()`. Static `_build_skill_card()` template no longer clobbers the LLM-generated card. `routing_queries` persists in committed ADB artifact.
+
+**C. must_show_human card review gate:** `_run_design_skill()` returns `_prompt_review_skill_card()` turn (state=`DESIGN_SKILL`, `must_show_human=True`). Author reviews/edits/confirms before REVIEW_DESIGN. JSON edits applied and re-shown. Persisted via `to_dict()`/`from_dict()`.
+
+**D. routing_queries as Tier-1 classifier signal:** `ShimWorkflows.render_for_persona_prompt()` injects `routing_queries.positive` (up to 5) per skill. Negatives excluded (EVAL-only). ADR-033 promoted-only `all_cards()` invariant unchanged.
+
+**E. EVAL Path B self-test:** `ShimWorkflows.resolve_only(q, scope="ingest_or_later")` tests each `routing_queries` entry. Positive must route to this skill at tier 1; negative must not. Token-overlap scoring. Does not modify `all_cards()`.
+
+**F. PROMOTE hard blocker:** `_handle_eval_response()` refuses PROMOTE when `path_b_ran and not routing_self_test_passed`. `must_show_human=True`, no override.
+
+**G. No migration:** Existing skills without `routing_queries` degrade gracefully.
+
+**H. Path A + three-section report:** `WorkflowExecutor.execute_from_config`. All three sections always present. Pre-INGEST raises RuntimeError. Execution failure labeled `[HIGH]`.
+
+**Bug fixes:**
+- `_run_eval` INGEST gate: captures `_entering_state` before mutating `self._state = "EVAL"` — gate now correctly rejects pre-INGEST state
+- `PromptMeta.required_vars` exposed via `list_prompts()` (was only on internal `_PromptRecord`)
+
+**Bugs filed (DECISION-013):**
+- BUG-queue-2ad9b: routing-miss (static card clobber) — HIGH, fixed
+- BUG-queue-5f2a1: EVAL always-null structure_score — HIGH, fixed
+- BUG-queue-a3f7e: kb-cli export-skills KeyError: extraction_schema — LOW, open
+
+**Tests:** 27 new tests in `test_adr038_card_routing_eval.py` (a)–(h). 9 pre-existing failures unchanged. Zero new failures.
+
+**Docs:** ADR-038 flipped Proposed→Accepted; DECISION-018 created; pmo/bugs 3 new files + INDEX.md updated.
+
+---
+
 ## [2026-05-17] architect | ADR-035/DECISION-015 — authoring-flow FSM access-gate; conditional-required artifact; single-source-of-truth binding; session synth-tpm-c3ef4ef2 recovered
 
 **Root cause confirmed.** Session synth-tpm-c3ef4ef2, JSON-RPC id 108: user uploaded

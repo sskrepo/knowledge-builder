@@ -104,6 +104,7 @@ class PromptMeta:
     description: str
     locked: bool
     model: str
+    required_vars: List[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +489,7 @@ class PromptRegistry:
                 description=r.description,
                 locked=r.locked,
                 model=r.model,
+                required_vars=list(r.required_vars),
             )
             for r in sorted(self._cache.values(), key=lambda r: r.prompt_id)
         ]
