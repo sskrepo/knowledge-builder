@@ -4,6 +4,59 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] backend-dev | reviewSkillSession KB-ref check false-positive fix (ADR-023)
+
+**Root cause:** `_check_kb_references_resolve` in `framework/deploy/ops/review_engine.py`
+iterated top-level keys of the `persona_builder_delta` artifact dict to build `pb_kbs`.
+The production artifact shape (from `synthesize_persona_builder_diff`) is a flat dict with
+`name`/`kind`/`extraction_schema`/`provides_fields`/`sources`/`retrieval_tools`/`kb_card`
+keys — so iterating keys yielded `{"name", "kind", ...}`, not KB names. The `kbs`/
+`knowledge_bases` lookups also returned None. Net: no KB ref could ever resolve → every
+correctly-authored skill filed a spurious "major: hallucinated KB reference" bug.
+
+**Fix (Option A + C):**
+
+A1. Detect production artifact-dict shape (`"name" in pb_doc`, no `knowledge_bases`/`kbs`
+    key). Add `pb_doc["name"]` (bare) and `f"{persona}.{pb_doc['name']}"` (qualified)
+    to `pb_kbs`. Legacy "qualified-key" fixture shape and structured `knowledge_bases` list
+    shape are still handled for backward compatibility.
+
+A2. Load `framework/persona_builders/{persona}.yaml` from disk and add all KB `name`
+    entries (bare + persona-qualified) to `pb_kbs`. This resolves reused KBs
+    (`tpm.tpm_dependencies`, `tpm.tpm_weekly_ops`, etc.) that are NOT in the delta.
+    Missing persona file is logged as a warning and is non-fatal — only refs that are
+    absent from BOTH the delta and the disk file are flagged.
+
+A3. For each `kb_ref`, accept match if the exact ref OR its persona-stripped short form
+    is in `pb_kbs`. Eliminates false positives due to persona-qualification (`tpm.` prefix).
+
+A4. `persona` is sourced from `bundle.persona` (authoritative). Fallback: `persona:` field
+    in the workflow_skill artifact YAML. Final fallback: inferred from kb_ref prefix (logged
+    as warning). Parameter threaded cleanly into `_check_kb_references_resolve(persona=...)`.
+
+C. Test fixture `_make_artifacts()` updated to production artifact-dict shape.
+   Added `test_kb_refs_resolve_no_false_positive_artifact_dict_multi_kb` (zero bugs on
+   valid 3-KB skill with stub on-disk persona builder) and
+   `test_kb_refs_resolve_true_negative_hallucinated_ref_still_caught` (genuinely
+   hallucinated KB ref is still flagged — check remains a real gate).
+
+**Persona_builder_delta contract (canonical):** the `persona_builder_delta` artifact for
+conversationally-authored skills is a single flat dict produced by
+`synthesize_persona_builder_diff()` with keys `name` (short/bare), `kind`,
+`extraction_schema`, `provides_fields`, `sources`, `retrieval_tools`, `kb_card`.
+Reused KBs are resolved from the on-disk `framework/persona_builders/{persona}.yaml`.
+
+**ContentFilterRejection observation (out of scope):** `_run_llm_review` in
+`review_engine.py` catches all LLM errors via a broad `except Exception` and files a
+`llm_review_failed: minor` bug. It does NOT import or check for `ContentFilterRejection`
+from `skill_builder/review.py` — a content-filter OCI 400 error would be filed as a
+generic minor bug rather than the classified graceful handling used in the skill-builder
+path. Separate follow-up item (dc93945 class).
+
+**Tests:** 234 passed, 0 failed (was 232 baseline; +2 new regression tests).
+
+---
+
 ## [2026-05-16] backend-dev | ADR-032 Phase-4 e2e D1+D2 fixed + P2-API response wired
 
 **D1 (ask route input threading):** `maybe_render_artifact` in

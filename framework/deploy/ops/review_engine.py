@@ -12,8 +12,13 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+# Repo root: review_engine.py lives at framework/deploy/ops/review_engine.py
+# → parents[0]=ops, parents[1]=deploy, parents[2]=framework, parents[3]=repo-root
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 log = logging.getLogger(__name__)
 
@@ -287,8 +292,21 @@ def _check_skill_name_not_truncated(
 
 def _check_kb_references_resolve(
     skill_artifacts: dict[str, str],
+    persona: str = "",
+    repo_root: Path | None = None,
 ) -> tuple[bool, list[str]]:
-    """check_kb_references_resolve: each requires_extractions.kb exists in persona builder delta."""
+    """check_kb_references_resolve: each requires_extractions.kb exists in persona builder delta
+    or in the on-disk persona builder YAML (for reused/pre-existing KBs).
+
+    Args:
+        skill_artifacts: artifact dict for one skill.
+        persona: the session persona (e.g. "tpm"). Used to load the on-disk persona
+            builder YAML so that reused KBs (which are NOT in the delta) can be resolved.
+            If empty, falls back to reading the persona from the workflow_skill artifact's
+            ``persona:`` field. Falls back further to inferring from kb_ref prefixes only
+            as a last resort (logged as a warning).
+        repo_root: override for the repo root path (used in tests). Defaults to _REPO_ROOT.
+    """
     findings: list[str] = []
     ok = True
 
@@ -311,33 +329,154 @@ def _check_kb_references_resolve(
     if not isinstance(requires, list):
         return ok, findings
 
-    # Collect known KB names from persona builder delta.
+    # ------------------------------------------------------------------
+    # Resolve `persona` authoritatively, in priority order:
+    #   1. `persona` parameter (set by caller from bundle.persona)
+    #   2. workflow_skill YAML's `persona:` field
+    #   3. Fallback: infer from the first kb_ref prefix (logged as warning)
+    # ------------------------------------------------------------------
+    resolved_persona = persona.strip()
+    if not resolved_persona:
+        resolved_persona = (wf_doc.get("persona") or "").strip()
+    if not resolved_persona:
+        # Last-resort: try to infer from the first kb_ref that contains a dot
+        for entry in requires:
+            if isinstance(entry, dict):
+                kb_ref = entry.get("kb", "")
+                if kb_ref and "." in kb_ref:
+                    resolved_persona = kb_ref.split(".")[0]
+                    log.warning(
+                        "_check_kb_references_resolve: persona not available from bundle or "
+                        "workflow_skill artifact; inferred persona=%r from kb_ref=%r — "
+                        "this is a fallback only; wire persona through the call chain for accuracy",
+                        resolved_persona,
+                        kb_ref,
+                    )
+                    break
+
+    # ------------------------------------------------------------------
+    # A1 — Collect known KB names from the persona_builder_delta artifact.
+    #
+    # Production artifact shape (from synthesize_persona_builder_diff):
+    #   {"name": "short_kb_name", "kind": ..., "extraction_schema": ...,
+    #    "provides_fields": [...], "sources": [...], "retrieval_tools": [...],
+    #    "kb_card": {...}}
+    # → single-KB delta: pb_doc["name"] is the bare KB name.
+    #
+    # Legacy / test-fixture shape (qualified-name-as-top-level-key):
+    #   {"tpm.weekly_ops": {"provides_fields": [...]}}
+    # → top-level keys ARE the KB names.
+    #
+    # Structured shape (knowledge_bases / kbs list):
+    #   {"knowledge_bases": [{"name": "foo", ...}]}
+    # ------------------------------------------------------------------
     pb_kbs: set[str] = set()
-    if isinstance(pb_doc, dict):
-        for k in pb_doc:
-            # Top-level keys or under kbs/knowledge_bases key
-            pb_kbs.add(k)
+
+    if "name" in pb_doc and "knowledge_bases" not in pb_doc and "kbs" not in pb_doc:
+        # A1 — production artifact-dict shape: single-KB delta.
+        bare_name = pb_doc["name"]
+        pb_kbs.add(bare_name)
+        if resolved_persona:
+            pb_kbs.add(f"{resolved_persona}.{bare_name}")
+        log.debug(
+            "_check_kb_references_resolve: artifact-dict shape detected; "
+            "delta KB name=%r, resolved_persona=%r",
+            bare_name,
+            resolved_persona,
+        )
+    else:
+        # Legacy / structured shape.
         kbs_section = pb_doc.get("kbs") or pb_doc.get("knowledge_bases") or {}
         if isinstance(kbs_section, dict):
-            pb_kbs.update(kbs_section.keys())
+            for k in kbs_section:
+                pb_kbs.add(k)
+                if resolved_persona and not k.startswith(f"{resolved_persona}."):
+                    pb_kbs.add(f"{resolved_persona}.{k}")
         elif isinstance(kbs_section, list):
             for item in kbs_section:
                 if isinstance(item, dict):
                     name = item.get("name") or item.get("kb_name")
                     if name:
                         pb_kbs.add(name)
+                        if resolved_persona:
+                            pb_kbs.add(f"{resolved_persona}.{name}")
+        else:
+            # Top-level keys as KB names (test-fixture / legacy shape).
+            for k in pb_doc:
+                pb_kbs.add(k)
+                if resolved_persona and not k.startswith(f"{resolved_persona}."):
+                    pb_kbs.add(f"{resolved_persona}.{k}")
 
+    # ------------------------------------------------------------------
+    # A2 — Resolve reused KBs from the on-disk persona builder YAML.
+    #
+    # Reused KBs (e.g. tpm.tpm_dependencies, tpm.tpm_weekly_ops) are NOT
+    # included in the delta — they already exist in the persona builder.
+    # Load the on-disk YAML and add every KB it declares.
+    # ------------------------------------------------------------------
+    if resolved_persona:
+        _root = repo_root or _REPO_ROOT
+        pb_yaml_path = _root / "framework" / "persona_builders" / f"{resolved_persona}.yaml"
+        try:
+            import yaml as _yaml
+            with open(pb_yaml_path, encoding="utf-8") as fh:
+                pb_on_disk = _yaml.safe_load(fh)
+            if isinstance(pb_on_disk, dict):
+                for kb_entry in (pb_on_disk.get("knowledge_bases") or []):
+                    if isinstance(kb_entry, dict):
+                        name = kb_entry.get("name") or kb_entry.get("kb_name")
+                        if name:
+                            pb_kbs.add(name)
+                            pb_kbs.add(f"{resolved_persona}.{name}")
+            log.debug(
+                "_check_kb_references_resolve: loaded on-disk persona builder %s; "
+                "pb_kbs now has %d entries",
+                pb_yaml_path,
+                len(pb_kbs),
+            )
+        except FileNotFoundError:
+            # Not fatal — the delta alone must resolve refs; log clearly.
+            log.warning(
+                "_check_kb_references_resolve: on-disk persona builder not found at %s; "
+                "reused KB resolution skipped — only delta KBs are known",
+                pb_yaml_path,
+            )
+        except Exception as exc:
+            log.warning(
+                "_check_kb_references_resolve: failed to load on-disk persona builder %s: %s; "
+                "reused KB resolution skipped",
+                pb_yaml_path,
+                exc,
+            )
+    else:
+        log.warning(
+            "_check_kb_references_resolve: persona unknown; "
+            "on-disk persona builder not loaded — reused KBs may produce false positives"
+        )
+
+    # ------------------------------------------------------------------
+    # A3 — Check each kb_ref. Accept if the exact ref OR its short form
+    # (persona-stripped) appears in pb_kbs.
+    # ------------------------------------------------------------------
     for entry in requires:
         if not isinstance(entry, dict):
             continue
         kb_ref = entry.get("kb", "")
         if not kb_ref:
             continue
-        if kb_ref not in pb_kbs:
+
+        # Derive short form: strip leading "persona." prefix if present.
+        short_ref = kb_ref
+        if resolved_persona and kb_ref.startswith(f"{resolved_persona}."):
+            short_ref = kb_ref[len(resolved_persona) + 1:]
+
+        if kb_ref not in pb_kbs and short_ref not in pb_kbs:
             ok = False
             findings.append(
                 f"KB reference '{kb_ref}' in requires_extractions does not appear in "
-                f"persona_builder_delta. Known KBs: {sorted(pb_kbs) or '(none found)'}. "
+                f"persona_builder_delta or in the on-disk persona builder for "
+                f"persona '{resolved_persona or '(unknown)'}'. "
+                f"Known KBs: {sorted(pb_kbs) or '(none found)'}. "
                 "This may be a hallucinated reference."
             )
 
@@ -517,7 +656,11 @@ class KbfOpsReviewEngine:
                     per_dim_findings["artifactConsistency"].append(f)
 
             # 4. check_kb_references_resolve
-            ok, findings = _check_kb_references_resolve(skill_artifacts)
+            # A4: source persona from bundle (authoritative), not guessed from kb_ref.
+            ok, findings = _check_kb_references_resolve(
+                skill_artifacts,
+                persona=bundle.persona,
+            )
             if not ok:
                 for f in findings:
                     bugs.append(BugToFile(

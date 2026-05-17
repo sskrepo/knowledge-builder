@@ -58,6 +58,13 @@ def _make_session(synth_id: str, skill_name: str = "test_skill") -> dict:
 
 
 def _make_artifacts(skill_name: str = "test_skill") -> dict[str, str]:
+    """Return a set of skill artifacts in the PRODUCTION artifact-dict shape.
+
+    persona_builder_delta uses the output shape of synthesize_persona_builder_diff()
+    (a single dict with keys: name, kind, extraction_schema, provides_fields, sources,
+    retrieval_tools, kb_card) — NOT the old test-fixture "qualified-name-as-top-level-key"
+    shape that masked the false-positive bug (see ADR-023 / reviewSkillSession fix).
+    """
     workflow_yaml = f"""\
 workflow_skill: {skill_name}
 persona: tpm
@@ -73,11 +80,26 @@ skill_card:
     - "what happened this week"
     - "ops summary"
 """
+    # Production artifact-dict shape (synthesize_persona_builder_diff output):
+    # name is the SHORT (bare) name; persona-qualified form "tpm.weekly_ops" is derived
+    # at resolution time by the check from bundle.persona + name.
     persona_builder_delta = """\
-tpm.weekly_ops:
-  provides_fields:
-    - incidents_count
-    - top_alert
+name: weekly_ops
+kind: wiki
+extraction_schema: parsers/schemas/tpm/weekly-ops/v1.json
+provides_fields:
+  - incidents_count
+  - top_alert
+sources:
+  - kind: confluence
+    space: TPM
+retrieval_tools:
+  - search_wiki
+kb_card:
+  summary: "Weekly ops summaries synthesized by skill_builder."
+  use_when: "Queries about incidents_count, top_alert."
+  input_shape: "Natural-language question with optional filters."
+  output_shape: "Cited passages with structured metadata."
 """
     eval_extraction = json.dumps({
         "input": "Summarise this week",
@@ -286,6 +308,203 @@ class TestStructuralChecks:
         check_names = [b.check_name for b in report.bugs_to_file]
         assert "check_artifact_count" in check_names, (
             f"Expected check_artifact_count in bugs, got: {check_names}"
+        )
+
+    def test_kb_refs_resolve_no_false_positive_artifact_dict_multi_kb(self, tmp_path):
+        """Regression: artifact-dict delta + reused KBs from on-disk persona builder.
+
+        A bundle whose persona_builder_delta is the production artifact-dict format
+        (a new KB: 'project_tracking_weekly_status_email') and whose
+        requires_extractions references BOTH the new KB (persona-qualified) AND two
+        reused KBs that exist in the on-disk persona builder stub — must produce
+        ZERO bugs filed by check_kb_references_resolve.
+
+        This is the exact false-positive scenario that caused spurious 'hallucinated
+        KB reference' bugs against correctly-authored skills (e.g. synth-tpm-fe0f9e9f).
+        """
+        import yaml
+        from framework.deploy.ops.review_engine import _check_kb_references_resolve
+
+        # Build a stub persona_builders directory with a tpm.yaml that declares
+        # two pre-existing (reused) KBs.
+        pb_dir = tmp_path / "framework" / "persona_builders"
+        pb_dir.mkdir(parents=True)
+        stub_tpm_yaml = {
+            "persona": "tpm",
+            "knowledge_bases": [
+                {
+                    "name": "tpm_dependencies",
+                    "kind": "wiki",
+                    "extraction_schema": "parsers/schemas/tpm/dependencies/v1.json",
+                    "provides_fields": ["initiative", "depends_on", "blocked_by"],
+                    "sources": [{"kind": "confluence", "space": "TPM"}],
+                    "retrieval_tools": ["search_wiki"],
+                    "kb_card": {"summary": "Cross-team dependency tracking."},
+                },
+                {
+                    "name": "tpm_weekly_ops",
+                    "kind": "wiki",
+                    "extraction_schema": "parsers/schemas/tpm/weekly-ops/v1.json",
+                    "provides_fields": ["week_id", "summary", "top_incidents"],
+                    "sources": [{"kind": "confluence", "space": "TPM"}],
+                    "retrieval_tools": ["search_wiki"],
+                    "kb_card": {"summary": "Weekly operational summaries."},
+                },
+            ],
+        }
+        (pb_dir / "tpm.yaml").write_text(
+            yaml.dump(stub_tpm_yaml, default_flow_style=False),
+            encoding="utf-8",
+        )
+
+        # Production artifact-dict shape for the new KB (synthesize_persona_builder_diff output).
+        new_kb_name = "project_tracking_weekly_status_email"
+        persona_builder_delta = yaml.dump(
+            {
+                "name": new_kb_name,
+                "kind": "wiki",
+                "extraction_schema": f"parsers/schemas/tpm/{new_kb_name}/v1.json",
+                "provides_fields": ["project_name", "status", "owner", "due_date"],
+                "sources": [{"kind": "confluence", "space": "TPM"}],
+                "retrieval_tools": ["search_wiki"],
+                "kb_card": {
+                    "summary": "Weekly project tracking status emails.",
+                    "use_when": "Queries about project_name, status, owner.",
+                    "input_shape": "Natural-language question.",
+                    "output_shape": "Cited passages.",
+                },
+            },
+            default_flow_style=False,
+        )
+
+        # Workflow skill references the new KB + two reused KBs — all persona-qualified.
+        workflow_yaml = f"""\
+workflow_skill: weekly_project_status_email
+persona: tpm
+requires_extractions:
+  - kb: tpm.{new_kb_name}
+    required_fields:
+      - project_name
+      - status
+  - kb: tpm.tpm_dependencies
+    required_fields:
+      - depends_on
+      - blocked_by
+  - kb: tpm.tpm_weekly_ops
+    required_fields:
+      - top_incidents
+"""
+        skill_artifacts = {
+            "workflow_skill": workflow_yaml,
+            "persona_builder_delta": persona_builder_delta,
+        }
+
+        # Assert ZERO bugs — all three KB refs must resolve cleanly.
+        ok, findings = _check_kb_references_resolve(
+            skill_artifacts,
+            persona="tpm",
+            repo_root=tmp_path,
+        )
+        assert ok is True, (
+            f"Expected check to pass (zero findings) but got findings: {findings}"
+        )
+        assert findings == [], (
+            f"False positives filed: {findings}"
+        )
+
+    def test_kb_refs_resolve_true_negative_hallucinated_ref_still_caught(self, tmp_path):
+        """True-negative: a genuinely hallucinated KB ref must still be flagged.
+
+        The check must remain a real gate — it must catch KB names that appear
+        in neither the delta nor the on-disk persona builder.
+        """
+        import yaml
+        from framework.deploy.ops.review_engine import _check_kb_references_resolve
+
+        # Build minimal stub persona_builders/tpm.yaml with one real KB.
+        pb_dir = tmp_path / "framework" / "persona_builders"
+        pb_dir.mkdir(parents=True)
+        stub_tpm_yaml = {
+            "persona": "tpm",
+            "knowledge_bases": [
+                {
+                    "name": "tpm_weekly_ops",
+                    "kind": "wiki",
+                    "extraction_schema": "parsers/schemas/tpm/weekly-ops/v1.json",
+                    "provides_fields": ["week_id", "summary"],
+                    "sources": [{"kind": "confluence", "space": "TPM"}],
+                    "retrieval_tools": ["search_wiki"],
+                    "kb_card": {"summary": "Weekly ops."},
+                },
+            ],
+        }
+        (pb_dir / "tpm.yaml").write_text(
+            yaml.dump(stub_tpm_yaml, default_flow_style=False),
+            encoding="utf-8",
+        )
+
+        # Delta has one real new KB.
+        persona_builder_delta = yaml.dump(
+            {
+                "name": "real_new_kb",
+                "kind": "wiki",
+                "extraction_schema": "parsers/schemas/tpm/real-new-kb/v1.json",
+                "provides_fields": ["field_a", "field_b"],
+                "sources": [{"kind": "confluence", "space": "TPM"}],
+                "retrieval_tools": ["search_wiki"],
+                "kb_card": {"summary": "Real new KB.", "use_when": "...",
+                             "input_shape": "...", "output_shape": "..."},
+            },
+            default_flow_style=False,
+        )
+
+        # Workflow references the real new KB, a real reused KB, AND a hallucinated KB.
+        workflow_yaml = """\
+workflow_skill: some_skill
+persona: tpm
+requires_extractions:
+  - kb: tpm.real_new_kb
+    required_fields:
+      - field_a
+  - kb: tpm.tpm_weekly_ops
+    required_fields:
+      - week_id
+  - kb: tpm.totally_hallucinated_kb_that_does_not_exist
+    required_fields:
+      - ghost_field
+"""
+        skill_artifacts = {
+            "workflow_skill": workflow_yaml,
+            "persona_builder_delta": persona_builder_delta,
+        }
+
+        ok, findings = _check_kb_references_resolve(
+            skill_artifacts,
+            persona="tpm",
+            repo_root=tmp_path,
+        )
+
+        # The check MUST flag the hallucinated reference.
+        assert ok is False, (
+            "Expected check to fail (hallucinated ref should be caught), but ok=True"
+        )
+        assert any("totally_hallucinated_kb_that_does_not_exist" in f for f in findings), (
+            f"Expected hallucinated KB ref to appear in findings, got: {findings}"
+        )
+        # But the two valid refs must NOT produce findings that flag them as hallucinated.
+        # The hallucinated-ref finding mentions "real_new_kb" in its "Known KBs:" list
+        # (it IS a known KB), so we test that no finding is *about* these refs specifically.
+        # A finding is "about" a ref when the ref appears as the primary subject
+        # (i.e. "KB reference 'X' ..."), not just as part of the known-KBs enumeration.
+        assert not any(
+            f.startswith(f"KB reference 'tpm.real_new_kb'") for f in findings
+        ), (
+            f"real_new_kb should NOT be flagged as hallucinated; findings: {findings}"
+        )
+        assert not any(
+            f.startswith("KB reference 'tpm.tpm_weekly_ops'") for f in findings
+        ), (
+            f"tpm_weekly_ops should NOT be flagged as hallucinated; findings: {findings}"
         )
 
 
