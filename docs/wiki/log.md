@@ -4,6 +4,24 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-17] architect | BUG-queue-f4987: fix authorSkill silent swallow of artifact: ref at CLARIFY
+
+**Root cause confirmed via live ADB read.** Session `synth-tpm-3b2c2c71` (tpm, state=CLARIFY,
+clarify_next_state=REVIEW_DESIGN, 2 unresolved questions). User sent
+`artifact:2026-05-14 FAaaS-LCM Update Kiwi Slide only 2.pptx id:art-3c90afba` as free text
+at CLARIFY. `_handle_clarify_response` accepted it as the answer to Q[0] without ever calling
+the artifact binding path. Artifact `art-3c90afba` exists in filestore
+(`~/.kbf/store/uploads/synth-tpm-3b2c2c71/art-3c90afba/`) — upload succeeded; binding failed silently.
+`weekly_exec_review_v1` in the CLARIFY message = EXPECTED (from `design.workflow_shape.layout`,
+LLM-generated in DESIGN_SKILL, not a wrong artifact reference).
+
+**Fix:** `_handle_clarify_response` now detects `artifact:<name> id:<id>` prefix, stashes in
+`_data._pending_artifact_stash` (persisted via to_dict/from_dict), re-asks the clarify question,
+and confirms to the user. `_handle_upload_artifact_example` auto-applies the stash when user skips.
+`_advance_to_upload_artifact_example` surfaces the stash filename in the prompt.
+11 new tests added to `TestArtifactStashAtClarify`. Full suite: 8 pre-existing failures, 0 new.
+Bug filed and ADB-verified: BUG-queue-f4987. pmo/bugs export regenerated (72 records).
+
 ## [2026-05-16] backend-dev | session recovery: synth-tpm-5b3e690f ask_parameterized VALIDATE unblock
 
 **Session synth-tpm-5b3e690f recovered.** Session was stuck at state=VALIDATE with error:

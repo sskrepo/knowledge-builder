@@ -414,6 +414,15 @@ class _SessionData:
     # One-line evidence text from the intent that drove the source_binding_mode
     # classification.  Empty string when mode is "author_fixed" and no signal present.
     source_binding_signal: str = ""
+    # BUG-queue-f4987: artifact stash — when the user supplies an
+    # "artifact:<filename> id:<artifact_id>" reference at CLARIFY (or any other
+    # pre-UPLOAD_ARTIFACT_EXAMPLE state that accepts free-text), we stash the
+    # filename + artifact_id here rather than silently swallowing it as clarify
+    # answer text.  The stash is auto-applied when the FSM reaches
+    # UPLOAD_ARTIFACT_EXAMPLE.  None when no stash is pending.
+    # Schema: {"filename": str, "artifact_id": str}
+    # Persisted across ADB round-trips so resume across client restarts works.
+    _pending_artifact_stash: dict | None = field(default=None)
 
 
 class SkillBuilderConversation:
@@ -620,6 +629,9 @@ class SkillBuilderConversation:
         # sessions that lack this key (ADR-032 §H migration rule: absent = author_fixed).
         d["source_binding_mode"] = self._data.source_binding_mode
         d["source_binding_signal"] = self._data.source_binding_signal
+        # BUG-queue-f4987: artifact stash — None when nothing pending; dict when
+        # user supplied "artifact:<filename> id:<artifact_id>" at a pre-upload state.
+        d["pending_artifact_stash"] = self._data._pending_artifact_stash
         return d
 
     @classmethod
@@ -692,6 +704,9 @@ class SkillBuilderConversation:
             # (absent key = author_fixed per ADR-032 §H migration rule).
             source_binding_mode=d.get("source_binding_mode", "author_fixed"),
             source_binding_signal=d.get("source_binding_signal", ""),
+            # BUG-queue-f4987: artifact stash.
+            # Backward-compat default None — pre-fix sessions have no stash.
+            _pending_artifact_stash=d.get("pending_artifact_stash"),
         )
         return obj
 
@@ -1068,6 +1083,57 @@ class SkillBuilderConversation:
                 must_show_human=True,
                 awaiting_user=True,
             )
+
+        # BUG-queue-f4987 fix: detect early artifact: reference supplied at CLARIFY.
+        # "artifact:<filename> id:<artifact_id>" is the uploadArtifact syntax (ADR-021).
+        # The binding handler (_handle_upload_artifact_example) only runs at
+        # UPLOAD_ARTIFACT_EXAMPLE, so supplying it here would normally be silently
+        # swallowed as free-text clarify answer — a silent loss of user intent.
+        # Instead: stash the ref in session state, re-ask the pending clarify question,
+        # and confirm to the user that the artifact will be auto-applied at the upload step.
+        _stripped = user_input.strip()
+        if _stripped.startswith("artifact:"):
+            # Filename may contain spaces; artifact_id is always the last whitespace-free token
+            # after the literal " id:" marker.  Use a non-greedy filename capture up to " id:".
+            _m = re.match(r"^artifact:(.+?)\s+id:(\S+)$", _stripped)
+            if _m:
+                _filename, _artifact_id = _m.group(1), _m.group(2)
+                self._data._pending_artifact_stash = {
+                    "filename": _filename,
+                    "artifact_id": _artifact_id,
+                }
+                pending = [q for q in questions if not q.get("resolved")]
+                question_text = pending[0]["question"] if pending else "the question above"
+                log.info(
+                    "_handle_clarify_response: stashed early artifact ref "
+                    "filename=%r artifact_id=%r — re-asking clarify question",
+                    _filename, _artifact_id,
+                )
+                return ConversationTurn(
+                    state="CLARIFY",
+                    message=(
+                        f"Got it — I've noted your reference artifact "
+                        f"'{_filename}' (id: {_artifact_id}). "
+                        f"It will be automatically applied when we reach the "
+                        f"artifact upload step.\n\n"
+                        f"I still need your answer to the current question first:\n\n"
+                        f"{question_text}\n\n"
+                        f"Please answer the question above (or type 'skip' to proceed "
+                        f"with my best assumption)."
+                    ),
+                    data={
+                        "question": question_text,
+                        "pending_count": len(pending),
+                        "total_count": len(questions),
+                        "artifact_stashed": {"filename": _filename, "artifact_id": _artifact_id},
+                    },
+                    options=["<your answer>", "skip"],
+                    must_show_human=True,
+                    awaiting_user=True,
+                )
+            # artifact: prefix but not the expected format — let it fall through
+            # as a normal answer (it won't bind anything, but it's also not the
+            # upload syntax; treat it as regular clarify text).
 
         # Find the first unresolved question and mark it answered
         resolved_any = False
@@ -1520,15 +1586,29 @@ class SkillBuilderConversation:
     def _advance_to_upload_artifact_example(self) -> ConversationTurn:
         """Transition to UPLOAD_ARTIFACT_EXAMPLE state (ADR-027)."""
         self._state = "UPLOAD_ARTIFACT_EXAMPLE"
-        return ConversationTurn(
-            state="UPLOAD_ARTIFACT_EXAMPLE",
-            message=(
+        # BUG-queue-f4987: if an artifact was stashed from an earlier CLARIFY turn,
+        # surface it prominently so the user knows it will be auto-applied on 'skip'.
+        stash = self._data._pending_artifact_stash
+        if stash:
+            msg = (
+                f"Reference artifact noted: '{stash['filename']}' (id: {stash['artifact_id']}).\n\n"
+                f"Type 'skip' to apply this reference artifact automatically, "
+                f"or provide a different artifact reference to override it.\n\n"
+                f"This reference helps DESIGN_SKILL choose the right output format and layout."
+            )
+            options = ["skip", f"artifact:{stash['filename']} id:{stash['artifact_id']}", "/path/to/other.pptx"]
+        else:
+            msg = (
                 "Optional: upload a reference artifact to provide a layout hint.\n\n"
                 "This helps DESIGN_SKILL choose the right output format and layout.\n"
                 "Provide the path to a PPTX, DOCX, Markdown, or text file.\n\n"
                 "If you don't have a reference file, type 'skip'."
-            ),
-            options=["skip", "artifact:<filename> id:<artifact_id>", "/path/to/file.pptx"],
+            )
+            options = ["skip", "artifact:<filename> id:<artifact_id>", "/path/to/file.pptx"]
+        return ConversationTurn(
+            state="UPLOAD_ARTIFACT_EXAMPLE",
+            message=msg,
+            options=options,
         )
 
     def _handle_upload_artifact_example(self, user_input: str) -> ConversationTurn:
@@ -1546,11 +1626,45 @@ class SkillBuilderConversation:
              artifact bytes' ArtifactStore ID (or a sentinel for filesystem paths)
              in _data.artifact_reference_id so _run_eval can read the reference
              bytes to call comparator.compare().
+
+        BUG-queue-f4987 fix: if the user previously supplied an
+        "artifact:<filename> id:<artifact_id>" reference at CLARIFY (or another
+        pre-upload state) it was stashed in _data._pending_artifact_stash.  When
+        that stash is set AND the user now types "skip" (or any skip-synonym),
+        auto-apply the stashed artifact rather than skipping — the user already
+        expressed their intent.  If the user provides a NEW artifact: reference
+        here, the new one wins and the stash is cleared.
         """
         from .analyze_artifact import analyze_artifact
         from .comparator import ArtifactComparator, IMAGE_ONLY_MESSAGE, SUPPORTED_TYPES
 
+        # BUG-queue-f4987: auto-apply stashed artifact if user skips and stash exists.
+        stash = self._data._pending_artifact_stash
         lowered = user_input.lower().strip()
+        if (
+            stash
+            and lowered in ("skip", "no", "none", "later")
+        ):
+            log.info(
+                "_handle_upload_artifact_example: auto-applying stashed artifact "
+                "filename=%r artifact_id=%r (user skipped at upload step)",
+                stash.get("filename"), stash.get("artifact_id"),
+            )
+            # Rewrite user_input to the stashed artifact: reference so the rest of
+            # the handler processes it normally.
+            user_input = f"artifact:{stash['filename']} id:{stash['artifact_id']}"
+            lowered = user_input.lower()
+            # Clear the stash — it has been consumed.
+            self._data._pending_artifact_stash = None
+        elif stash and user_input.strip().startswith("artifact:"):
+            # User supplied a new artifact: reference — clear the stash (new one wins).
+            log.info(
+                "_handle_upload_artifact_example: new artifact: ref supplied — "
+                "discarding stash (stash=%r)",
+                stash,
+            )
+            self._data._pending_artifact_stash = None
+
         if lowered in ("skip", "no", "none", "later"):
             self._data.artifact_layout = None
             self._data.artifact_path = ""

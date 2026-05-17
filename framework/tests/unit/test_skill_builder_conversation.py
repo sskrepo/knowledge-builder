@@ -3955,3 +3955,235 @@ class TestClarifyStatePersistence:
         assert turn.data is not None and turn.data.get("error") == "clarify_questions_lost", (
             "Turn data must include error='clarify_questions_lost' for observability"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestArtifactStashAtClarify
+# BUG-queue fix: artifact:<filename> id:<artifact_id> supplied at CLARIFY must
+# NOT be silently swallowed as clarify free-text answer.  It must be stashed
+# and auto-applied at UPLOAD_ARTIFACT_EXAMPLE.
+# ---------------------------------------------------------------------------
+
+
+class TestArtifactStashAtClarify:
+    """Contract tests for the artifact-stash-at-CLARIFY fix.
+
+    Guards against the defect where an 'artifact:<filename> id:<artifact_id>'
+    reference supplied while the FSM is in the CLARIFY state was silently
+    consumed as the text answer to the current clarify question, without
+    binding the artifact and without notifying the user.
+    """
+
+    def _make_conv_at_clarify(self, next_state="REVIEW_DESIGN") -> SkillBuilderConversation:
+        """Return a SkillBuilderConversation already in CLARIFY state with one pending question.
+
+        Uses next_state=REVIEW_DESIGN (post-DESIGN_SKILL path) by default so that
+        when the question is resolved, _clarify_advance() calls _advance_to_review_design()
+        rather than _advance_to_configure_sources_v2() (which requires an LLM).
+        A stub design dict is set so _advance_to_review_design() has something to surface.
+        """
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._state = "CLARIFY"
+        conv._data._clarify_questions = [
+            {"question": "Will the skill receive the PPTX at runtime?", "resolved": False},
+        ]
+        conv._data._clarify_next_state = next_state
+        # Stub design so REVIEW_DESIGN has something to surface (avoids RuntimeError)
+        conv._data.design = {
+            "fields": [{"name": "title", "type": "str"}],
+            "workflow_shape": {"output_format": "pptx", "layout": "weekly_exec_review_v1"},
+        }
+        return conv
+
+    # ------------------------------------------------------------------
+    # Core stash behaviour
+    # ------------------------------------------------------------------
+
+    def test_artifact_ref_at_clarify_is_not_recorded_as_clarify_answer(self):
+        """When the user sends 'artifact:<name> id:<id>' at CLARIFY, the clarify
+        question must NOT be marked resolved with the artifact string as its answer.
+        """
+        conv = self._make_conv_at_clarify()
+        artifact_input = "artifact:2026-05-14 FAaaS-LCM Update Kiwi Slide only 2.pptx id:art-3c90afba"
+        turn = conv._handle_clarify_response(artifact_input)
+
+        # The clarify question must still be unresolved.
+        questions = conv._data._clarify_questions
+        assert not questions[0].get("resolved"), (
+            "Clarify Q[0] must remain unresolved when user sends an artifact: reference"
+        )
+        assert questions[0].get("answer") is None or "art-3c90afba" not in (
+            questions[0].get("answer") or ""
+        ), (
+            "The artifact: string must NOT be stored as the clarify answer text"
+        )
+
+    def test_artifact_ref_at_clarify_stashes_filename_and_id(self):
+        """When user sends 'artifact:<name> id:<id>' at CLARIFY, the ref must be
+        stashed in _data._pending_artifact_stash with filename and artifact_id.
+        """
+        conv = self._make_conv_at_clarify()
+        artifact_input = "artifact:my_slide.pptx id:art-abc12345"
+        conv._handle_clarify_response(artifact_input)
+
+        stash = conv._data._pending_artifact_stash
+        assert stash is not None, "_pending_artifact_stash must be set after artifact: ref at CLARIFY"
+        assert stash.get("filename") == "my_slide.pptx", (
+            f"stash['filename'] must be 'my_slide.pptx', got {stash.get('filename')!r}"
+        )
+        assert stash.get("artifact_id") == "art-abc12345", (
+            f"stash['artifact_id'] must be 'art-abc12345', got {stash.get('artifact_id')!r}"
+        )
+
+    def test_artifact_ref_at_clarify_returns_clarify_state_still_awaiting(self):
+        """After stashing, the turn must return state=CLARIFY with awaiting_user=True,
+        re-asking the pending question.
+        """
+        conv = self._make_conv_at_clarify()
+        turn = conv._handle_clarify_response("artifact:report.pptx id:art-111")
+
+        assert turn.state == "CLARIFY", (
+            f"State must remain CLARIFY after stashing artifact ref, got {turn.state!r}"
+        )
+        assert turn.awaiting_user is True, "awaiting_user must be True — question still open"
+        assert turn.must_show_human is True, "must_show_human must be True for CLARIFY"
+
+    def test_artifact_ref_at_clarify_response_mentions_stash(self):
+        """The response message must tell the user their artifact ref was noted."""
+        conv = self._make_conv_at_clarify()
+        turn = conv._handle_clarify_response("artifact:report.pptx id:art-111")
+
+        msg = turn.message or ""
+        assert "report.pptx" in msg or "art-111" in msg, (
+            "Response message must mention the artifact filename or id so the user "
+            f"knows it was noted. Got: {msg[:200]!r}"
+        )
+
+    def test_artifact_ref_at_clarify_data_includes_artifact_stashed(self):
+        """Turn data must include 'artifact_stashed' key for the client to display."""
+        conv = self._make_conv_at_clarify()
+        turn = conv._handle_clarify_response("artifact:deck.pptx id:art-xyz99")
+
+        assert turn.data is not None, "turn.data must not be None after artifact stash"
+        assert "artifact_stashed" in turn.data, (
+            "turn.data must include 'artifact_stashed' key so the client can show it"
+        )
+        stashed = turn.data["artifact_stashed"]
+        assert stashed.get("artifact_id") == "art-xyz99"
+
+    # ------------------------------------------------------------------
+    # Persistence: stash survives to_dict / from_dict round-trip
+    # ------------------------------------------------------------------
+
+    def test_pending_artifact_stash_survives_round_trip(self):
+        """_pending_artifact_stash must round-trip through to_dict/from_dict."""
+        conv = self._make_conv_at_clarify()
+        conv._data._pending_artifact_stash = {"filename": "slide.pptx", "artifact_id": "art-aabbcc"}
+
+        d = conv.to_dict()
+        assert "pending_artifact_stash" in d, "to_dict must include 'pending_artifact_stash'"
+        assert d["pending_artifact_stash"] == {"filename": "slide.pptx", "artifact_id": "art-aabbcc"}
+
+        restored = SkillBuilderConversation.from_dict(d, skill_store=MagicMock())
+        stash = restored._data._pending_artifact_stash
+        assert stash is not None, "_pending_artifact_stash must survive from_dict"
+        assert stash.get("filename") == "slide.pptx"
+        assert stash.get("artifact_id") == "art-aabbcc"
+
+    def test_pending_artifact_stash_defaults_to_none_on_old_session(self):
+        """Sessions serialized before this fix (no 'pending_artifact_stash' key) must
+        restore with _pending_artifact_stash=None — no regression.
+        """
+        conv = self._make_conv_at_clarify()
+        d = conv.to_dict()
+        d.pop("pending_artifact_stash", None)  # simulate pre-fix session dict
+
+        restored = SkillBuilderConversation.from_dict(d, skill_store=MagicMock())
+        assert restored._data._pending_artifact_stash is None, (
+            "Pre-fix sessions without 'pending_artifact_stash' must restore to None"
+        )
+
+    # ------------------------------------------------------------------
+    # Auto-apply at UPLOAD_ARTIFACT_EXAMPLE
+    # ------------------------------------------------------------------
+
+    def test_stash_auto_applied_when_user_skips_upload(self):
+        """When _pending_artifact_stash is set and user types 'skip' at
+        UPLOAD_ARTIFACT_EXAMPLE, the handler must apply the stash instead of skipping.
+        The session must NOT advance to DESIGN_SKILL with artifact_reference_id=None
+        when a stash is present.
+
+        After stash auto-apply the handler calls _run_design_skill() which requires
+        an LLM.  We patch _run_design_skill to a stub so the test focuses only on the
+        stash-consumption behaviour.
+        """
+        from unittest.mock import patch as _patch
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._state = "UPLOAD_ARTIFACT_EXAMPLE"
+        conv._data._pending_artifact_stash = {"filename": "kiwi_slide.pptx", "artifact_id": "art-3c90afba"}
+
+        # Stub _run_design_skill so we don't need a live LLM
+        stub_turn = MagicMock()
+        with _patch.object(conv, "_run_design_skill", return_value=stub_turn):
+            # artifact_store is None — stash auto-apply hits the artifact: branch,
+            # resolve() returns None (no store), handler falls back gracefully,
+            # then calls _run_design_skill().
+            conv._handle_upload_artifact_example("skip")
+
+        # Stash must be cleared after consumption.
+        assert conv._data._pending_artifact_stash is None, (
+            "_pending_artifact_stash must be cleared after auto-apply at UPLOAD_ARTIFACT_EXAMPLE"
+        )
+
+    def test_stash_cleared_when_new_artifact_supplied_at_upload(self):
+        """When a new artifact: ref is supplied at UPLOAD_ARTIFACT_EXAMPLE, the stash
+        must be cleared (new ref wins).
+
+        After stash clear the handler processes the new artifact: ref and eventually
+        calls _run_design_skill().  We patch that so we don't need a live LLM.
+        """
+        from unittest.mock import patch as _patch
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._state = "UPLOAD_ARTIFACT_EXAMPLE"
+        conv._data._pending_artifact_stash = {"filename": "old.pptx", "artifact_id": "art-OLD"}
+
+        stub_turn = MagicMock()
+        with _patch.object(conv, "_run_design_skill", return_value=stub_turn):
+            # Supply a different artifact: ref.
+            # artifact_store is None so store.resolve() won't be called.
+            conv._handle_upload_artifact_example("artifact:new.pptx id:art-NEW")
+
+        assert conv._data._pending_artifact_stash is None, (
+            "Stash must be cleared when a new artifact: ref is supplied at UPLOAD_ARTIFACT_EXAMPLE"
+        )
+
+    def test_advance_to_upload_artifact_mentions_stash_in_message(self):
+        """_advance_to_upload_artifact_example must surface the stash filename in the
+        prompt message when a stash is pending.
+        """
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._data._pending_artifact_stash = {"filename": "kiwi_slide.pptx", "artifact_id": "art-3c90afba"}
+
+        turn = conv._advance_to_upload_artifact_example()
+
+        assert "kiwi_slide.pptx" in (turn.message or ""), (
+            "When stash is pending, _advance_to_upload_artifact_example message must "
+            f"mention the stashed filename. Got: {turn.message[:200]!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # Non-regression: normal clarify answers still work
+    # ------------------------------------------------------------------
+
+    def test_normal_answer_still_resolves_clarify_question(self):
+        """A normal text answer (not artifact:) at CLARIFY must still resolve Q[0]."""
+        conv = self._make_conv_at_clarify()
+        conv._handle_clarify_response("The PPTX is not accessible at runtime.")
+
+        questions = conv._data._clarify_questions
+        assert questions[0].get("resolved") is True, (
+            "Normal text answer must resolve Q[0]"
+        )
+        assert conv._data._pending_artifact_stash is None, (
+            "Normal text answer must not set _pending_artifact_stash"
+        )
