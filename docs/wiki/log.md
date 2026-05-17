@@ -4,6 +4,22 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] backend-dev | session recovery: synth-tpm-5b3e690f ask_parameterized VALIDATE unblock
+
+**Session synth-tpm-5b3e690f recovered.** Session was stuck at state=VALIDATE with error:
+`source_binding.mode must be 'ask_parameterized' ... YAML has mode='author_fixed'`.
+Root cause: session committed workflow YAML before commit 47ec90d (the ADR-032 synthesizer
+fix), so persisted artifact had no `source_binding` block.
+
+**Fix applied:** Re-synthesized workflow YAML using fixed `synthesize_workflow_skill()`
+with `source_binding_mode="ask_parameterized"`, `space_allow_list=["OCIFACP"]` (correctly
+derived from `source_samples["confluence:18625350641"].space`). Updated both:
+- `session_data.synthesized_artifacts` (what `_run_validate` reads for contract check)
+- `KB_SHIM.KBF_SKILL_ARTIFACTS` workflow_skill record content
+
+Session state reset to COMMITTED. `_validate_source_binding_contract` verified PASSED.
+Reusable recovery script committed at `framework/cli/recover_ask_parameterized_session.py`.
+
 ## [2026-05-16] backend-dev | DECISION-013 — agent/architect bug channel + ADB backfill
 
 **DECISION-013 filed:** agent/architect-proactively-discovered defects are now filed into
