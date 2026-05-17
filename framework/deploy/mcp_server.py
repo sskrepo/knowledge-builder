@@ -272,7 +272,9 @@ def _load_app():
         from ..workflow_runtime.executor import _any_promoted_skill_requires_ephemeral
 
         confluence_adapter = None
-        if _any_promoted_skill_requires_ephemeral(WORKFLOW_SKILLS_DIR):
+        # ADR-033: pass skill_store so _any_promoted_skill_requires_ephemeral
+        # checks ADB-promoted artifacts rather than disk YAML files.
+        if _any_promoted_skill_requires_ephemeral(WORKFLOW_SKILLS_DIR, skill_store=app.state.skill_store):
             try:
                 confluence_adapter = _build_confluence_adapter_factory(kbf_env, REPO_ROOT)
             except Exception as _ca_exc:
@@ -328,13 +330,51 @@ def _load_app():
         # "render: app.state.workflow_executor missing".
         app.state.workflow_executor = state["workflow_executor"]
 
+        def _make_wf_callable_from_cfg(cfg: dict, executor):
+            """Return a callable that executes the skill from an in-memory cfg dict.
+
+            ADR-033: used for promoted skills whose cfg was read from ADB, so
+            the internal tool registry also uses the ADB-authoritative definition.
+            """
+            def _call(inputs: dict) -> dict:
+                return executor.execute_from_config(cfg, inputs)
+            return _call
+
         def _make_wf_callable(skill_path: str, executor):
+            """Return a callable that executes the skill from disk (laptop/no-store path)."""
             def _call(inputs: dict) -> dict:
                 from pathlib import Path as _Path
                 return executor.execute(_Path(skill_path), inputs)
             return _call
 
+        # ADR-033: for promoted skills, register using ADB artifact cfg
+        # (via shim_workflows ADB-sourced cards) rather than disk paths.
+        # For the disk-only path (laptop/no-store), fall back to the path-based callable.
+        _wf_skill_store = app.state.skill_store
         for tool_name, wf_tool in workflow_registry.items():
+            persona = wf_tool.persona
+            skill_name_local = wf_tool.skill_name
+            # Try ADB artifact first (ADR-033)
+            if _wf_skill_store is not None:
+                try:
+                    _content = _wf_skill_store.read_artifact(persona, skill_name_local, "workflow_skill")
+                except Exception:
+                    _content = None
+                if _content is not None:
+                    try:
+                        import yaml as _yaml_local
+                        _cfg_from_adb = _yaml_local.safe_load(_content) or {}
+                        state["tool_registry"][tool_name] = _make_wf_callable_from_cfg(
+                            _cfg_from_adb, state["workflow_executor"],
+                        )
+                        log.debug(
+                            "internal tool registry: %s registered from ADB artifact (ADR-033)",
+                            tool_name,
+                        )
+                        continue
+                    except Exception:
+                        pass
+            # Disk fallback
             state["tool_registry"][tool_name] = _make_wf_callable(
                 wf_tool._path or wf_tool.skill_config.get("skill_path", ""),
                 state["workflow_executor"],

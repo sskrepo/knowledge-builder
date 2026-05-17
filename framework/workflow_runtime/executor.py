@@ -157,15 +157,43 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 _TELEMETRY_DIR = Path.home() / ".kbf" / "telemetry"
 
 
-def _any_promoted_skill_requires_ephemeral(workflow_skills_dir) -> bool:
-    """Return True if any skill YAML under workflow_skills_dir has
+def _any_promoted_skill_requires_ephemeral(workflow_skills_dir, skill_store=None) -> bool:
+    """Return True if any PROMOTED skill has
     source_binding.mode == ask_parameterized and source_binding.ingest_on_demand == true.
+
+    ADR-033: when skill_store is provided, only promoted skills are checked (from
+    ADB artifact content) — disk files are NOT consulted for promoted skills.
+    Disk is scanned as a supplemental check for the laptop/no-store path.
 
     Used by mcp_server lifespan to decide whether to initialize the Confluence
     adapter at startup.  Graceful: any unreadable/unparseable YAML is skipped.
 
     ADR-032 P2-Infra.
     """
+    # ADB-backed path: check promoted skill artifacts from ADB.
+    if skill_store is not None:
+        try:
+            promoted_pairs = skill_store.list_promoted_workflow_skills()
+        except Exception:
+            promoted_pairs = set()
+
+        for (persona, skill_name) in promoted_pairs:
+            try:
+                content = skill_store.read_artifact(persona, skill_name, "workflow_skill")
+                if content is None:
+                    continue
+                cfg = yaml.safe_load(content) or {}
+                sb = cfg.get("source_binding") or {}
+                if sb.get("mode") == "ask_parameterized" and sb.get("ingest_on_demand", False):
+                    return True
+            except Exception:
+                continue
+
+        # ADB-backed: do not fall through to disk scan for the promoted-skill
+        # check.  Disk may have stale files that are NOT promoted.
+        return False
+
+    # Laptop/no-store path: scan all disk YAML files.
     for skill_path in Path(workflow_skills_dir).rglob("*.yaml"):
         try:
             cfg = yaml.safe_load(skill_path.read_text()) or {}
@@ -384,8 +412,40 @@ class WorkflowExecutor:
         self.confluence_adapter = confluence_adapter
 
     def execute(self, skill_yaml_path: Path, inputs: dict) -> dict:
+        """Execute a workflow skill from a YAML file path.
+
+        Prefer execute_from_config() when the skill cfg is already in memory
+        (e.g. loaded from ADB artifact) to avoid a redundant disk read.
+        This method is retained for backward compatibility with the internal
+        tool registry and the laptop/no-store path.
+        """
         t_start = time.monotonic()
         cfg = yaml.safe_load(Path(skill_yaml_path).read_text())
+        skill_name = cfg.get("workflow_skill")
+        persona = cfg.get("persona")
+        return self._execute_cfg(cfg, inputs, t_start=t_start)
+
+    def execute_from_config(self, cfg: dict, inputs: dict) -> dict:
+        """Execute a workflow skill from an already-loaded config dict.
+
+        ADR-033: called by maybe_render_artifact when the cfg was loaded from
+        the ADB-committed workflow_skill artifact (not disk).  Avoids the disk
+        re-read in execute() so promoted skills with no disk file work correctly.
+
+        Args:
+            cfg:    Parsed workflow skill YAML dict (from ADB or disk).
+            inputs: Skill inputs dict (e.g. {"input": question, "page_id": "..."}).
+
+        Returns:
+            Execution result dict — same shape as execute().
+        """
+        return self._execute_cfg(cfg, inputs, t_start=time.monotonic())
+
+    def _execute_cfg(self, cfg: dict, inputs: dict, t_start: float) -> dict:
+        """Internal implementation of execute/execute_from_config.
+
+        Both public methods delegate here after resolving cfg.
+        """
         skill_name = cfg.get("workflow_skill")
         persona = cfg.get("persona")
         log.info("executing workflow skill %s for persona %s with inputs=%s",

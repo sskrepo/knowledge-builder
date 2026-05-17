@@ -20,6 +20,53 @@ derived from `source_samples["confluence:18625350641"].space`). Updated both:
 Session state reset to COMMITTED. `_validate_source_binding_contract` verified PASSED.
 Reusable recovery script committed at `framework/cli/recover_ask_parameterized_session.py`.
 
+## [2026-05-16] backend-dev | ADR-033 — promoted workflow skill definitions resolved from ADB, not disk
+
+**ADR-033 landed.** Fixes the silent routing failure (promoted skill → tier-4 no_answer)
+caused by shim_workflows building card bodies from on-disk YAML while gating promotion on ADB.
+
+Root cause (session synth-tpm-5b3e690f, JSON-RPC id 34): `shim_workflows.load()` built
+routing card bodies from disk byproduct YAMLs (could be absent, stale, or missing
+`source_binding`) while relying on ADB's `list_promoted_workflow_skills()` for promotion
+gating. Promoted `ask_parameterized` skill `tpm.project_tracking_weekly_stakeholder_meeting_email`
+had no disk file → invisible to Tier-1 router → tier-4 no_answer returned instead.
+
+**Fix (4 files):**
+- `shim_workflows.py`: new `_cfg_to_card()` shared helper; `load()` calls
+  `read_artifact(persona, skill_name, "workflow_skill")` per promoted pair; ADB artifact
+  is the card body source; disk scanned separately for `all_cards_including_draft()` only.
+- `ask.py`: `maybe_render_artifact()` loads skill cfg from `skill_store.read_artifact()`
+  first; calls `executor.execute_from_config(cfg)` when cfg from ADB; disk only when no
+  skill_store (laptop/no-store, INFO-logged). Also fixed: tier-4 responses now always
+  carry a `request_id` (was absent on routing-miss path, only present on content-filter).
+- `executor.py`: new `execute_from_config(cfg)` public method; `_execute_cfg()` internal
+  shared; `_any_promoted_skill_requires_ephemeral()` gains `skill_store` param and checks
+  ADB artifacts for promoted skills.
+- `mcp_server.py`: passes `skill_store` to `_any_promoted_skill_requires_ephemeral()`;
+  internal tool registry registers promoted skills from ADB artifact cfg.
+
+**Test changes:**
+- `test_shim_workflows_adb.py`: 22 tests (18 old → completely rewritten; 4 new ADR-033
+  tests added: T1=card body from ADB, T2=disk-absent-but-ADB-promoted routable,
+  T3=source_binding carried through, T4=artifact-None skipped with WARNING). Old tests
+  hung because `_make_store()` didn't mock `read_artifact` — new version provides YAML strings.
+- `test_ask_route_ask_parameterized.py`: set `app_state.skill_store = None` in
+  `_make_app_state` so disk-path tests continue to work (laptop/no-store mode).
+
+**ADR filed:** `docs/wiki/adr/ADR-033-promoted-workflow-defs-from-adb.md`
+
+**E2E verified in-process:** `execute_from_config(cfg, inputs={page_id: 18625350641})`
+routed to Tier-1, fetched OCIFACP page 18625350641 ephemerally
+("RODS Support for Dynamic Tables Replication (Template only)"), produced
+`/Users/sravansunkaranam/.kbf/outputs/project_tracking_weekly_stakeholder_meeting_email.email`
+(1006 bytes, DRAFT not sent), `source_fetched_on_demand=True`.
+
+**Bugs filed:** BUG-queue-44116 (routing defect, severity=HIGH, fixed) and
+BUG-queue-8d149 (no-requestId on tier-4 routing-miss, severity=MEDIUM, fixed). Both
+confirmed in ADB (COUNT=1).
+
+**Test result:** 1444 passed, 8 failed (pre-existing baseline: test_smoke_validate×7 + test_code_wiki×1). Zero new failures.
+
 ## [2026-05-16] backend-dev | DECISION-013 — agent/architect bug channel + ADB backfill
 
 **DECISION-013 filed:** agent/architect-proactively-discovered defects are now filed into

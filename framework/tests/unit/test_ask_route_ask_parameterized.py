@@ -125,8 +125,18 @@ def _make_app_state(
     executor_result: dict | None = None,
     executor_raises: Exception | None = None,
 ) -> MagicMock:
-    """Build a mock app_state with workflow_executor wired to the skill YAML dir."""
+    """Build a mock app_state with workflow_executor wired to the skill YAML dir.
+
+    ADR-033: skill_store is explicitly set to None so maybe_render_artifact uses
+    the disk-path (laptop/no-store mode).  These tests exercise the D1/P2 logic
+    using _patch_skill_yaml to inject the skill cfg from disk, not from ADB.
+    Tests that exercise the ADB artifact path are in test_shim_workflows_adb.py.
+    """
     app_state = MagicMock()
+
+    # ADR-033: set skill_store=None so maybe_render_artifact takes the disk path
+    # (uses _patch_skill_yaml content) rather than calling read_artifact().
+    app_state.skill_store = None
 
     # The executor mock captures inputs kwarg for assertion
     mock_executor = MagicMock()

@@ -14,6 +14,7 @@ in ``_start_ask()``, a plain async function both the route and the MCP tool call
 from __future__ import annotations
 
 import logging
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -118,6 +119,12 @@ def maybe_render_artifact(app_state, result: dict, question: str,
     values. Failures are logged and the result is left untouched — the
     text answer always reaches the user even if rendering fails.
 
+    ADR-033: skill cfg is resolved from ADB artifact (not disk) for promoted
+    skills when a skill_store is wired on app_state.  This ensures that
+    source_binding, trigger, and delivery reflect the committed ADB artifact
+    rather than a stale/absent disk byproduct.  Disk is only consulted when
+    no skill_store is available (laptop/no-ADB path, explicitly INFO-logged).
+
     ADR-032 D1 fix: for ask_parameterized skills, the skill's
     source_binding.input_param is resolved and threaded into the executor
     inputs dict.  The page reference is resolved with this precedence:
@@ -131,9 +138,9 @@ def maybe_render_artifact(app_state, result: dict, question: str,
     latencyNote are populated in `result` for the response builder.
 
     Implementation notes:
-      - WorkflowExecutor.execute() runs its own retrieve → synthesize →
-        render → deliver chain. This duplicates the retrieve work the
-        ContextBuilder already did, but the alternative (threading
+      - WorkflowExecutor.execute_from_config() runs its own retrieve →
+        synthesize → render → deliver chain. This duplicates the retrieve
+        work the ContextBuilder already did, but the alternative (threading
         passages into the executor) is a bigger refactor.
       - We accept `app_state` (not `req`) so the MCP tool handler can call
         the same function — it has `app` but not a `Request`.
@@ -151,20 +158,91 @@ def maybe_render_artifact(app_state, result: dict, question: str,
         )
         return
 
-    skill_yaml_path = (
-        Path(__file__).resolve().parents[3]
-        / "framework" / "workflow_skills" / persona / f"{skill_name}.yaml"
-    )
-    if not skill_yaml_path.exists():
-        log.warning("render: workflow_skill yaml not found at %s — skipping",
-                    skill_yaml_path)
-        return
-    try:
-        cfg = _yaml.safe_load(skill_yaml_path.read_text())
-    except Exception as exc:  # noqa: BLE001
-        log.warning("render: failed to parse %s: %s — skipping",
-                    skill_yaml_path, exc)
-        return
+    # -----------------------------------------------------------------------
+    # ADR-033: resolve skill cfg from ADB artifact (preferred) or disk.
+    #
+    # Resolution order:
+    #   1. ADB artifact via app_state.skill_store.read_artifact() — used when
+    #      skill_store is available.  This is the authoritative source for
+    #      promoted skills; guarantees source_binding is correct.
+    #   2. Disk YAML fallback — used when skill_store is not available (laptop
+    #      no-ADB path).  Explicitly INFO-logged — not silent.
+    #
+    # If both fail, skip rendering with a WARNING.
+    # -----------------------------------------------------------------------
+    cfg: dict | None = None
+    skill_yaml_path: Path | None = None  # kept for legacy execute() compatibility
+
+    skill_store = getattr(app_state, "skill_store", None)
+    if skill_store is not None:
+        # ADB path: read committed workflow_skill artifact.
+        try:
+            content = skill_store.read_artifact(persona, skill_name, "workflow_skill")
+        except Exception as exc:
+            log.warning(
+                "render: skill_store.read_artifact failed for %s.%s: %s — "
+                "will attempt disk fallback.",
+                persona, skill_name, exc,
+            )
+            content = None
+
+        if content is not None:
+            try:
+                cfg = _yaml.safe_load(content) or {}
+                log.info(
+                    "render: loaded skill cfg from ADB artifact for %s.%s (ADR-033)",
+                    persona, skill_name,
+                )
+            except Exception as exc:
+                log.warning(
+                    "render: failed to parse ADB artifact for %s.%s: %s — "
+                    "will attempt disk fallback.",
+                    persona, skill_name, exc,
+                )
+                cfg = None
+        else:
+            log.warning(
+                "render: ADB artifact not found for %s.%s — skill may not be "
+                "committed.  Will attempt disk fallback.",
+                persona, skill_name,
+            )
+
+    if cfg is None:
+        # Disk fallback — laptop/no-store OR ADB read failed.
+        candidate = (
+            Path(__file__).resolve().parents[3]
+            / "framework" / "workflow_skills" / persona / f"{skill_name}.yaml"
+        )
+        if not candidate.exists():
+            log.warning(
+                "render: skill cfg not found — ADB artifact absent AND disk "
+                "file missing at %s — skipping render for %s.%s",
+                candidate, persona, skill_name,
+            )
+            return
+        if skill_store is not None:
+            # ADB is wired but the artifact was absent/unreadable — disk file
+            # may be a stale byproduct.  Log at WARNING so it's auditable.
+            log.warning(
+                "render: falling back to DISK for %s.%s (ADB artifact "
+                "unavailable) — cfg may be stale. path=%s",
+                persona, skill_name, candidate,
+            )
+        else:
+            log.info(
+                "render: loading skill cfg from disk for %s.%s (no skill_store "
+                "wired — laptop mode).  path=%s",
+                persona, skill_name, candidate,
+            )
+        try:
+            cfg = _yaml.safe_load(candidate.read_text()) or {}
+            skill_yaml_path = candidate  # for legacy execute() compat
+        except Exception as exc:
+            log.warning(
+                "render: failed to parse disk YAML %s: %s — skipping",
+                candidate, exc,
+            )
+            return
 
     response_mode = (
         (cfg.get("trigger", {}).get("on_request") or {}).get("response_mode")
@@ -260,7 +338,12 @@ def maybe_render_artifact(app_state, result: dict, question: str,
         persona, skill_name, response_mode,
     )
     try:
-        exec_result = executor.execute(skill_yaml_path, inputs=inputs)
+        # ADR-033: use execute_from_config() when cfg was loaded from ADB (no path).
+        # Fall back to execute() with path when cfg came from disk (laptop mode).
+        if skill_yaml_path is None:
+            exec_result = executor.execute_from_config(cfg, inputs=inputs)
+        else:
+            exec_result = executor.execute(skill_yaml_path, inputs=inputs)
     except Exception as exc:  # noqa: BLE001
         from ...workflow_runtime.executor import ConfluencePageNotInKBError
         if isinstance(exc, ConfluencePageNotInKBError):
@@ -452,19 +535,32 @@ def _build_ask_response(result: dict, consumer) -> dict:
             "This request fetched a Confluence page on demand (+2–15s).",
         )
 
-    # Tier 4: attach skill suggestion and/or requestId (content-filter path)
+    # Tier 4: attach request_id + skill suggestion.
+    #
+    # ADR-033 / BUG-queue: the tier-4 response must ALWAYS carry a server-side
+    # request_id so consumers can correlate the response with server logs.
+    # Previously, request_id was only set on the content-filter path
+    # (_content_filtered=True).  The routing-miss tier-4 path had no request_id,
+    # making log correlation impossible.  Fixed: generate a KBF request_id for
+    # ALL tier-4 responses if one is not already present.
     if tier == 4:
-        # Content-filter path: surface clean requestId, suppress skill suggestion
+        # Ensure every tier-4 response has a server-side request_id.
+        request_id = result.get("request_id")
+        if not request_id:
+            request_id = f"KBF-{uuid.uuid4().hex[:12].upper()}"
+        response["request_id"] = request_id
+
         if result.get("request_id"):
-            response["request_id"] = result["request_id"]
+            # Content-filter path: suppress skill suggestion, surface clean message
             response["skill_suggestion"] = {
                 "message": (
                     f"The query could not be processed. "
-                    f"Request ID: {result['request_id']}"
+                    f"Request ID: {request_id}"
                 ),
                 "suggested_persona": intent.get("persona", ""),
             }
         else:
+            # Routing-miss tier-4 path: surface skill suggestion
             response["skill_suggestion"] = result.get("skill_suggestion", {
                 "message": (
                     "No grounded answer found. "
