@@ -2196,6 +2196,23 @@ class SkillBuilderConversation:
                 persona_extraction_style="",
                 persona_few_shot_example="",
             )
+        # ADR-038 §A: generate the consumer-facing skill_card + routing_queries
+        # BEFORE the main design LLM call.  Must precede it so that the design_skill
+        # call remains the *last* self._llm.chat call — test_adr028_stream_a S4
+        # validates persona fragment injection by inspecting call_args (the most
+        # recent call), which must be the design_skill prompt.
+        # _generate_design_skill_card derives output_format from normalised_intent
+        # at this point (self._data.output_format is not yet set from the design
+        # response); after the design call, output_format is updated on _data and
+        # the stored card already has the correct pre-design hint.
+        _card_generated = self._generate_design_skill_card()
+        log.info(
+            "_run_design_skill: consumer-facing card generated (has routing_queries=%s). "
+            "persona=%s skill=%s",
+            bool((_card_generated or {}).get("routing_queries")),
+            self._data.persona, self._data.skill_name,
+        )
+
         try:
             result = self._llm.chat(
                 model=spec.model,
@@ -2329,20 +2346,6 @@ class SkillBuilderConversation:
             len(blocking_questions_from_design),
         )
 
-        # ADR-038 §A: generate the consumer-facing skill_card + routing_queries
-        # at DESIGN_SKILL time.  This is an LLM call on a new prompt that is
-        # NOT gate-locked (it is NOT failure_classifier).  Hot-reload-safe.
-        # The card is stored on session data so _synthesize_preview can carry
-        # it through to the committed workflow_skill artifact (synthesize_workflow.py
-        # MUST NOT overwrite it — see ADR-038 §B).
-        _card_generated = self._generate_design_skill_card()
-        log.info(
-            "_run_design_skill: consumer-facing card generated (has routing_queries=%s). "
-            "persona=%s skill=%s",
-            bool((_card_generated or {}).get("routing_queries")),
-            self._data.persona, self._data.skill_name,
-        )
-
         if blocking_questions_from_design:
             log.info(
                 "_run_design_skill: routing to CLARIFY — %d blocking questions before REVIEW_DESIGN",
@@ -2366,7 +2369,13 @@ class SkillBuilderConversation:
         persona = self._data.persona
         skill_name = self._data.skill_name
         task_description = self._data.intent_description or skill_name
-        output_format = self._data.output_format or "markdown"
+        # output_format: prefer already-set value; fall back to normalised_intent output_kind
+        # (needed when called before the design LLM response has set self._data.output_format).
+        output_format = (
+            self._data.output_format
+            or (self._data.normalised_intent or {}).get("output_kind")
+            or "markdown"
+        )
         intent_summary = json.dumps(self._data.normalised_intent or {}, indent=2)
 
         if not self._llm:

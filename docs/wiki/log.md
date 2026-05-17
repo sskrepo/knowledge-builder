@@ -4,6 +4,10 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-17] backend-dev | fix(adr-028): restore persona-fragment injection in DESIGN_SKILL path regressed by 78307d1 — BUG-queue-d1bda
+
+Moved `_generate_design_skill_card()` call to before the design_skill LLM call in `_run_design_skill()` so `mock_llm.chat.call_args` (last call) correctly points at the persona-overlay-bearing design_skill prompt. Updated `_make_design_llm` fixture in test_adr038 to match new order. Failures: 9→8 (back to baseline).
+
 ## [2026-05-17] backend-dev | DECISION-018 + ADR-038 — consumer-facing card at DESIGN_SKILL, routing_queries dual-use, EVAL Path A/B, hard PROMOTE routing gate
 
 **Components implemented (A–H, all locked per DECISION-018):**

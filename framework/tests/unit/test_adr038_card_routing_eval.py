@@ -96,11 +96,13 @@ def _make_design_llm():
         },
     }
 
-    # First call returns design; second call returns card
+    # ADR-028 fix: card generation (§A) now runs BEFORE the design LLM call
+    # so the design_skill call remains the *last* self._llm.chat call.
+    # First call returns card; second call returns design.
     llm = MagicMock()
     llm.chat.side_effect = [
-        {"text": json.dumps(design_resp), "tokens_out": 200},
         {"text": json.dumps(card_resp), "tokens_out": 100},
+        {"text": json.dumps(design_resp), "tokens_out": 200},
     ]
     return llm
 
