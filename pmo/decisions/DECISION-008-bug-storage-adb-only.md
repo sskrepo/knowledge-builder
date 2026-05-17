@@ -73,3 +73,7 @@ More importantly: structured fields (`queue_id`, `tool`, `description`, `severit
 - An `INDEX.md` is also generated listing all open bugs in a table
 - The JSONL files (`user_bugs.jsonl`, `errors.jsonl`) remain as local hot-read caches for `watch-bugs` (ADB dual-write keeps them in sync)
 - `pmo/bugs/` is now effectively a `.gitignore`-able generated directory (team may choose to commit exports for audit trail, but they are not editable)
+
+---
+
+*Amended by **DECISION-013** (2026-05-16): adds a third discovery channel — agent/architect-proactively-discovered defects — filed into `KBF_BUG_REPORTS` via `record_user_bug` with a `discovered_by` discriminator. ADB remains the single source of truth; `pmo/bugs/` remains generated.*

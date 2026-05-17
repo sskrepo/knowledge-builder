@@ -4,6 +4,24 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] backend-dev | DECISION-013 — agent/architect bug channel + ADB backfill
+
+**DECISION-013 filed:** agent/architect-proactively-discovered defects are now filed into
+`KBF_BUG_REPORTS` via `record_user_bug` with `discovered_by` ∈ {agent, architect} in
+`extra_json`. DECISION-008 cross-ref appended. Standing practice: every fix must include
+an ADB bug record in the same change.
+
+**Backfill:** 12 defects from the 2026-05-16 hardening session filed to ADB
+(BUG-queue-6510d through BUG-queue-a7788). All 12 confirmed present in ADB via
+post-write SELECT query — zero JSONL-only fallbacks. Backfill script committed at
+`framework/cli/_backfill_eng_bugs.py`.
+
+**Export regenerated:** `kb-cli export-bugs --env laptop` ran and produced 69 user bug
+records + 0 audit records → `pmo/bugs/` (was 57 previously; +12 new agent/architect entries).
+INDEX.md reflects the updated total.
+
+---
+
 ## [2026-05-16] architect | ADR-032 synthesizer source_binding gap closed (P1 synthesizer wiring)
 
 **Gap:** `synthesize_workflow_skill()` in `framework/skill_builder/synthesize_workflow.py`
