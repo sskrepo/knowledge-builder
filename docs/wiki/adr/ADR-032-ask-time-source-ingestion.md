@@ -830,6 +830,35 @@ an un-ingested pageId is supplied.
 
 ---
 
+## Known Gap (RC1) — author_fixed Does Not Propagate Fixed Source into Runtime Skill
+
+**Identified**: 2026-05-17, post-investigation of junk-PPTX bug (request id 146, skill `tpm.faaas_kiwi_project_pptx`, session `synth-tpm-b518aab6`).
+**Status**: Awaiting user decision on fix direction (DECISION-019).
+
+### Gap Description
+
+ADR-032 §D.1 specifies that `author_fixed` skills emit NO `source_binding` block in the committed YAML artifact. This is correct per the ADR-032 design: the `source_binding` block was introduced for `ask_parameterized` skills to communicate the per-request page reference at execution time. For `author_fixed` skills, the assumption was that the fixed source pages are ingested into the skill's KB at `authorSkill → INGEST` time, and the KB-scoped retriever returns the right content at runtime.
+
+The gap: the specific fixed source page(s) identified during `INSPECT_SOURCES` / `DESIGN_SKILL` (e.g., `https://confluence.oraclecorp.com/confluence/display/OCIFACP/FAaaS+Kiwi+Project`) are used to design the extraction schema at author time and then **discarded from the artifact**. Nothing in the committed YAML tells the executor "this skill's fixed source is page X." The runtime trigger is the generic `{input: string}`. The executor has no page binding, falls through to generic KB retrieval, and may return the wrong page if the intended source page is not the top-scoring KB hit for the user's query.
+
+### Evidence
+
+- Session `synth-tpm-b518aab6` `source_samples`: correct page ("FAaaS Kiwi Project", `space=OCIFACP`, `text_len=3987`) fetched and used at author time.
+- Committed artifact: `source_binding: None`, `trigger.on_request.inputs = [{name: input, type: string}]`.
+- Runtime request 146: executor retrieved "Project Plan" (a different OCIFACP page), not "FAaaS Kiwi Project".
+
+### Blast Radius
+
+Likely affects every `author_fixed` skill with an external fixed source (Confluence page, Jira filter, git ref) where the intended source page is not also the highest-scoring KB hit for the user's query. The defect is silent: execution proceeds with wrong content, response reports success.
+
+### Fix Options
+
+See DECISION-019 for the three options under consideration (Option A: persist a `source_binding.mode: author_fixed` block with pinned page ref; Option B: bake pinned page IDs into `requires_extractions`; Option C: INGEST-time KB scoping).
+
+**This gap does NOT affect `ask_parameterized` skills**, which bind the source at request time via `source_binding.input_param` — that path is correct and fully implemented per ADR-032 §E.
+
+---
+
 ## P1 Synthesizer Gap Closed — 2026-05-16
 
 **Root cause confirmed:** `framework/skill_builder/synthesize_workflow.py:synthesize_workflow_skill()`

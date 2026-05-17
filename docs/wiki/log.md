@@ -4,6 +4,8 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-17] architect | DECISION-019 + ADR-032/034 known-gaps — author_fixed source propagation (RC1) and layout-id resolution (RC2) captured as design records; no code changed; awaiting user decision on fix scope/sequencing
+
 ## [2026-05-17] backend-dev | fix(adr-038): Option B — restore post-design card-gen ordering (output_format fidelity) + order-robust ADR-028 persona-injection test; BUG filed in ADB
 
 Reverted b1adf33 workaround: `_generate_design_skill_card()` moved back to AFTER main design LLM call + AFTER `self._data.output_format` is set from design response. ADR-028 S4 persona-injection test now locates design_skill call by content (`persona_key_fields`/`exec-safe`), not call order. `_make_design_llm` fixture side_effect restored to `[design_resp, card_resp]`. 8 failures = baseline. BUG-queue filed in ADB, ADR-038 note added.

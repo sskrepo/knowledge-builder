@@ -289,3 +289,35 @@ place regardless.
 - `framework/tests/unit/test_adr034_layout_catalog.py` — 23 new tests
 - Session synth-tpm-3b2c2c71, JSON-RPC id 69 — triggering user request
 - DECISION-014 — principle decision
+
+---
+
+## Known Gap (RC2) — DESIGN_SKILL Emits layout as Prose; No Prose-to-Renderer-ID Resolution Step Exists
+
+**Identified**: 2026-05-17, post-investigation of junk-PPTX bug (request id 146, skill `tpm.faaas_kiwi_project_pptx`, session `synth-tpm-b518aab6`).
+**Status**: Awaiting user decision on fix direction (DECISION-019).
+
+### Gap Description
+
+ADR-034 §B (Prompt injection) states: the LLM should "Select the catalog entry whose `when_to_use` best matches the intent" and "Emit the corresponding `internal_id` in `workflow_shape.layout`." In practice, after removing the hardcoded preset ID from the prompt (the DECISION-014 fix), the DESIGN_SKILL LLM has no structural enforcement to output a catalog `internal_id` — it reasons over the plain-language catalog descriptions and emits a prose description of the layout rather than the ID token.
+
+The `design_skill` prompt v1.2 includes the instruction to emit the `internal_id`, but this is a soft instruction in a free-text output schema; the LLM correctly follows the reasoning guidance (selects a conceptually appropriate layout) but does not necessarily produce the machine token. The committed `synthesis.layout` field carries the prose string. At execution time, `get_preset(layout)` returns `None` for any prose input; `PptxRenderer.render()` logs a WARNING and falls back to the default stub renderer.
+
+ADR-034 closed the loop from the prompt-output side (removed hardcoded IDs from the instructions) but did not close the loop from the output-to-renderer side (no validation that `workflow_shape.layout` is a registered `internal_id` before synthesis commits the artifact, and no resolver to map prose back to an ID).
+
+### Evidence
+
+- Session `synth-tpm-b518aab6`: `design.workflow_shape.layout` = prose sentence ("Standard executive order single-slide: title/status first…") — identical prose in both the DESIGN_SKILL output and the committed artifact.
+- The prose originates at DESIGN_SKILL, not at synthesis — synthesize_workflow faithfully propagated it.
+- `get_preset("<prose>")` returns `None`; renderer falls back to 6-slide key/value stub.
+- Runtime request 146: none of the designed extraction fields (slide_title, rag_summary, etc.) appear in the output.
+
+### Blast Radius
+
+Likely affects every skill designed after ADR-034 shipped where the DESIGN_SKILL LLM emitted a prose layout description instead of a catalog `internal_id`. All such skills produce the default stub renderer output at execution time. Skills designed before ADR-034 (which hardcoded `weekly_exec_review_v1` in the artifact) are unaffected.
+
+### Fix Options
+
+See DECISION-019 for the three options under consideration (Option A: constrained ID output from DESIGN_SKILL prompt; Option B: post-design prose→ID resolver step with must_show_human review; Option C: renderer-side fuzzy/semantic dispatch).
+
+**Interaction with DECISION-014**: Option A reintroduces the catalog `internal_id` values into the DESIGN_SKILL output schema (as a constrained enum), not as reasoning instructions. This is consistent with DECISION-014's intent: the IDs must not appear in reasoning prompts shown to authors, but they may appear as machine output fields in the structured response schema. The user must confirm this interpretation before Option A is implemented.
