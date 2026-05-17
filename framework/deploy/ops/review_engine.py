@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid as _uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,13 @@ from uuid import uuid4
 # Repo root: review_engine.py lives at framework/deploy/ops/review_engine.py
 # → parents[0]=ops, parents[1]=deploy, parents[2]=framework, parents[3]=repo-root
 _REPO_ROOT = Path(__file__).resolve().parents[3]
+
+# Shared content-filter detector and exception from skill_builder.  deploy/ is the
+# top layer so importing from skill_builder/ is fine — no circular risk.
+from framework.skill_builder.review import (  # noqa: E402
+    _is_content_filter_error,
+    ContentFilterRejection,
+)
 
 log = logging.getLogger(__name__)
 
@@ -756,6 +764,59 @@ class KbfOpsReviewEngine:
             )
             raw_response = result["text"] if isinstance(result, dict) else str(result)
         except Exception as exc:
+            # ------------------------------------------------------------------
+            # Content-filter branch (MUST precede the generic fallback):
+            # OCI GenAI returns 400 "Inappropriate content detected!!!" when the
+            # review prompt is rejected by the provider's content-safety filter.
+            # This is NOT a skill defect — it is an environmental/provider block.
+            # We surface a clean, provider-detail-free advisory finding and
+            # continue so that structural checks still contribute to the report.
+            # No OCI endpoint / opc-request-id / raw error dict is persisted.
+            # ------------------------------------------------------------------
+            if isinstance(exc, ContentFilterRejection) or _is_content_filter_error(exc):
+                if isinstance(exc, ContentFilterRejection):
+                    kbf_id = exc.request_id
+                else:
+                    kbf_id = f"KBF-{_uuid.uuid4().hex[:12].upper()}"
+                log.warning(
+                    "KbfOpsReviewEngine: LLM review skipped — inference provider "
+                    "content-safety filter rejected the request "
+                    "(kbf_request_id=%s). Not a skill defect. "
+                    "Structural checks will still contribute to the report. "
+                    "Provider error (server-side only, not persisted): %s",
+                    kbf_id,
+                    exc,
+                )
+                # severity="minor" is the lowest enum value the BugToFile model
+                # supports (critical | major | minor).  The distinct check_name
+                # "llm_review_content_filtered" makes it immediately recognisable
+                # as an advisory / non-skill-defect finding — reviewers must not
+                # block promotion based on this finding alone.
+                structural_bugs_copy = list(structural_bugs) + [
+                    BugToFile(
+                        check_name="llm_review_content_filtered",
+                        severity="minor",
+                        detail=(
+                            f"LLM review skipped: the inference provider's content-safety "
+                            f"filter rejected the request (Request ID: {kbf_id}). "
+                            f"This is not a skill defect; the full LLM review could not run. "
+                            f"Structural checks still apply."
+                        ),
+                        suggested_fix=(
+                            "This finding indicates a provider-side content-safety block, "
+                            "not a quality issue with the skill. "
+                            "Re-run the review once the source content or prompt context has "
+                            "been adjusted, or use depth='structural' to run only deterministic "
+                            "checks. Do not block promotion solely on this finding."
+                        ),
+                    )
+                ]
+                _, structural_findings = self._run_structural_checks(bundle)
+                return self._build_report_structural_only(
+                    bundle, review_id, structural_bugs_copy, structural_findings
+                )
+
+            # Generic fallback — genuinely unexpected errors (non-content-filter).
             log.warning("KbfOpsReviewEngine: LLM call failed: %s", exc)
             # Return structural-only report with an error note.
             structural_bugs_copy = list(structural_bugs) + [

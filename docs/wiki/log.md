@@ -4,6 +4,48 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-16] backend-dev | Fix ops_skill_auditor LLM-review content-filter misclassification and provider-internals leak
+
+**Root cause (synth-tpm-fe0f9e9f investigation):** `_run_llm_review` in
+`framework/deploy/ops/review_engine.py` had a broad `except Exception as exc` that directly
+embedded the raw caught exception into a `BugToFile.detail` field.  For OCI GenAI HTTP-400
+"Inappropriate content detected!!!" rejections this wrote the full error dict — including
+`opc-request-id` and provider endpoint — into the persisted bug store (`user_bugs.jsonl`).
+Two problems: (1) misclassification — a provider content-safety block is NOT a skill defect;
+(2) provider-internals leak — OCI `opc-request-id` / raw error dict violated the
+ContentFilterRejection discipline from dc93945.
+
+**Fix (`framework/deploy/ops/review_engine.py`):**
+
+1. Imports `_is_content_filter_error` and `ContentFilterRejection` from
+   `framework.skill_builder.review` (shared detector — no duplicated logic).
+2. Before the generic fallback, the except handler checks `isinstance(exc, ContentFilterRejection)
+   or _is_content_filter_error(exc)`.
+3. On match: emits a clean, provider-detail-free `BugToFile` with:
+   - `check_name="llm_review_content_filtered"` (distinct from `llm_review_failed`)
+   - `severity="minor"` (lowest valid enum — advisory, not a skill quality issue)
+   - description contains a KBF- correlation ID (reused from `exc.request_id` if
+     ContentFilterRejection; otherwise freshly generated); explicitly states "not a skill defect"
+   - no `opc-request-id`, no OCI endpoint, no HTTP status code, no raw dict
+4. Generic `llm_review_failed` branch is unchanged — fires for all non-content-filter errors.
+5. Structural checks still run and contribute to the report (no early return from the review).
+6. ADR-023 amended to document the content-filter advisory finding and its invariants.
+
+**Tests added (`framework/tests/unit/test_kbf_ops_review.py`, class `TestLlmReviewContentFilter`):**
+
+- OCI-style exception → `check_name="llm_review_content_filtered"`, not `"llm_review_failed"`
+- `severity="minor"` enforced
+- Description: contains KBF- id; does NOT contain `opc-request-id`, `SECRET-LEAK`, `400`,
+  `oci.exceptions`, or `status`; explicitly says "not a skill defect"
+- Structural checks ran alongside the content-filter finding (no abort)
+- Generic `RuntimeError("boom")` → `llm_review_failed` (no regression)
+- `ContentFilterRejection` raised directly → same clean finding, request_id reused
+
+**Test result:** 49 passed (test_kbf_ops_review.py + test_review.py); 9 pre-existing failures
+unchanged (smoke_validate×7 + code_wiki×1 + source_binding×1).
+
+---
+
 ## [2026-05-16] backend-dev | ADR-032 MCP ask_handler body=/page_id gap fixed (D1 Priority-1 now live on MCP path)
 
 **Root cause (architect-confirmed):** `_make_ask_handler` in `framework/deploy/mcp_tools.py`

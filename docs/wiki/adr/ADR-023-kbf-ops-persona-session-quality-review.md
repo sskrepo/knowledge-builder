@@ -217,3 +217,26 @@ semantic analysis only.
   early stage; revisit when reviewing >50 sessions/week (→ ADR-024 deterministic layer)
 - `AdbDirectRetriever` is a new pattern in the retriever layer. It must NOT be confused with
   the vector retriever. Document clearly in `framework/retrievers/README.md`.
+
+---
+
+## Amendment (2026-05-16) — LLM-review content-filter advisory finding
+
+When the inference provider's content-safety filter rejects the LLM review prompt (e.g. OCI
+GenAI returns HTTP 400 "Inappropriate content detected"), `_run_llm_review` now emits a
+**distinct, provider-detail-free advisory finding** instead of the generic `llm_review_failed`
+bug. Key properties:
+
+| Property | Value |
+|---|---|
+| `check_name` | `llm_review_content_filtered` |
+| `severity` | `minor` (lowest valid enum — advisory only) |
+| Description | Provider-detail-free. Contains a KBF- correlation ID. Explicitly states "This is not a skill defect". |
+| Provider internals | NOT persisted — no `opc-request-id`, no OCI endpoint, no raw error dict, no HTTP status code. |
+| Structural checks | Continue to run and contribute to the report — content-filter does NOT abort the review. |
+
+**Implementation**: `_is_content_filter_error` and `ContentFilterRejection` are imported from
+`framework.skill_builder.review` (shared detector — no duplicate logic). The except handler
+tests the content-filter condition FIRST before the generic fallback, which is unchanged.
+A reviewer encountering `llm_review_content_filtered` must not block promotion on this finding
+alone — it signals an environmental/provider block, not a quality issue with the skill.

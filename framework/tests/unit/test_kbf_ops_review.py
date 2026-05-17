@@ -854,3 +854,199 @@ class TestMcpToolReviewSkillSession:
         if not content.get("isError"):
             # At least one bug should have been filed.
             assert content.get("bugsFiledCount", 0) >= 1
+
+
+# ---------------------------------------------------------------------------
+# TestLlmReviewContentFilter — content-filter rejection handling in _run_llm_review
+# ---------------------------------------------------------------------------
+#
+# Verifies that the ops_skill_auditor's _run_llm_review method:
+#   1. Does NOT misclassify OCI content-filter rejections as skill defects.
+#   2. Does NOT leak any provider internals (opc-request-id, raw error dict,
+#      status codes, OCI endpoint) into the persisted bug description.
+#   3. Emits a distinct check_name ("llm_review_content_filtered") so a reviewer
+#      cannot confuse it with a real skill-quality bug.
+#   4. Uses severity="minor" (the lowest valid enum; no invented enum values).
+#   5. Leaves the generic "llm_review_failed" branch intact for other errors.
+#   6. Structural checks still run and contribute to the report — the content-
+#      filter event does NOT abort the review.
+# ---------------------------------------------------------------------------
+
+
+class TestLlmReviewContentFilter:
+    """Content-filter rejection in _run_llm_review must be classified, clean, and non-aborting."""
+
+    # The exact OCI-style error string the investigation confirmed ends up in
+    # persisted bug records.
+    _OCI_ERROR = (
+        "{'status': 400, 'message': 'Inappropriate content detected!!!', "
+        "'opc-request-id': 'SECRET-LEAK', 'code': '400'}"
+    )
+
+    def _make_oci_exc(self) -> Exception:
+        return Exception(self._OCI_ERROR)
+
+    def test_oci_content_filter_produces_distinct_check_name(self):
+        """OCI 400 content-filter → finding with check_name='llm_review_content_filtered'."""
+        from framework.deploy.ops.review_engine import KbfOpsReviewEngine
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = self._make_oci_exc()
+
+        engine = KbfOpsReviewEngine(llm=mock_llm)
+        report = engine.review(_make_bundle(), depth="full")
+
+        check_names = [b.check_name for b in report.bugs_to_file]
+        assert "llm_review_content_filtered" in check_names, (
+            f"Expected check_name='llm_review_content_filtered' in bugs_to_file; "
+            f"got: {check_names}"
+        )
+        # Must NOT produce the generic llm_review_failed bug for this error.
+        assert "llm_review_failed" not in check_names, (
+            f"OCI content-filter error must NOT produce 'llm_review_failed'; "
+            f"got: {check_names}"
+        )
+
+    def test_oci_content_filter_severity_is_minor(self):
+        """Content-filter finding must use severity='minor' (lowest valid enum value)."""
+        from framework.deploy.ops.review_engine import KbfOpsReviewEngine
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = self._make_oci_exc()
+
+        engine = KbfOpsReviewEngine(llm=mock_llm)
+        report = engine.review(_make_bundle(), depth="full")
+
+        cf_bugs = [b for b in report.bugs_to_file if b.check_name == "llm_review_content_filtered"]
+        assert len(cf_bugs) == 1, f"Expected exactly 1 content-filter finding; got {len(cf_bugs)}"
+        assert cf_bugs[0].severity == "minor", (
+            f"Content-filter finding must have severity='minor' (lowest valid enum); "
+            f"got: {cf_bugs[0].severity!r}"
+        )
+
+    def test_oci_content_filter_description_is_provider_detail_free(self):
+        """The persisted description must NOT contain any provider internals."""
+        from framework.deploy.ops.review_engine import KbfOpsReviewEngine
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = self._make_oci_exc()
+
+        engine = KbfOpsReviewEngine(llm=mock_llm)
+        report = engine.review(_make_bundle(), depth="full")
+
+        cf_bugs = [b for b in report.bugs_to_file if b.check_name == "llm_review_content_filtered"]
+        assert cf_bugs, "No content-filter finding found"
+        description = cf_bugs[0].detail
+
+        # Must contain a KBF- correlation ID.
+        assert "KBF-" in description, (
+            f"description must contain a KBF- correlation ID; got: {description!r}"
+        )
+
+        # Must NOT contain any of the provider-internal tokens.
+        forbidden = [
+            "opc-request-id",
+            "SECRET-LEAK",
+            "400",
+            "oci.exceptions",
+            "status",
+        ]
+        for token in forbidden:
+            assert token not in description, (
+                f"Provider internal token {token!r} found in persisted description: "
+                f"{description!r}"
+            )
+
+    def test_oci_content_filter_description_states_not_skill_defect(self):
+        """Description must make clear this is not a skill defect."""
+        from framework.deploy.ops.review_engine import KbfOpsReviewEngine
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = self._make_oci_exc()
+
+        engine = KbfOpsReviewEngine(llm=mock_llm)
+        report = engine.review(_make_bundle(), depth="full")
+
+        cf_bugs = [b for b in report.bugs_to_file if b.check_name == "llm_review_content_filtered"]
+        assert cf_bugs, "No content-filter finding found"
+        description = cf_bugs[0].detail
+
+        assert "not a skill defect" in description.lower(), (
+            f"description must state 'not a skill defect'; got: {description!r}"
+        )
+
+    def test_oci_content_filter_structural_checks_still_ran(self):
+        """A content-filter block on LLM review must not abort structural checks."""
+        from framework.deploy.ops.review_engine import KbfOpsReviewEngine
+
+        # Use a bundle with a known structural defect: all-null gold set.
+        bad_eval_extraction = json.dumps({
+            "input": "test query",
+            "expected_extraction": {"incidents_count": None, "top_alert": None},
+        }) + "\n"
+        arts = _make_artifacts()
+        arts["eval_extraction"] = bad_eval_extraction
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = self._make_oci_exc()
+
+        engine = KbfOpsReviewEngine(llm=mock_llm)
+        report = engine.review(_make_bundle(artifacts=arts), depth="full")
+
+        check_names = [b.check_name for b in report.bugs_to_file]
+        # Both the content-filter advisory AND the structural bug must be present.
+        assert "llm_review_content_filtered" in check_names, (
+            f"Content-filter finding missing; got: {check_names}"
+        )
+        assert "check_gold_set_not_null" in check_names, (
+            f"Structural check 'check_gold_set_not_null' must still run; got: {check_names}"
+        )
+
+    def test_generic_runtime_error_still_fires_llm_review_failed(self):
+        """Non-content-filter errors must still produce the generic 'llm_review_failed' finding."""
+        from framework.deploy.ops.review_engine import KbfOpsReviewEngine
+
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = RuntimeError("boom — totally unexpected error")
+
+        engine = KbfOpsReviewEngine(llm=mock_llm)
+        report = engine.review(_make_bundle(), depth="full")
+
+        check_names = [b.check_name for b in report.bugs_to_file]
+        assert "llm_review_failed" in check_names, (
+            f"Generic error must produce 'llm_review_failed'; got: {check_names}"
+        )
+        # Must NOT produce the content-filter finding for a generic error.
+        assert "llm_review_content_filtered" not in check_names, (
+            f"Generic error must NOT produce 'llm_review_content_filtered'; got: {check_names}"
+        )
+
+    def test_content_filter_rejection_exception_produces_clean_finding(self):
+        """ContentFilterRejection raised directly must also produce the clean advisory finding."""
+        from framework.deploy.ops.review_engine import KbfOpsReviewEngine
+        from framework.skill_builder.review import ContentFilterRejection
+
+        kbf_id = "KBF-AABBCCDD1122"
+        mock_llm = MagicMock()
+        mock_llm.chat.side_effect = ContentFilterRejection(
+            request_id=kbf_id,
+            source_hint="review prompt context",
+        )
+
+        engine = KbfOpsReviewEngine(llm=mock_llm)
+        report = engine.review(_make_bundle(), depth="full")
+
+        check_names = [b.check_name for b in report.bugs_to_file]
+        assert "llm_review_content_filtered" in check_names, (
+            f"ContentFilterRejection must produce 'llm_review_content_filtered'; "
+            f"got: {check_names}"
+        )
+        # The existing KBF request_id from the exception must be reused.
+        cf_bugs = [b for b in report.bugs_to_file if b.check_name == "llm_review_content_filtered"]
+        assert kbf_id in cf_bugs[0].detail, (
+            f"The ContentFilterRejection's request_id must appear in the description; "
+            f"got: {cf_bugs[0].detail!r}"
+        )
+        # No provider internals.
+        assert "opc-request-id" not in cf_bugs[0].detail
+        assert "oci.exceptions" not in cf_bugs[0].detail
