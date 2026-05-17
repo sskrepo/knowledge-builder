@@ -552,3 +552,65 @@ class TestConfluencePageNotInKBErrorSurfacing:
         assert result["tier"] == 4
         assert result["tier_description"] == "source_not_available"
         assert result.get("source_not_available", {}).get("page_id") == PAGE_ID
+
+
+# ---------------------------------------------------------------------------
+# Regression: inline answer/citations backfill from executor output
+# (fixes "(no relevant context found)" next to a valid artifact_path)
+# ---------------------------------------------------------------------------
+
+class TestAnswerBackfill:
+    """maybe_render_artifact must replace an empty/no-answer upstream tier-1
+    answer with a truthful summary + real citations from the executor's
+    rendered_data — but must NOT clobber a real upstream answer."""
+
+    _RENDERED = {
+        "rendered_data": {
+            "title": "RODS Support for Dynamic Tables Replication",
+            "citations": ["wiki://18625350641",
+                          "https://confluence.oraclecorp.com/.../pageId=18625350641"],
+        },
+        "source_fetched_on_demand": True,
+        "source_fetched_page_id": "18625350641",
+    }
+
+    def test_no_answer_sentinel_is_backfilled(self, tmp_path):
+        skill_yaml = _write_skill_yaml(tmp_path)
+        app_state = _make_app_state(tmp_path, skill_yaml,
+                                    executor_result=self._RENDERED)
+        result = _make_tier1_result()
+        result["answer"] = {"Answer": "(no relevant context found)",
+                            "Citations": "(no relevant context found)"}
+        result["passages"] = []
+        with _patch_skill_yaml(skill_yaml):
+            maybe_render_artifact(app_state, result, f"pageId={PAGE_ID}")
+        ans = result["answer"]["Answer"].lower()
+        assert "no relevant context found" not in ans
+        assert "rods support for dynamic tables replication" in ans
+        assert "18625350641" in ans
+        # citations now reflect the real fetched source
+        assert result["citations"] == ["wiki://18625350641",
+            "https://confluence.oraclecorp.com/.../pageId=18625350641"]
+        assert result["passages"] and result["passages"][0]["citation"] == "wiki://18625350641"
+
+    def test_empty_string_answer_is_backfilled(self, tmp_path):
+        skill_yaml = _write_skill_yaml(tmp_path)
+        app_state = _make_app_state(tmp_path, skill_yaml,
+                                    executor_result=self._RENDERED)
+        result = _make_tier1_result()
+        result["answer"] = ""
+        with _patch_skill_yaml(skill_yaml):
+            maybe_render_artifact(app_state, result, f"pageId={PAGE_ID}")
+        assert "RODS Support" in result["answer"]["Answer"]
+
+    def test_real_upstream_answer_is_preserved(self, tmp_path):
+        """author_fixed-style skill whose tier-1 synthesis produced a real
+        answer must NOT be overwritten by the artifact summary."""
+        skill_yaml = _write_skill_yaml(tmp_path)
+        app_state = _make_app_state(tmp_path, skill_yaml,
+                                    executor_result=self._RENDERED)
+        result = _make_tier1_result()
+        result["answer"] = {"Answer": "Here is the real synthesized exec summary..."}
+        with _patch_skill_yaml(skill_yaml):
+            maybe_render_artifact(app_state, result, f"pageId={PAGE_ID}")
+        assert result["answer"]["Answer"] == "Here is the real synthesized exec summary..."

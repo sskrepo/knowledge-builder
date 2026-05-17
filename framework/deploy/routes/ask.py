@@ -315,6 +315,66 @@ def maybe_render_artifact(app_state, result: dict, question: str,
             result["source_fetched_page_id"], persona, skill_name,
         )
 
+    # ------------------------------------------------------------------
+    # Backfill the inline answer/citations from the executor's ACTUAL
+    # output.
+    #
+    # BUG: for artifact_url workflow skills the response's
+    # answer/citations come from ContextBuilder's tier-1 passage
+    # synthesis, which runs in ctx.answer() BEFORE this function. For
+    # ask_parameterized / ephemeral skills that synthesis has NO
+    # passages (the page is fetched HERE, in the executor's separate
+    # retrieve->synthesize->render chain), so the synthesizer emits the
+    # "(no relevant context found)" sentinel even though the executor
+    # just produced a complete, correct artifact. Result: the response
+    # lied — answer="(no relevant context found)" next to a valid
+    # artifact_path.
+    #
+    # Fix: when the upstream answer is empty / the no-answer sentinel,
+    # replace it with a truthful summary + the real source citations
+    # from the executor's rendered_data. Skills whose tier-1 synthesis
+    # DID produce a real answer (author_fixed skills with ingested KB
+    # content) keep it untouched — we only backfill the empty case.
+    _ans = result.get("answer")
+    _needs_backfill = (
+        not _ans
+        or (isinstance(_ans, dict)
+            and "no relevant context found"
+                in str(_ans.get("Answer", "")).strip().lower())
+        or (isinstance(_ans, dict)
+            and str(_ans.get("Answer", "")).strip() == "")
+        or (isinstance(_ans, str)
+            and _ans.strip().lower() in ("", "(no relevant context found)"))
+    )
+    if _needs_backfill:
+        rendered = exec_result.get("rendered_data") or {}
+        art_path = (result["delivery"].get("path")
+                    or result["delivery"].get("url") or "")
+        _title = rendered.get("title") or skill_name
+        _cites = [c for c in (rendered.get("citations") or []) if c]
+        _pid = result.get("source_fetched_page_id", "")
+        result["answer"] = {
+            "Answer": (
+                f"Generated '{_title}' via skill {persona}.{skill_name}"
+                + (f" from Confluence page {_pid}" if _pid else "")
+                + (f". Artifact: {art_path}" if art_path else ".")
+            ),
+            "Citations": ("; ".join(_cites) if _cites
+                          else (art_path or "(see artifact)")),
+        }
+        if _cites:
+            result["citations"] = list(dict.fromkeys(_cites))
+            result["passages"] = [
+                {"text": "", "citation": c, "score": 1.0}
+                for c in result["citations"]
+            ]
+        log.info(
+            "render: backfilled inline answer/citations from executor "
+            "output (skill=%s.%s cites=%d) — upstream tier-1 answer was "
+            "empty/no-answer for an artifact_url skill",
+            persona, skill_name, len(_cites),
+        )
+
 
 # ---------------------------------------------------------------------------
 # Response builder
