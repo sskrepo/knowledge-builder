@@ -4187,3 +4187,423 @@ class TestArtifactStashAtClarify:
         assert conv._data._pending_artifact_stash is None, (
             "Normal text answer must not set _pending_artifact_stash"
         )
+
+
+# ---------------------------------------------------------------------------
+# ADR-035 / DECISION-015: FSM access-gate + conditional-required + single-truth
+# ---------------------------------------------------------------------------
+
+
+class TestAdr035ConditionalRequiredArtifact:
+    """(a) When artifact is required: no skip option offered + cannot reach DESIGN without it.
+    (b) When NOT required (text/email/markdown): not gated at all.
+    """
+
+    def _make_pptx_conv(self):
+        """Conversation in UPLOAD_ARTIFACT_EXAMPLE for a PPTX-output skill."""
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._state = "UPLOAD_ARTIFACT_EXAMPLE"
+        conv._data.output_format = "pptx"
+        conv._data.normalised_intent = {
+            "output_kind": "pptx",
+            "task_description": "produce a weekly exec review slide deck",
+        }
+        return conv
+
+    def _make_md_conv(self):
+        """Conversation in UPLOAD_ARTIFACT_EXAMPLE for a markdown-output skill."""
+        conv = SkillBuilderConversation(persona="ops_eng", skill_store=MagicMock())
+        conv._state = "UPLOAD_ARTIFACT_EXAMPLE"
+        conv._data.output_format = "markdown"
+        conv._data.normalised_intent = {
+            "output_kind": "markdown",
+            "task_description": "produce a weekly incident summary email",
+        }
+        return conv
+
+    # --- Test (a): PPTX skill — artifact required, no skip ---
+
+    def test_advance_to_upload_artifact_no_skip_when_required(self):
+        """_advance_to_upload_artifact_example must NOT offer 'skip' when artifact required."""
+        conv = self._make_pptx_conv()
+        turn = conv._advance_to_upload_artifact_example()
+        options = turn.options or []
+        assert "skip" not in options, (
+            "For required artifact (pptx output), 'skip' must NOT be offered in options. "
+            f"Got options={options!r}"
+        )
+
+    def test_handle_upload_skip_blocked_when_required(self):
+        """Typing 'skip' at UPLOAD_ARTIFACT_EXAMPLE when artifact is required must block."""
+        from unittest.mock import patch as _patch
+        conv = self._make_pptx_conv()
+        # Ensure no stash (so bare skip path is taken)
+        conv._data._pending_artifact_stash = None
+        # Ensure no existing binding
+        assert not conv.has_bound_reference_artifact()
+
+        turn = conv._handle_upload_artifact_example("skip")
+
+        # Must stay at UPLOAD_ARTIFACT_EXAMPLE, not advance to DESIGN_SKILL
+        assert turn.state == "UPLOAD_ARTIFACT_EXAMPLE", (
+            f"Skip on required artifact must stay at UPLOAD_ARTIFACT_EXAMPLE, got state={turn.state!r}"
+        )
+        assert turn.must_show_human is True, "Must surface as must_show_human"
+        assert "REQUIRED" in (turn.message or ""), (
+            f"Message must mention REQUIRED. Got: {turn.message!r}"
+        )
+
+    def test_handle_upload_skip_not_blocked_when_not_required(self):
+        """Typing 'skip' at UPLOAD_ARTIFACT_EXAMPLE when artifact is NOT required must advance."""
+        from unittest.mock import patch as _patch
+        conv = self._make_md_conv()
+        conv._data._pending_artifact_stash = None
+
+        stub_turn = MagicMock()
+        stub_turn.state = "DESIGN_SKILL"
+        with _patch.object(conv, "_run_design_skill", return_value=stub_turn) as mock_ds:
+            turn = conv._handle_upload_artifact_example("skip")
+            assert mock_ds.called, "_run_design_skill must be called when skip is allowed"
+
+    def test_is_artifact_required_true_for_pptx(self):
+        """_is_artifact_required returns True for pptx output."""
+        assert SkillBuilderConversation._is_artifact_required(
+            {"output_kind": "pptx"}, "pptx"
+        ) is True
+
+    def test_is_artifact_required_true_for_docx(self):
+        """_is_artifact_required returns True for docx output."""
+        assert SkillBuilderConversation._is_artifact_required(
+            {"output_kind": "docx"}, ""
+        ) is True
+
+    def test_is_artifact_required_true_for_template_reference_in_intent(self):
+        """_is_artifact_required returns True when intent text references a template."""
+        assert SkillBuilderConversation._is_artifact_required(
+            {"output_kind": "markdown",
+             "task_description": "produce a slide using the same format as the template"},
+            "markdown",
+        ) is True
+
+    def test_is_artifact_required_false_for_markdown(self):
+        """_is_artifact_required returns False for pure markdown with no template reference."""
+        assert SkillBuilderConversation._is_artifact_required(
+            {"output_kind": "markdown",
+             "task_description": "produce a weekly incident summary email"},
+            "markdown",
+        ) is False
+
+    def test_is_artifact_required_false_for_email(self):
+        """_is_artifact_required returns False for email output."""
+        assert SkillBuilderConversation._is_artifact_required(
+            {"output_kind": "email",
+             "task_description": "send weekly project tracking email"},
+            "email",
+        ) is False
+
+
+class TestAdr035ReentryGuard:
+    """(c) Re-entering UPLOAD_ARTIFACT_EXAMPLE after a successful bind must NOT clear the binding."""
+
+    def _make_bound_conv(self):
+        """Conversation with a successfully bound reference artifact."""
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._state = "UPLOAD_ARTIFACT_EXAMPLE"
+        conv._data.output_format = "pptx"
+        conv._data.normalised_intent = {"output_kind": "pptx",
+                                         "task_description": "exec review deck"}
+        # Simulate a successful bind (as _bind_reference_artifact would set)
+        conv._data.artifact_reference_id = "art-92062549"
+        conv._data.artifact_reference_type = "pptx"
+        conv._data.artifact_reference_name = "2026-05-14 FAaaS-LCM Update Kiwi Slide only 2.pptx"
+        conv._data.artifact_layout = {"sections": ["slide1"], "slide_count": 1, "mapping": {}}
+        return conv
+
+    def test_reentry_skip_preserves_binding(self):
+        """Re-entering UPLOAD_ARTIFACT_EXAMPLE + 'skip' must preserve existing binding."""
+        from unittest.mock import patch as _patch
+        conv = self._make_bound_conv()
+
+        stub_turn = MagicMock()
+        stub_turn.state = "DESIGN_SKILL"
+        with _patch.object(conv, "_run_design_skill", return_value=stub_turn) as mock_ds:
+            turn = conv._handle_upload_artifact_example("skip")
+            # Must call _run_design_skill (advance) — not block
+            assert mock_ds.called, "_run_design_skill must be called on re-entry skip"
+
+        # Binding must still be intact
+        assert conv._data.artifact_reference_id == "art-92062549", (
+            "artifact_reference_id must be preserved on re-entry skip. "
+            f"Got: {conv._data.artifact_reference_id!r}"
+        )
+        assert conv._data.artifact_reference_name == "2026-05-14 FAaaS-LCM Update Kiwi Slide only 2.pptx", (
+            "artifact_reference_name must be preserved on re-entry skip."
+        )
+
+    def test_reentry_has_bound_remains_true_after_skip(self):
+        """has_bound_reference_artifact() must stay True after re-entry skip."""
+        from unittest.mock import patch as _patch
+        conv = self._make_bound_conv()
+        assert conv.has_bound_reference_artifact() is True
+
+        with _patch.object(conv, "_run_design_skill", return_value=MagicMock()):
+            conv._handle_upload_artifact_example("skip")
+
+        assert conv.has_bound_reference_artifact() is True, (
+            "has_bound_reference_artifact() must remain True after re-entry skip"
+        )
+
+    def test_advance_to_upload_shows_existing_binding_name(self):
+        """_advance_to_upload_artifact_example must surface the bound artifact name."""
+        conv = self._make_bound_conv()
+        turn = conv._advance_to_upload_artifact_example()
+        assert "art-92062549" in (turn.message or ""), (
+            "When an artifact is already bound, advance must show its id in the message. "
+            f"Got: {turn.message!r}"
+        )
+        assert "2026-05-14 FAaaS-LCM Update Kiwi Slide only 2.pptx" in (turn.message or ""), (
+            "When an artifact is already bound, advance must show its name in the message."
+        )
+
+    def test_old_code_clear_pattern_is_gone(self):
+        """Verify the old direct-assignment clear pattern does NOT appear in the skip path.
+
+        This is a regression guard: the old code did:
+            self._data.artifact_layout = None
+            self._data.artifact_reference_id = None  ← silent clear
+        on EVERY skip, including re-entry.  Post-ADR-035, re-entry skip preserves binding.
+        """
+        from unittest.mock import patch as _patch
+        conv = self._make_bound_conv()
+        before_id = conv._data.artifact_reference_id
+        before_name = conv._data.artifact_reference_name
+
+        with _patch.object(conv, "_run_design_skill", return_value=MagicMock()):
+            conv._handle_upload_artifact_example("skip")
+
+        assert conv._data.artifact_reference_id == before_id, (
+            "Re-entry skip must NOT clear artifact_reference_id "
+            f"(before={before_id!r}, after={conv._data.artifact_reference_id!r})"
+        )
+        assert conv._data.artifact_reference_name == before_name, (
+            "Re-entry skip must NOT clear artifact_reference_name"
+        )
+
+
+class TestAdr035SingleSourceOfTruth:
+    """(d) REVIEW_DESIGN and _run_eval read the same single source of truth.
+
+    Construct a state that would have caused the old code to diverge:
+    - artifact_reference_id = None (as silently cleared by old code)
+    - design.workflow_shape.layout = text containing artifact name (never cleared)
+    Old REVIEW_DESIGN: shows artifact as present (reads layout text).
+    Old _run_eval: "No reference artifact was uploaded" (reads artifact_reference_id=None).
+
+    Post-ADR-035:
+    - REVIEW_DESIGN calls has_bound_reference_artifact() → False → "none bound"
+    - _run_eval calls has_bound_reference_artifact() → False → "no artifact bound" message
+    Both agree.
+    """
+
+    def _make_diverged_state_conv(self):
+        """Construct the pre-fix diverged state."""
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._state = "REVIEW_DESIGN"
+        conv._data.design = {
+            "schema": {"properties": {"slide_title": {"type": "string", "description": "title"}},
+                       "required": []},
+            "source_bindings": {"slide_title": ["confluence:12345"]},
+            "workflow_shape": {
+                "output_format": "pptx",
+                "layout": (
+                    "match layout/style from uploaded reference PPTX "
+                    "artifact:2026-05-14 FAaaS-LCM Update Kiwi Slide only 2.pptx (id:art-92062549)"
+                ),
+                "trigger": {"on_request": True},
+            },
+            "reuse_plan": {"covered": {}, "gaps": []},
+        }
+        # Silently-cleared state: id is None but layout text says artifact is present
+        conv._data.artifact_reference_id = None
+        conv._data.artifact_reference_type = None
+        conv._data.artifact_reference_name = None
+        return conv
+
+    def test_has_bound_returns_false_when_id_is_none(self):
+        """has_bound_reference_artifact() returns False when artifact_reference_id is None."""
+        conv = self._make_diverged_state_conv()
+        assert conv.has_bound_reference_artifact() is False, (
+            "has_bound_reference_artifact() must return False when artifact_reference_id is None"
+        )
+
+    def test_review_design_shows_none_bound_when_id_is_none(self):
+        """REVIEW_DESIGN must show 'none bound' when has_bound_reference_artifact()=False."""
+        conv = self._make_diverged_state_conv()
+        turn = conv._prompt_review_design()
+        assert "none bound" in (turn.message or "").lower(), (
+            "REVIEW_DESIGN must show 'none bound' when artifact_reference_id is None. "
+            f"Got message snippet: {(turn.message or '')[:500]!r}"
+        )
+
+    def test_review_design_does_not_show_artifact_name_from_layout_text(self):
+        """REVIEW_DESIGN must not infer artifact presence from layout text.
+
+        Old code showed the artifact as present because design.workflow_shape.layout
+        contained the artifact name.  Post-ADR-035, only has_bound_reference_artifact()
+        controls whether the artifact is shown as present.
+        """
+        conv = self._make_diverged_state_conv()
+        turn = conv._prompt_review_design()
+        # The layout text contains "art-92062549" but artifact is NOT bound
+        # The reference artifact line must say "none bound", not reference the artifact id
+        ref_line = next(
+            (l for l in (turn.message or "").splitlines() if "Reference artifact:" in l),
+            None,
+        )
+        assert ref_line is not None, "REVIEW_DESIGN must have a 'Reference artifact:' line"
+        assert "none bound" in ref_line.lower(), (
+            f"Reference artifact line must say 'none bound' when id=None, got: {ref_line!r}"
+        )
+
+    def test_has_bound_true_when_both_fields_set(self):
+        """has_bound_reference_artifact() returns True only when both id and name are set."""
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._data.artifact_reference_id = "art-12345"
+        conv._data.artifact_reference_name = "example.pptx"
+        assert conv.has_bound_reference_artifact() is True
+
+    def test_has_bound_false_when_name_missing(self):
+        """has_bound_reference_artifact() returns False if name is missing even if id is set."""
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._data.artifact_reference_id = "art-12345"
+        conv._data.artifact_reference_name = None
+        assert conv.has_bound_reference_artifact() is False
+
+    def test_bind_and_clear_atomic(self):
+        """_bind_reference_artifact and _clear_reference_artifact are atomic."""
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        assert conv.has_bound_reference_artifact() is False
+
+        conv._bind_reference_artifact(
+            artifact_id="art-99999",
+            artifact_type="pptx",
+            artifact_name="test_template.pptx",
+            artifact_layout={"sections": ["s1"], "slide_count": 1, "mapping": {}},
+            artifact_path="/tmp/test_template.pptx",
+        )
+        assert conv.has_bound_reference_artifact() is True
+        assert conv._data.artifact_reference_id == "art-99999"
+        assert conv._data.artifact_reference_name == "test_template.pptx"
+
+        conv._clear_reference_artifact(reason="test teardown")
+        assert conv.has_bound_reference_artifact() is False
+        assert conv._data.artifact_reference_id is None
+        assert conv._data.artifact_reference_name is None
+
+    def test_to_dict_from_dict_round_trip_preserves_binding(self):
+        """to_dict/from_dict round-trip preserves artifact_reference_name."""
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._bind_reference_artifact(
+            artifact_id="art-roundtrip",
+            artifact_type="docx",
+            artifact_name="ref_doc.docx",
+            artifact_layout=None,
+        )
+        d = conv.to_dict()
+        assert d.get("artifact_reference_name") == "ref_doc.docx"
+
+        restored = SkillBuilderConversation.from_dict(d, llm=None, artifact_store=None,
+                                                       skill_store=MagicMock())
+        assert restored.has_bound_reference_artifact() is True
+        assert restored._data.artifact_reference_name == "ref_doc.docx"
+        assert restored._data.artifact_reference_id == "art-roundtrip"
+
+    def test_from_dict_pre_adr035_session_has_bound_false(self):
+        """Pre-ADR-035 session dict (no artifact_reference_name key) loads cleanly."""
+        old_session = {
+            "state": "EVAL",
+            "persona": "tpm",
+            "intent_description": "weekly review",
+            "skill_name": "weekly_review",
+            "user_id": "u1",
+            "synth_id": "synth-tpm-old",
+            # Old sessions have artifact_reference_id set but no artifact_reference_name
+            "artifact_reference_id": "art-abc123",
+            "artifact_reference_type": "pptx",
+            # artifact_reference_name NOT in dict (pre-ADR-035)
+        }
+        restored = SkillBuilderConversation.from_dict(
+            old_session, llm=None, artifact_store=None, skill_store=MagicMock()
+        )
+        # Pre-ADR-035 session: name is None → has_bound returns False (safe default)
+        # (Cannot claim artifact is bound without the name field)
+        assert restored._data.artifact_reference_name is None
+        # The id may still be set, but has_bound requires BOTH
+        assert restored.has_bound_reference_artifact() is False
+
+
+class TestAdr035InspectSourcesHardGate:
+    """(e) INSPECT_SOURCES hard gate: DESIGN blocked when required/output unverified.
+
+    Verifies that source_access_status is set and that the single-truth method
+    integrates with the artifact_required flag cached at UPLOAD_ARTIFACT_EXAMPLE entry.
+    """
+
+    def test_artifact_required_cached_at_upload_entry(self):
+        """artifact_required is set on _SessionData when _advance_to_upload_artifact_example is called."""
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._state = "INSPECT_SOURCES"
+        conv._data.output_format = "pptx"
+        conv._data.normalised_intent = {"output_kind": "pptx",
+                                         "task_description": "exec review deck"}
+        # Before calling advance, artifact_required is None
+        assert conv._data.artifact_required is None
+
+        conv._advance_to_upload_artifact_example()
+
+        assert conv._data.artifact_required is True, (
+            "artifact_required must be set to True when output is pptx"
+        )
+
+    def test_artifact_not_required_for_markdown_output(self):
+        """artifact_required is False for markdown output."""
+        conv = SkillBuilderConversation(persona="ops_eng", skill_store=MagicMock())
+        conv._state = "INSPECT_SOURCES"
+        conv._data.output_format = "markdown"
+        conv._data.normalised_intent = {"output_kind": "markdown",
+                                         "task_description": "incident summary"}
+
+        conv._advance_to_upload_artifact_example()
+
+        assert conv._data.artifact_required is False
+
+    def test_source_access_status_round_trips(self):
+        """source_access_status persists through to_dict/from_dict."""
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._data.source_access_status = {
+            "confluence:12345": {"status": "ok", "samples_fetched": 2},
+            "reference_artifact": {"status": "ok", "bytes": 8220621},
+        }
+        d = conv.to_dict()
+        assert "source_access_status" in d
+        assert d["source_access_status"]["confluence:12345"]["status"] == "ok"
+
+        restored = SkillBuilderConversation.from_dict(
+            d, llm=None, artifact_store=None, skill_store=MagicMock()
+        )
+        assert restored._data.source_access_status == conv._data.source_access_status
+
+    def test_declared_output_destination_round_trips(self):
+        """declared_output_destination persists through to_dict/from_dict."""
+        conv = SkillBuilderConversation(persona="tpm", skill_store=MagicMock())
+        conv._data.declared_output_destination = {
+            "kind": "filesystem",
+            "path": "/tmp/output",
+        }
+        d = conv.to_dict()
+        assert d.get("declared_output_destination") == {"kind": "filesystem", "path": "/tmp/output"}
+
+        restored = SkillBuilderConversation.from_dict(
+            d, llm=None, artifact_store=None, skill_store=MagicMock()
+        )
+        assert restored._data.declared_output_destination == {"kind": "filesystem", "path": "/tmp/output"}

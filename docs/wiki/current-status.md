@@ -11,7 +11,9 @@ status: current
 # Current Status
 
 ## Where we are
-**Phase 1-3 + V3 deployment layer + laptop mode code complete. ADR-028 S1-S6 live. ADR-029 Phases 1+2 complete. ADR-030 P2 complete (YAML prompt store authored verbatim); P1 registry in progress.** 160+ Python files, ~18K+ LOC, 630+ tests passing.
+**Phase 1-3 + V3 deployment layer + laptop mode code complete. ADR-028 S1-S6 live. ADR-029 Phases 1+2 complete. ADR-030 P2 complete. ADR-035 access-gate + single-truth artifact binding (DECISION-015) landed.** 160+ Python files, ~18K+ LOC, 1502+ tests passing (8 pre-existing failures).
+
+ADR-035 (DECISION-015) landed (2026-05-17): authoring-flow FSM redesign — access-verify gate; conditional-required reference artifact (pptx/docx/template-referenced = required, no skip; text/email/markdown = not gated); `has_bound_reference_artifact()` single-source-of-truth for REVIEW_DESIGN and _run_eval; `_bind_reference_artifact`/`_clear_reference_artifact` atomic helpers; `artifact_reference_name` field (REVIEW_DESIGN reads name, not design text); re-entry guard preserves binding on skip. Session `synth-tpm-c3ef4ef2` recovered (`framework/cli/recover_bound_artifact_session.py`). Bug BUG-queue-18bc6 filed (HIGH severity, ADB-confirmed). 38 new tests. Zero new failures.
 
 BUG-queue-280f1 Part 2 closed (2026-05-16): deleteSkill event-loop blocking fix (d3ec0-class). Three synchronous ADB calls in `_make_delete_skill_handler` offloaded via `asyncio.to_thread` (same fix pattern as authorSkill commit 309db5d). Fast pre-checks (admin-scope, confirmationPassword, arg-validation) remain synchronous and pre-offload. 4 regression-guard tests added to `test_mcp_skill_tools.py`.
 

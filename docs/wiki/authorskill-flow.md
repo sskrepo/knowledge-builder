@@ -1,20 +1,46 @@
 ---
-title: authorSkill conversation flow — state-by-state map (post-ADR-029 S6)
+title: authorSkill conversation flow — state-by-state map (post-ADR-035)
 owner: architect
 created: 2026-05-14
-updated: 2026-05-16
-related: [ADR-015, ADR-016, ADR-017, ADR-026, ADR-027, ADR-028, ADR-029, ADR-032]
+updated: 2026-05-17
+related: [ADR-015, ADR-016, ADR-017, ADR-026, ADR-027, ADR-028, ADR-029, ADR-032, ADR-034, ADR-035]
 supersedes: authorskill-flow-pre-adr-027.md
 ---
 
-# authorSkill conversation flow — state-by-state map (post-ADR-028/ADR-029 S6)
+# authorSkill conversation flow — state-by-state map (post-ADR-035)
 
-> This file describes the **ADR-028/ADR-029 17-state machine** (ADR-028 Stream A S1-S4 +
-> ADR-029 Phase 1 S5 + ADR-029 Phase 2 S6).
+> This file describes the **ADR-028/ADR-029/ADR-035 17-state machine** (ADR-028 Stream A S1-S4 +
+> ADR-029 Phase 1 S5 + ADR-029 Phase 2 S6 + ADR-035 access-gate + single-truth artifact binding).
 > The pre-ADR-027 15-state machine is archived at `docs/wiki/authorskill-flow-pre-adr-027.md`.
 > The ADR-027 16-state machine is superseded by this document (CLARIFY added as 17th state).
 > In-flight sessions at deploy time complete under the old machine (legacy handlers are
 > retained in `conversation.py`); all new sessions use the machine below.
+
+## ADR-035 / DECISION-015 changes (2026-05-17)
+
+- **Single source of truth for artifact binding**: `has_bound_reference_artifact()` is now
+  the authoritative check. Both `REVIEW_DESIGN` display and `_run_eval` call this method.
+  Reading `design.workflow_shape.layout` text is prohibited as an artifact-bound signal.
+- **Atomic bind/clear helpers**: `_bind_reference_artifact(artifact_id, artifact_type, artifact_name, ...)` and
+  `_clear_reference_artifact(reason=...)`. Direct field assignment to `artifact_reference_id`
+  outside these helpers is prohibited in new code.
+- **New `_SessionData` field**: `artifact_reference_name` — set at bind time; REVIEW_DESIGN
+  reads this (not design text). Three more: `source_access_status` (per-item access check result),
+  `artifact_required` (conditional-required decision), `declared_output_destination`.
+- **Re-entry guard**: once bound, re-entering UPLOAD_ARTIFACT_EXAMPLE and typing 'skip'
+  preserves the existing binding. Clearing/replacing requires an explicit new artifact reference.
+- **Conditional-required rule**: artifact is REQUIRED (no skip) when output_kind/output_format
+  is 'pptx'/'docx' OR intent text references a template. For text/email/markdown skills with
+  no declared reference, the gate is NOT imposed.
+- **Skip affordance suppression**: `_advance_to_upload_artifact_example` suppresses 'skip'
+  option when `artifact_required = True`. Handler hard-blocks skip when required and no stash.
+- **REVIEW_DESIGN artifact line**: now shows "Reference artifact: '{name}' (id: ...)" from
+  `has_bound_reference_artifact()` and `artifact_reference_name`, not from layout text.
+- **Session `synth-tpm-c3ef4ef2` recovered**: recovery script
+  `framework/cli/recover_bound_artifact_session.py` re-binds art-92062549. ADB-verified:
+  `has_bound_reference_artifact()=True` post-recovery. State set to EVAL.
+- **Bug filed**: BUG-queue-18bc6 | discovered_by=architect | status=fixed | severity=HIGH |
+  tool=authorSkill | session=synth-tpm-c3ef4ef2 | root_cause=silent clear on re-entry + decoupled REVIEW/EVAL reads.
 
 ## ADR-029 changes (Phase 2 — S6)
 

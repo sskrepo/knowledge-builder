@@ -392,6 +392,23 @@ class _SessionData:
     # artifact_reference_type: "pptx" | "docx" | "md" | "txt" — needed to dispatch
     # the right ArtifactComparator extractor at EVAL time.
     artifact_reference_type: str | None = None
+    # ADR-035 (DECISION-015): single-source-of-truth artifact binding name.
+    # Set when a reference artifact is successfully bound (alongside artifact_reference_id).
+    # REVIEW_DESIGN reads this, not design.workflow_shape.layout text.
+    # Cleared only by an explicit deliberate user action at UPLOAD_ARTIFACT_EXAMPLE.
+    # Backward-compat default None for pre-ADR-035 sessions.
+    artifact_reference_name: str | None = None
+    # ADR-035 (DECISION-015): source access-verification status produced by INSPECT_SOURCES.
+    # Keyed by item_id (source, reference artifact, output destination).
+    # Must be complete (all required items verified) before DESIGN is permitted.
+    source_access_status: dict = field(default_factory=dict)
+    # ADR-035 (DECISION-015): reference artifact is conditionally required.
+    # True when output is structured/templated (pptx/docx) OR intent referenced a template.
+    # None = not yet determined (pre-CONFIGURE_SOURCES). False = not required.
+    artifact_required: bool | None = None
+    # ADR-035 (DECISION-015): declared output destination (delivery kind + config).
+    # Set by CONFIGURE_SOURCES; verified accessible by INSPECT_SOURCES.
+    declared_output_destination: dict | None = field(default=None)
     # ADR-029 Phase 2 (S6): loop guardrail fields.
     # eval_iteration_count: incremented every time the reject path runs the classifier.
     # eval_cumulative_cost_usd: accumulates classifier LLM call cost across iterations.
@@ -622,6 +639,12 @@ class SkillBuilderConversation:
         # backward-compat; pre-S5 sessions will simply have no reference artifact.
         d["artifact_reference_id"] = self._data.artifact_reference_id
         d["artifact_reference_type"] = self._data.artifact_reference_type
+        # ADR-035 (DECISION-015): single-source-of-truth binding name + access-status.
+        # Backward-compat defaults None / {} / None for pre-ADR-035 sessions.
+        d["artifact_reference_name"] = self._data.artifact_reference_name
+        d["source_access_status"] = dict(self._data.source_access_status)
+        d["artifact_required"] = self._data.artifact_required
+        d["declared_output_destination"] = self._data.declared_output_destination
         # ADR-029 Phase 2 (S6): loop guardrail fields — default 0/None for
         # backward-compat; pre-S6 sessions have no iteration history.
         d["eval_iteration_count"] = self._data.eval_iteration_count
@@ -697,6 +720,12 @@ class SkillBuilderConversation:
             # Backward-compat default None — pre-S5 sessions have no reference.
             artifact_reference_id=d.get("artifact_reference_id"),
             artifact_reference_type=d.get("artifact_reference_type"),
+            # ADR-035 (DECISION-015): single-source-of-truth binding name + access-status.
+            # Backward-compat defaults None / {} / None for pre-ADR-035 sessions.
+            artifact_reference_name=d.get("artifact_reference_name"),
+            source_access_status=dict(d.get("source_access_status") or {}),
+            artifact_required=d.get("artifact_required"),
+            declared_output_destination=d.get("declared_output_destination"),
             # ADR-029 Phase 2 (S6): loop guardrail fields.
             # Backward-compat defaults: 0 / 0.0 / None for pre-S6 sessions.
             eval_iteration_count=int(d.get("eval_iteration_count", 0)),
@@ -718,6 +747,93 @@ class SkillBuilderConversation:
         turn.synth_id = self._data.synth_id
         turn.progress = _progress(self._state)
         return turn
+
+    # ------------------------------------------------------------------
+    # ADR-035 (DECISION-015): Single-source-of-truth helpers
+    # ------------------------------------------------------------------
+
+    def has_bound_reference_artifact(self) -> bool:
+        """Single source of truth: is a reference artifact successfully bound?
+
+        ADR-035 (DECISION-015): REVIEW_DESIGN and _run_eval MUST both call this
+        method rather than reading separate fields independently.  The invariant
+        is: has_bound_reference_artifact() is True IFF both artifact_reference_id
+        and artifact_reference_name are non-None and non-empty.  They are set
+        atomically in _bind_reference_artifact() and cleared atomically in
+        _clear_reference_artifact().  Reading design.workflow_shape.layout text
+        is explicitly prohibited as an artifact-bound signal.
+        """
+        return bool(
+            self._data.artifact_reference_id
+            and self._data.artifact_reference_name
+        )
+
+    def _bind_reference_artifact(
+        self,
+        artifact_id: str,
+        artifact_type: str,
+        artifact_name: str,
+        artifact_layout: dict | None,
+        artifact_path: str = "",
+    ) -> None:
+        """Atomically bind a reference artifact — single write path.
+
+        ADR-035 (DECISION-015): all three retention fields are set together so
+        has_bound_reference_artifact() is always consistent.
+        """
+        self._data.artifact_reference_id = artifact_id
+        self._data.artifact_reference_type = artifact_type
+        self._data.artifact_reference_name = artifact_name
+        if artifact_layout is not None:
+            self._data.artifact_layout = artifact_layout
+        if artifact_path:
+            self._data.artifact_path = artifact_path
+        log.info(
+            "_bind_reference_artifact: id=%r type=%s name=%r — binding complete",
+            artifact_id, artifact_type, artifact_name,
+        )
+
+    def _clear_reference_artifact(self, reason: str = "") -> None:
+        """Atomically clear reference artifact binding.
+
+        ADR-035 (DECISION-015): clearing requires explicit deliberate action;
+        must never be called silently on re-entry.  Callers must pass a reason
+        for audit-trail logging.
+        """
+        log.info(
+            "_clear_reference_artifact: clearing binding "
+            "(id=%r name=%r) — reason: %s",
+            self._data.artifact_reference_id,
+            self._data.artifact_reference_name,
+            reason or "(no reason given)",
+        )
+        self._data.artifact_reference_id = None
+        self._data.artifact_reference_type = None
+        self._data.artifact_reference_name = None
+        self._data.artifact_layout = None
+
+    @staticmethod
+    def _is_artifact_required(normalised_intent: dict, output_format: str = "") -> bool:
+        """Conditional-required rule (ADR-035 DECISION-015 §3).
+
+        Returns True (artifact required, no skip) when:
+          - output_kind or output_format is "pptx" or "docx" (structured/templated output), OR
+          - the intent text explicitly references a template, reference, or example artifact.
+
+        Returns False (artifact not required) for pure text/email/markdown skills
+        where no reference was ever declared.
+        """
+        import re as _re
+        structured_kinds = {"pptx", "docx", "powerpoint", "word"}
+        output_kind = (normalised_intent.get("output_kind") or "").lower()
+        fmt = (output_format or "").lower()
+        if output_kind in structured_kinds or fmt in structured_kinds:
+            return True
+        # Check intent text for template/reference keywords
+        task_desc = (normalised_intent.get("task_description") or "").lower()
+        if _re.search(r"\b(template|reference|example|like the|same format|mirror)\b", task_desc):
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # State handlers
@@ -1616,19 +1732,61 @@ class SkillBuilderConversation:
     # -- UPLOAD_ARTIFACT_EXAMPLE -----------------------------------------
 
     def _advance_to_upload_artifact_example(self) -> ConversationTurn:
-        """Transition to UPLOAD_ARTIFACT_EXAMPLE state (ADR-027)."""
+        """Transition to UPLOAD_ARTIFACT_EXAMPLE state (ADR-027 + ADR-035).
+
+        ADR-035 (DECISION-015): computes artifact_required and suppresses the
+        'skip' affordance when the artifact is mandatory.  If a binding is already
+        established, surfaces the current binding name prominently so the user can
+        confirm or replace it.
+        """
         self._state = "UPLOAD_ARTIFACT_EXAMPLE"
-        # BUG-queue-f4987: if an artifact was stashed from an earlier CLARIFY turn,
-        # surface it prominently so the user knows it will be auto-applied on 'skip'.
+        artifact_required = self._is_artifact_required(
+            self._data.normalised_intent or {},
+            self._data.output_format,
+        )
+        self._data.artifact_required = artifact_required
+
         stash = self._data._pending_artifact_stash
-        if stash:
+        already_bound = self.has_bound_reference_artifact()
+
+        if already_bound:
+            # ADR-035 RE-ENTRY: surface existing binding; skip = keep it, new ref = replace.
+            bound_name = self._data.artifact_reference_name
+            bound_id = self._data.artifact_reference_id
+            msg = (
+                f"Reference artifact already bound: '{bound_name}' (id: {bound_id}).\n\n"
+                + ("Type 'skip' to keep this binding, or provide a new artifact to replace it.\n\n"
+                   if not artifact_required else
+                   "Provide a new artifact reference to replace it "
+                   "(a reference is REQUIRED for this skill — cannot be cleared).\n\n")
+                + "This reference informs DESIGN_SKILL's output format and layout."
+            )
+            base_options = [f"artifact:{bound_name} id:{bound_id}"]
+            if not artifact_required:
+                base_options = ["skip"] + base_options
+            options = base_options + ["/path/to/other.pptx"]
+        elif stash:
+            # BUG-queue-f4987: surface stash.
             msg = (
                 f"Reference artifact noted: '{stash['filename']}' (id: {stash['artifact_id']}).\n\n"
-                f"Type 'skip' to apply this reference artifact automatically, "
-                f"or provide a different artifact reference to override it.\n\n"
-                f"This reference helps DESIGN_SKILL choose the right output format and layout."
+                + ("Type 'skip' to apply this reference artifact automatically, "
+                   if not artifact_required else
+                   "A reference artifact is REQUIRED for this skill. "
+                   "Type 'skip' to apply this stashed reference, ")
+                + "or provide a different artifact reference to override it.\n\n"
+                "This reference helps DESIGN_SKILL choose the right output format and layout."
             )
             options = ["skip", f"artifact:{stash['filename']} id:{stash['artifact_id']}", "/path/to/other.pptx"]
+        elif artifact_required:
+            # ADR-035 CONDITIONAL-REQUIRED: no 'skip' option offered.
+            msg = (
+                "A reference artifact is REQUIRED for this skill "
+                f"(output format: {self._data.output_format or 'structured'}).\n\n"
+                "Please upload the reference template to help DESIGN_SKILL match "
+                "the expected output structure.\n\n"
+                "Provide: artifact:<filename> id:<artifact_id>  or a local file path."
+            )
+            options = ["artifact:<filename> id:<artifact_id>", "/path/to/template.pptx"]
         else:
             msg = (
                 "Optional: upload a reference artifact to provide a layout hint.\n\n"
@@ -1646,29 +1804,35 @@ class SkillBuilderConversation:
     def _handle_upload_artifact_example(self, user_input: str) -> ConversationTurn:
         """Handle user input at UPLOAD_ARTIFACT_EXAMPLE state (ADR-027 + ADR-029 S5).
 
-        Performs structural parse only — output is a layout hint, NOT field names.
-        Field names come from DESIGN_SKILL.
+        ADR-035 (DECISION-015) changes:
+          - RE-ENTRY GUARD: if a binding is already established (has_bound_reference_artifact()),
+            re-entering this state does NOT silently clear it.  A bare 'skip' at re-entry
+            preserves the existing binding.  Clearing/replacing requires an explicit new
+            artifact reference.
+          - CONDITIONAL-REQUIRED GATE: when the skill is REQUIRED to have a reference
+            artifact (_is_artifact_required()), the 'skip' option is suppressed — no
+            progression to DESIGN_SKILL until an artifact is bound.  For text/email/markdown
+            skills with no declared reference, the gate is not imposed.
+          - SINGLE-SOURCE-OF-TRUTH: all artifact field writes go through
+            _bind_reference_artifact() / _clear_reference_artifact() atomically.
+            has_bound_reference_artifact() is the authoritative "is bound" check for
+            both REVIEW_DESIGN display and _run_eval.
 
-        ADR-029 Phase 1 (S5) additions:
-          1. IMAGE HARD-REJECT: before calling analyze_artifact, call
-             ArtifactComparator.is_image_only() on the artifact bytes.  If
-             image-only, surface the verbatim IMAGE_ONLY_MESSAGE with
-             must_show_human=True and do NOT advance the state.
-          2. ARTIFACT RETENTION: after a successful structural parse, store the
-             artifact bytes' ArtifactStore ID (or a sentinel for filesystem paths)
-             in _data.artifact_reference_id so _run_eval can read the reference
-             bytes to call comparator.compare().
+        Retains from ADR-029 Phase 1 (S5):
+          1. IMAGE HARD-REJECT: image-only artifacts are hard-rejected before parse.
+          2. ARTIFACT RETENTION: artifact_reference_id / artifact_reference_name persisted.
 
-        BUG-queue-f4987 fix: if the user previously supplied an
-        "artifact:<filename> id:<artifact_id>" reference at CLARIFY (or another
-        pre-upload state) it was stashed in _data._pending_artifact_stash.  When
-        that stash is set AND the user now types "skip" (or any skip-synonym),
-        auto-apply the stashed artifact rather than skipping — the user already
-        expressed their intent.  If the user provides a NEW artifact: reference
-        here, the new one wins and the stash is cleared.
+        Retains from BUG-queue-f4987: stash auto-apply on skip.
         """
         from .analyze_artifact import analyze_artifact
         from .comparator import ArtifactComparator, IMAGE_ONLY_MESSAGE, SUPPORTED_TYPES
+
+        artifact_required = self._is_artifact_required(
+            self._data.normalised_intent or {},
+            self._data.output_format,
+        )
+        # Cache the decision so INSPECT_SOURCES and the REVIEW_DESIGN display can read it.
+        self._data.artifact_required = artifact_required
 
         # BUG-queue-f4987: auto-apply stashed artifact if user skips and stash exists.
         stash = self._data._pending_artifact_stash
@@ -1698,21 +1862,53 @@ class SkillBuilderConversation:
             self._data._pending_artifact_stash = None
 
         if lowered in ("skip", "no", "none", "later"):
-            self._data.artifact_layout = None
+            # ADR-035 RE-ENTRY GUARD: if already bound, preserve binding on bare skip.
+            if self.has_bound_reference_artifact():
+                log.info(
+                    "_handle_upload_artifact_example: re-entry skip received but "
+                    "artifact already bound (id=%r name=%r) — preserving binding "
+                    "(ADR-035 re-entry guard)",
+                    self._data.artifact_reference_id,
+                    self._data.artifact_reference_name,
+                )
+                return self._run_design_skill()
+            # ADR-035 CONDITIONAL-REQUIRED GATE: suppress skip when required.
+            if artifact_required:
+                log.warning(
+                    "_handle_upload_artifact_example: skip attempted but artifact "
+                    "is REQUIRED for this skill (output=%r) — blocking skip",
+                    self._data.output_format,
+                )
+                return ConversationTurn(
+                    state="UPLOAD_ARTIFACT_EXAMPLE",
+                    message=(
+                        "A reference artifact is REQUIRED for this skill "
+                        f"(output format: {self._data.output_format or 'structured'}).\n\n"
+                        "Please provide the path to a PPTX or DOCX reference template.\n"
+                        "This is needed so DESIGN_SKILL can match the expected output structure.\n\n"
+                        "Provide: artifact:<filename> id:<artifact_id>  "
+                        "or a local file path."
+                    ),
+                    options=["artifact:<filename> id:<artifact_id>", "/path/to/template.pptx"],
+                    must_show_human=True,
+                    awaiting_user=True,
+                )
+            # Not required, no existing binding — explicit skip, clear any stale state.
+            self._clear_reference_artifact(reason="explicit skip at UPLOAD_ARTIFACT_EXAMPLE")
             self._data.artifact_path = ""
-            self._data.artifact_reference_id = None
-            self._data.artifact_reference_type = None
             return self._run_design_skill()
 
         path = user_input.strip()
         resolved_path: Path | None = None
         artifact_id_for_retention: str | None = None
+        artifact_filename: str = ""
 
         # Handle artifact: prefix (ADR-021 uploaded artifacts)
         if path.startswith("artifact:"):
             import re as _re
-            m = _re.match(r"^artifact:(\S+)\s+id:(\S+)$", path)
+            m = _re.match(r"^artifact:(.+?)\s+id:(\S+)$", path)
             if m and self._artifact_store is not None:
+                artifact_filename = m.group(1).strip()
                 artifact_id_for_retention = m.group(2)
                 local_path = self._artifact_store.resolve(artifact_id_for_retention)
                 if local_path:
@@ -1724,18 +1920,41 @@ class SkillBuilderConversation:
                         "proceeding without reference artifact",
                         artifact_id_for_retention,
                     )
-                    self._data.artifact_reference_id = None
-                    self._data.artifact_reference_type = None
+                    if artifact_required:
+                        return ConversationTurn(
+                            state="UPLOAD_ARTIFACT_EXAMPLE",
+                            message=(
+                                f"Artifact id '{artifact_id_for_retention}' was not found "
+                                "in the artifact store.\n\n"
+                                "A reference artifact is REQUIRED for this skill. "
+                                "Please re-upload the file."
+                            ),
+                            options=["artifact:<filename> id:<artifact_id>"],
+                            must_show_human=True,
+                            awaiting_user=True,
+                        )
+                    self._clear_reference_artifact(reason="artifact_id not found in store")
                     return self._run_design_skill()
             else:
-                self._data.artifact_reference_id = None
-                self._data.artifact_reference_type = None
+                if artifact_required:
+                    return ConversationTurn(
+                        state="UPLOAD_ARTIFACT_EXAMPLE",
+                        message=(
+                            "A reference artifact is REQUIRED for this skill.\n\n"
+                            "Please re-upload using: artifact:<filename> id:<artifact_id>"
+                        ),
+                        options=["artifact:<filename> id:<artifact_id>"],
+                        must_show_human=True,
+                        awaiting_user=True,
+                    )
+                self._clear_reference_artifact(reason="artifact: prefix but no store or no match")
                 return self._run_design_skill()
         else:
             # Local filesystem path
             p = Path(path)
             if p.exists() and p.suffix in (".pptx", ".docx", ".md", ".txt"):
                 resolved_path = p
+                artifact_filename = p.name
                 # For local filesystem paths there is no artifact_id — we store
                 # the absolute path as the reference identifier so _run_eval can
                 # read the bytes back. Format: "file:<abs_path>"
@@ -1745,9 +1964,19 @@ class SkillBuilderConversation:
                     "UPLOAD_ARTIFACT_EXAMPLE: path %r not found or unsupported — skipping",
                     path,
                 )
-                self._data.artifact_layout = None
-                self._data.artifact_reference_id = None
-                self._data.artifact_reference_type = None
+                if artifact_required:
+                    return ConversationTurn(
+                        state="UPLOAD_ARTIFACT_EXAMPLE",
+                        message=(
+                            f"File not found or unsupported type: {path!r}\n\n"
+                            "A reference artifact is REQUIRED for this skill. "
+                            "Please provide a valid PPTX or DOCX file."
+                        ),
+                        options=["artifact:<filename> id:<artifact_id>", "/path/to/template.pptx"],
+                        must_show_human=True,
+                        awaiting_user=True,
+                    )
+                self._clear_reference_artifact(reason="path not found or unsupported")
                 return self._run_design_skill()
 
         # We have a resolved local path — read bytes for image-only check.
@@ -1758,9 +1987,19 @@ class SkillBuilderConversation:
                 "UPLOAD_ARTIFACT_EXAMPLE: could not read artifact bytes from %s: %s — skipping",
                 resolved_path, exc,
             )
-            self._data.artifact_layout = None
-            self._data.artifact_reference_id = None
-            self._data.artifact_reference_type = None
+            if artifact_required:
+                return ConversationTurn(
+                    state="UPLOAD_ARTIFACT_EXAMPLE",
+                    message=(
+                        f"Could not read artifact bytes: {exc}\n\n"
+                        "A reference artifact is REQUIRED for this skill. "
+                        "Please provide a readable file."
+                    ),
+                    options=["artifact:<filename> id:<artifact_id>", "/path/to/template.pptx"],
+                    must_show_human=True,
+                    awaiting_user=True,
+                )
+            self._clear_reference_artifact(reason=f"could not read bytes: {exc}")
             return self._run_design_skill()
 
         artifact_type = resolved_path.suffix.lstrip(".").lower()
@@ -1782,7 +2021,7 @@ class SkillBuilderConversation:
                     "Please upload a text-bearing PPTX, DOCX, or Markdown file, "
                     "or type 'skip' to proceed without a reference artifact."
                 ),
-                options=["skip"],
+                options=["skip"] if not artifact_required else [],
                 must_show_human=True,
             )
 
@@ -1804,17 +2043,16 @@ class SkillBuilderConversation:
                 "hard-rejecting, state stays at UPLOAD_ARTIFACT_EXAMPLE. path=%s",
                 resolved_path,
             )
-            self._data.artifact_reference_id = None
-            self._data.artifact_reference_type = None
             return ConversationTurn(
                 state="UPLOAD_ARTIFACT_EXAMPLE",
                 message=IMAGE_ONLY_MESSAGE,
-                options=["skip", "upload a text-bearing PPTX/DOCX/MD"],
+                options=["skip", "upload a text-bearing PPTX/DOCX/MD"] if not artifact_required
+                       else ["upload a text-bearing PPTX/DOCX/MD"],
                 must_show_human=True,
                 awaiting_user=True,
             )
 
-        # --- Text-bearing artifact: structural parse + retention ---
+        # --- Text-bearing artifact: structural parse + atomic binding ---
         try:
             _fields, mapping = analyze_artifact(str(resolved_path))
             layout = {
@@ -1822,15 +2060,17 @@ class SkillBuilderConversation:
                 "slide_count": len({v.get("slide", 0) for v in (mapping or {}).values()}),
                 "mapping": mapping or {},
             }
-            self._data.artifact_layout = layout
-            self._data.artifact_path = str(resolved_path)
-            # ADR-029 S5: store the artifact reference identifier and type
-            # so _run_eval can retrieve the bytes later for comparator.compare().
-            self._data.artifact_reference_id = artifact_id_for_retention
-            self._data.artifact_reference_type = artifact_type
+            # ADR-035: use atomic bind method — single source of truth.
+            self._bind_reference_artifact(
+                artifact_id=artifact_id_for_retention,
+                artifact_type=artifact_type,
+                artifact_name=artifact_filename or resolved_path.name,
+                artifact_layout=layout,
+                artifact_path=str(resolved_path),
+            )
             log.info(
-                "UPLOAD_ARTIFACT_EXAMPLE: parsed layout sections=%d type=%s ref_id=%s",
-                len(_fields), artifact_type, artifact_id_for_retention,
+                "UPLOAD_ARTIFACT_EXAMPLE: parsed layout sections=%d type=%s ref_id=%s name=%r",
+                len(_fields), artifact_type, artifact_id_for_retention, artifact_filename,
             )
         except ValueError as exc:
             # analyze_artifact may raise for malformed files; surface clearly.
@@ -1839,8 +2079,19 @@ class SkillBuilderConversation:
                 "clearing artifact reference",
                 exc,
             )
-            self._data.artifact_reference_id = None
-            self._data.artifact_reference_type = None
+            if artifact_required:
+                return ConversationTurn(
+                    state="UPLOAD_ARTIFACT_EXAMPLE",
+                    message=(
+                        f"Cannot parse artifact: {exc}\n\n"
+                        "A reference artifact is REQUIRED for this skill. "
+                        "Please provide a valid text-bearing PPTX/DOCX/Markdown."
+                    ),
+                    options=["artifact:<filename> id:<artifact_id>", "/path/to/template.pptx"],
+                    must_show_human=True,
+                    awaiting_user=True,
+                )
+            self._clear_reference_artifact(reason=f"analyze_artifact failed: {exc}")
             return ConversationTurn(
                 state="UPLOAD_ARTIFACT_EXAMPLE",
                 message=(
@@ -2116,6 +2367,16 @@ class SkillBuilderConversation:
         if sched:
             trig_str += (", " if trig_str else "") + f"scheduled: {sched}"
         lines.append(f"  Trigger: {trig_str or '?'}")
+
+        # ADR-035 (DECISION-015): reference artifact binding status — read from
+        # single-source-of-truth method, NOT from design.workflow_shape.layout text.
+        if self.has_bound_reference_artifact():
+            lines.append(
+                f"  Reference artifact: {self._data.artifact_reference_name!r} "
+                f"(id: {self._data.artifact_reference_id})"
+            )
+        else:
+            lines.append("  Reference artifact: none bound")
 
         # Reuse plan
         covered = reuse_plan.get("covered", {})
@@ -4309,11 +4570,13 @@ class SkillBuilderConversation:
             except Exception as exc:
                 log.warning("_run_eval: could not read produced artifact bytes: %s", exc)
 
+        # ADR-035 (DECISION-015): use single-source-of-truth method for artifact bound check.
+        # EVAL and REVIEW_DESIGN now agree by construction — both call has_bound_reference_artifact().
         ref_id = self._data.artifact_reference_id
         ref_type = self._data.artifact_reference_type
         ref_bytes: bytes | None = None
 
-        if ref_id:
+        if self.has_bound_reference_artifact():
             # Retrieve reference artifact bytes from the store
             try:
                 if ref_id.startswith("file:"):
@@ -4369,16 +4632,17 @@ class SkillBuilderConversation:
                 "(wf_artifact_url=%r) — comparator skipped for this run",
                 wf_artifact_url,
             )
-        elif ref_id:
+        elif self.has_bound_reference_artifact():
             log.info(
-                "_run_eval: reference artifact_reference_id=%r but bytes unavailable — "
+                "_run_eval: reference artifact bound (id=%r name=%r) but bytes unavailable — "
                 "comparator skipped",
-                ref_id,
+                self._data.artifact_reference_id,
+                self._data.artifact_reference_name,
             )
         else:
             log.info(
-                "_run_eval: no reference artifact uploaded — comparator skipped "
-                "(user did not upload a reference at UPLOAD_ARTIFACT_EXAMPLE)"
+                "_run_eval: has_bound_reference_artifact()=False — comparator skipped "
+                "(ADR-035: single-source-of-truth; no artifact bound at UPLOAD_ARTIFACT_EXAMPLE)"
             )
 
         self._data.eval_result = {
@@ -4434,15 +4698,17 @@ class SkillBuilderConversation:
                 f"Note: artifact comparison failed ({comparator_error}). "
                 "Falling back to diagnostic metrics only."
             )
-        elif ref_id and not produced_artifact_bytes:
+        elif self.has_bound_reference_artifact() and not produced_artifact_bytes:
             lines.append(
-                "Note: reference artifact was uploaded but the workflow did not deliver "
-                "a local artifact file this run — comparator skipped. "
-                "Showing diagnostic metrics only."
+                f"Note: reference artifact '{self._data.artifact_reference_name}' was bound "
+                "but the workflow did not deliver a local artifact file this run — "
+                "comparator skipped. Showing diagnostic metrics only."
             )
         else:
+            # ADR-035: has_bound_reference_artifact() is False — both REVIEW_DESIGN
+            # and EVAL agree that no artifact is bound (single source of truth).
             lines.append(
-                "No reference artifact was uploaded at UPLOAD_ARTIFACT_EXAMPLE — "
+                "No reference artifact was bound at UPLOAD_ARTIFACT_EXAMPLE — "
                 "structural comparison is not available. "
                 "Showing diagnostic metrics only."
             )

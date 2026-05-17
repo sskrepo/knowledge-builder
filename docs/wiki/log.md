@@ -4,6 +4,38 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-17] architect | ADR-035/DECISION-015 — authoring-flow FSM access-gate; conditional-required artifact; single-source-of-truth binding; session synth-tpm-c3ef4ef2 recovered
+
+**Root cause confirmed.** Session synth-tpm-c3ef4ef2, JSON-RPC id 108: user uploaded
+reference artifact art-92062549 (7.8 MB PPTX). It bound successfully. FSM re-entered
+UPLOAD_ARTIFACT_EXAMPLE (path: CONFIGURE_SOURCES → INSPECT_SOURCES → UPLOAD_ARTIFACT_EXAMPLE).
+Skip/reset branch silently nulled `artifact_reference_id`. REVIEW_DESIGN kept showing the
+artifact (reads `design.workflow_shape.layout` text — never cleared). `_run_eval` read
+`artifact_reference_id=None` and emitted "No reference artifact was uploaded — structural
+comparison not available." HIGH severity: silent wrong output (DECISION-013).
+
+**Fix (DECISION-015 + ADR-035):**
+- `has_bound_reference_artifact()` method: single-source-of-truth for "is artifact bound?"
+  Both REVIEW_DESIGN and _run_eval call this; reading `design.workflow_shape.layout` text
+  as an artifact signal is now prohibited.
+- `_bind_reference_artifact()` / `_clear_reference_artifact(reason=...)` atomic helpers.
+  All clear paths now call `_clear_reference_artifact(reason=...)` with a logged reason.
+- New `_SessionData` field `artifact_reference_name` — set atomically with `artifact_reference_id`.
+  REVIEW_DESIGN shows "Reference artifact: '{name}'" from this field, not from layout text.
+- Three more fields: `source_access_status`, `artifact_required`, `declared_output_destination`.
+  All in to_dict/from_dict; backward-compat defaults for pre-ADR-035 sessions.
+- Re-entry guard: skip on re-entry when already bound → preserves binding.
+- Conditional-required rule (`_is_artifact_required()`): pptx/docx output or template-in-intent
+  → skip suppressed; text/email/markdown with no reference → not gated.
+- REVIEW_DESIGN now displays "Reference artifact: '{name}'" (bound) or "none bound" (unbound).
+- `_run_eval` "no comparator" message updated to use `has_bound_reference_artifact()`.
+- 38 new tests across 4 test classes (TestAdr035*).
+- **Session synth-tpm-c3ef4ef2 recovered** via `framework/cli/recover_bound_artifact_session.py`:
+  art-92062549 re-bound, state=EVAL, ADB-verified (has_bound_reference_artifact()=True).
+- **Bug filed**: BUG-queue-18bc6 | discovered_by=architect | status=fixed | severity=HIGH.
+  ADB-confirmed (COUNT=1). Export regenerated (74 records).
+- DECISION-015 + ADR-035 filed. `docs/wiki/authorskill-flow.md` updated.
+
 ## [2026-05-17] architect | ADR-034 — layout preset catalog; stop leaking internal preset ids to users (DECISION-014)
 
 **Root cause confirmed.** Session synth-tpm-3b2c2c71, JSON-RPC id 69: CLARIFY question
