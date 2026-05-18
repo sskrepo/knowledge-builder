@@ -1,0 +1,1 @@
+{"kind": "auto_generated", "question": "What is the status of the 26ai project for this week?", "expected_skill": "tpm.weekly_report", "expected_tier": 1, "expected_fields": [], "path_a_status": "failure", "path_a_artifact_url": null, "path_b_routing_results": [], "path_b_passed": true, "ask_latency_ms": null, "created_at": "2026-05-17T22:08:10Z"}

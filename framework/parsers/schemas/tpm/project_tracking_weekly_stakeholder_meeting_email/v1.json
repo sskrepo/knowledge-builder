@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/tpm/project_tracking_weekly_stakeholder_meeting_email/v1.json",
+  "title": "tpm \u2014 project_tracking_weekly_stakeholder_meeting_email \u2014 v1",
+  "description": "Synthesized by skill_builder for persona=tpm, kb=project_tracking_weekly_stakeholder_meeting_email. Refine before promoting.",
+  "type": "object",
+  "required": [
+    "project_name",
+    "meeting_context",
+    "rag_summary",
+    "schedule_health",
+    "blocking_issues",
+    "dependencies",
+    "risks",
+    "next_steps",
+    "exec_asks",
+    "stakeholder_pocs",
+    "reference_links",
+    "team_status_prompt_template",
+    "email_subject",
+    "email_body",
+    "orm_ticket"
+  ],
+  "properties": {
+    "project_name": {
+      "type": "string",
+      "description": "Extract the program/project name from the Confluence page title and/or the Project Overview/Scope section; if multiple names appear, choose the one that best describes the initiative in plain language (expand acronyms on first use).",
+      "maxLength": 200
+    },
+    "meeting_context": {
+      "type": "string",
+      "description": "Write a 1\u20132 sentence context line for the weekly stakeholder meeting pre-read in a formal voice, referencing the project name and that this email is the pre-read for the upcoming weekly stakeholder sync; do not include or invent a meeting date/time.",
+      "maxLength": 500
+    },
+    "rag_summary": {
+      "type": "string",
+      "description": "Derive a single Red/Amber/Green status by aggregating the WBS task statuses, due dates, and the latest dated Task Status Updates; always include a 1-sentence justification grounded in what is on-track vs slipping and any open blockers/risks.",
+      "maxLength": 500
+    },
+    "schedule_health": {
+      "type": "string",
+      "description": "Derive schedule health by summarising milestone/due-date adherence from the Key Milestone section plus WBS due dates and dated status updates; state whether the plan is on track, at risk, or slipping and cite the most relevant date(s) driving that assessment.",
+      "maxLength": 500
+    },
+    "blocking_issues": {
+      "type": "array",
+      "description": "Derive blockers by aggregating items explicitly labelled as issues/blockers and any WBS rows or status updates indicating 'blocked', 'failed', 'waiting on', or requiring fixes; for each blocker include: description, owner (team/person), target_resolution (date if stated), and critical_path (true if it gates a milestone or multiple downstream tasks). Return an empty array if none are evidenced.",
+      "maxLength": 2000
+    },
+    "dependencies": {
+      "type": "array",
+      "description": "Derive dependencies by aggregating the WBS dependency column/rows and any narrative dependency statements in updates (e.g., 'depends on tool change'); for each dependency include: depends_on (what), blocked_by (if stated), owner, and status (on-track/at-risk/blocked) based on the latest update text.",
+      "maxLength": 2000
+    },
+    "risks": {
+      "type": "array",
+      "description": "Derive risks by aggregating any risk statements and implied risks from status updates (e.g., testing not complete, rollout date TBD); express each as 'X is at risk because Y; mitigation is Z.' Include owner if stated; do not fabricate mitigations\u2014use 'mitigation TBD' if none is provided.",
+      "maxLength": 2000
+    },
+    "next_steps": {
+      "type": "array",
+      "description": "Derive next steps by aggregating explicit action items and forward-looking statements in Task Status Updates and WBS notes; each item must include: action, owner, and due (a date if stated, otherwise 'this week'/'this sprint' as evidenced). Keep to the top 5\u201310 most material items for exec readability.",
+      "maxLength": 2000
+    },
+    "exec_asks": {
+      "type": "array",
+      "description": "Derive exec asks by aggregating any requests for decisions, approvals, resourcing, escalations, or cross-team unblocks found in status updates, dependencies, and blockers; rewrite them as clear asks with: ask, requested_of (role/team if stated, otherwise 'Stakeholders'), and needed_by (date if stated, otherwise 'before next sync'). Return an empty array if none are evidenced.",
+      "maxLength": 2000
+    },
+    "stakeholder_pocs": {
+      "type": "array",
+      "description": "Extract stakeholder points of contact from the Stakeholders/Contacts table; include name, email (if present), and role/team. Use this to populate the 'To:' suggestion list for the email draft (do not guess missing emails).",
+      "maxLength": 2000
+    },
+    "reference_links": {
+      "type": "array",
+      "description": "Extract the most relevant pre-read links from the tracking page: design/architecture docs, repository, Jira links (epics/bugs), test plan link, and Slack channel; include label + URL (or Confluence link text) and keep to the top 8 links.",
+      "maxLength": 2000
+    },
+    "team_status_prompt_template": {
+      "type": "string",
+      "description": "Generate an exec/POC-ready reply template that prompts each team to provide: status, blockers, risks, dependencies, actions, owners, and ETAs; format as a compact table teams can reply inline with (Team | Status | Blockers | Risks | Deps | Actions/Owners/ETAs).",
+      "maxLength": 2000
+    },
+    "email_subject": {
+      "type": "string",
+      "description": "Generate the email subject exactly as: Weekly status for project : <Title of the confluence page>. If multiple Confluence URLs/pages are provided, make a best-judgment call on the most appropriate overall project name/title and use that in the subject.",
+      "maxLength": 200
+    },
+    "email_body": {
+      "type": "string",
+      "description": "Compose the full pre-read agenda email in a formal, exec-safe voice: include meeting_context, RAG + justification, schedule_health, top blockers, top risks, key dependencies, next steps, exec asks, and reference_links; end with the team_status_prompt_template and a clear request to reply with updates before the meeting. Keep scannable with headings and bullets.",
+      "maxLength": 5000
+    },
+    "orm_ticket": {
+      "type": "string",
+      "description": "Extract the ORM ticket/link if explicitly present (e.g., an ORM ID or URL). If the page only contains a placeholder (e.g., '<insert ORM ticket>') or no ORM reference, return an empty string.",
+      "maxLength": 200
+    }
+  },
+  "additionalProperties": false
+}

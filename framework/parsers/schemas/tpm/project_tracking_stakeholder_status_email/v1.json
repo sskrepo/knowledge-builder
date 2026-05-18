@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/tpm/project_tracking_stakeholder_status_email/v1.json",
+  "title": "tpm \u2014 project_tracking_stakeholder_status_email \u2014 v1",
+  "description": "Synthesized by skill_builder for persona=tpm, kb=project_tracking_stakeholder_status_email. Refine before promoting.",
+  "type": "object",
+  "required": [
+    "project_name",
+    "project_overview",
+    "executive_summary_status_raw",
+    "rag_summary",
+    "schedule_health",
+    "blocking_issues",
+    "next_steps",
+    "exec_asks",
+    "workstreams",
+    "stakeholders_people",
+    "stakeholder_emails",
+    "project_jira_links",
+    "project_repository_link",
+    "slack_channel_labels",
+    "test_plan_link",
+    "feature_flags",
+    "recent_updates_by_date",
+    "agenda_email_eml_draft"
+  ],
+  "properties": {
+    "project_name": {
+      "type": "string",
+      "description": "Extract the project/program name as stated on the tracking page header or in the Project Overview/Scope section; if multiple names appear, choose the most repeated/primary name used in links and headings.",
+      "maxLength": 200
+    },
+    "project_overview": {
+      "type": "string",
+      "description": "Extract the 1\u20132 sentence Project Overview from the tracking page's 'Project Overview' section; keep it exec-safe and avoid internal acronyms unless expanded in the source.",
+      "maxLength": 500
+    },
+    "executive_summary_status_raw": {
+      "type": "string",
+      "description": "Extract the 'Executive Summary Status' block verbatim (light cleanup allowed for readability) from the tracking page; preserve key links/ticket references included in that block.",
+      "maxLength": 2000
+    },
+    "rag_summary": {
+      "type": "string",
+      "description": "Derive a single RAG (Red/Amber/Green) status with a 1-sentence justification by aggregating: (a) WBS task statuses (e.g., GreenComplete vs in-progress), (b) dated WBS status updates from the last ~7 days, and (c) open bug tracking items; format as 'RAG: <color> \u2014 <justification>'.",
+      "maxLength": 500
+    },
+    "schedule_health": {
+      "type": "string",
+      "description": "Derive schedule health (On track / At risk / Off track) with a 1-sentence justification by combining: WBS due dates (if present), dependency notes, and the most recent dated status updates indicating slippage or completion; if due dates are missing, state that schedule confidence is limited due to missing dates and base the assessment on progress cadence.",
+      "maxLength": 500
+    },
+    "blocking_issues": {
+      "type": "array",
+      "description": "Derive the list of open blockers by aggregating: (1) items explicitly labeled as issues/bugs in 'Bug Tracking', and (2) WBS status updates that indicate 'blocked', 'waiting on', 'dependency', or 'issue encountered'; for each blocker include description, owner (team/person if stated), target resolution date if stated, and whether it appears critical-path based on dependency language.",
+      "maxLength": 2000
+    },
+    "next_steps": {
+      "type": "array",
+      "description": "Derive time-bound next steps by summarising action-oriented statements from the most recent WBS status updates and any explicit action items on the page; each item must include an owner (team/person) and a due timeframe ('by <date>' if present, otherwise 'this sprint' or 'next week' based on the update context).",
+      "maxLength": 2000
+    },
+    "exec_asks": {
+      "type": "array",
+      "description": "Derive executive asks by aggregating implicit requests/needs from WBS updates, dependency notes, and bug tracking commentary (e.g., requests for environments, approvals, resourcing); only include asks that are explicitly implied by the source text, and for each include the ask, the requester/owner, and the decision/assistance needed.",
+      "maxLength": 2000
+    },
+    "workstreams": {
+      "type": "array",
+      "description": "Extract the list of workstreams/teams from the 'Project Areas/Leads' and stakeholder team sections (e.g., SCM, FAaaS team, HCP team, ADP); include the lead/POC if stated next to the area.",
+      "maxLength": 2000
+    },
+    "stakeholders_people": {
+      "type": "array",
+      "description": "Extract named stakeholders and their roles from the stakeholder roster section (e.g., Business Sponsor); keep names and roles only.",
+      "maxLength": 2000
+    },
+    "stakeholder_emails": {
+      "type": "array",
+      "description": "Extract stakeholder email addresses listed on the tracking page; do not infer missing emails.",
+      "maxLength": 2000
+    },
+    "project_jira_links": {
+      "type": "array",
+      "description": "Extract the Jira links listed under 'Project Jira Links' (or equivalent); keep as a list of URLs or key+URL if present.",
+      "maxLength": 2000
+    },
+    "project_repository_link": {
+      "type": "string",
+      "description": "Extract the project repository or project folder link from the 'Project Repository' section.",
+      "maxLength": 500
+    },
+    "slack_channel_labels": {
+      "type": "array",
+      "description": "Extract Slack channel references and any project labels from the 'Slack Channel/Labels' section.",
+      "maxLength": 500
+    },
+    "test_plan_link": {
+      "type": "string",
+      "description": "Extract the Test Plan link if present on the tracking page.",
+      "maxLength": 500
+    },
+    "feature_flags": {
+      "type": "array",
+      "description": "Extract feature flag enablement entries (flag name and value/state) from the feature flag section; keep concise.",
+      "maxLength": 2000
+    },
+    "recent_updates_by_date": {
+      "type": "array",
+      "description": "Derive a weekly delta list by aggregating dated entries from WBS 'Task Status Updates' within the last ~7 days relative to the most recent date on the page; include date and 1-line summary of what changed.",
+      "maxLength": 2000
+    },
+    "agenda_email_eml_draft": {
+      "type": "string",
+      "description": "Generate a reviewable RFC-822 .eml draft (plain text body is acceptable) for a weekly tracking meeting agenda email using extracted fields: include subject, To/Cc placeholders, and a structured agenda with sections for orm_status (if unavailable, explicitly mark as 'Not provided on source page'), rag_summary, schedule_health, blocking_issues, and per-workstream next_steps and exec_asks; do not send email.",
+      "maxLength": 20000
+    }
+  },
+  "additionalProperties": false
+}

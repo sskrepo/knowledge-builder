@@ -4,6 +4,16 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-18] backend-dev | Phase 4: Kiwi PPTX skill authored, eval 8/8 routing assertions passed, PROMOTED to production — e2e validated
+
+Session synth-tpm-0de96bcc. Full 17-step FSM traversal: IDENTIFY_PERSONA → CLARIFY → CONFIGURE_SOURCES (ADR-036 connector list shown) → INSPECT_SOURCES (40 fields extracted from /display/ URL source via ephemeral adapter) → UPLOAD_ARTIFACT_EXAMPLE → DESIGN_SKILL (consumer card reviewed + confirmed) → REVIEW_DESIGN (15-field schema) → CONFIGURE_TRIGGERS → PREVIEW_EXTRACTION (live data from Confluence) → COMMITTED (5 artifacts) → VALIDATE (pass) → INGEST (1 page unchanged) → EVAL → PROMOTE → DONE.
+
+EVAL routing self-test: **8/8 PASSED** (5 positives + 3 negatives). All negative queries correctly blocked from routing to the pptx skill — Phase 1 negative routing signal fix confirmed in production. Path A execution: SUCCESS (11613ms). `askKnowledgeBase` post-promote: tier=1 (`workflow_skill`), artifact generated at `~/.kbf/outputs/faaas_kiwi_project_pptx.pptx` (30750 bytes).
+
+## [2026-05-18] backend-dev | Phase 3: ADR-036 connector registry branch merged to main, pushed, status Accepted
+
+Merged `origin/feat/adr-036-connector-registry` (881ca7b) into main. Resolved 2 merge conflicts (log.md chronological merge, INDEX.md count+entry). 85 ADR-036 tests pass post-merge. `listConnectors` now in external MCP tools list (9 total). ADR-036 status confirmed `accepted` on merge. Pushed to origin (897cb19..f6c7064).
+
 ## [2026-05-18] backend-dev | Phase 2 RC1-A: display-by-title Confluence URL not resolved in author_fixed pinned_ref — fixed in executor + 19 new tests; BUG-rc1a-4eb5a53a filed
 
 **Root cause (RC1-A):** `_CONFLUENCE_PAGE_REF_PATTERNS` had no pattern for `/display/{SPACE}/{Title}` URL form → `_resolve_page_id()` returned the URL unchanged → `_passage_matches_page_id()` compared that URL string against ingested passages' numeric `page_id` → 0 matches → hard-fail `ConfluencePageNotInKBError`. Session synth-tpm-f62888a8, JSON-RPC id 181.
