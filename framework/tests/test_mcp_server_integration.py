@@ -195,9 +195,10 @@ class TestMcpToolsList:
         assert resp.status_code == 200
 
     def test_returns_exactly_five_tools(self, integration_client):
+        # deleteSkill/listSkills/getSkill added → 8 tools total
         resp = integration_client.post("/mcp/tools/list", headers=_auth_headers(integration_client))
         tools = resp.json()["tools"]
-        assert len(tools) == 5
+        assert len(tools) == 8
 
     def test_tool_names_are_correct(self, integration_client):
         resp = integration_client.post("/mcp/tools/list", headers=_auth_headers(integration_client))
@@ -205,6 +206,7 @@ class TestMcpToolsList:
         assert names == {
             "askKnowledgeBase", "authorSkill", "reportBug",
             "uploadArtifact", "reviewSkillSession",
+            "deleteSkill", "listSkills", "getSkill",
         }
 
     def test_each_tool_has_input_schema(self, integration_client):

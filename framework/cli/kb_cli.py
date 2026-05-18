@@ -103,7 +103,7 @@ def cmd_validate(args):
     for kb in cfg.get("knowledge_bases", []):
         if "name" not in kb:
             errors.append(f"kb missing name: {kb}")
-        if kb.get("kind") not in {"vector", "wiki", "graph", "sql_passthrough", "code_index", "filestore"}:
+        if kb.get("kind") not in {"vector", "wiki", "graph", "sql_passthrough", "code_index", "filestore", "adb"}:
             errors.append(f"kb {kb.get('name')}: invalid kind {kb.get('kind')!r}")
     if errors:
         for e in errors:

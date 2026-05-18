@@ -37,6 +37,13 @@ import pytest
 if "oracledb" not in sys.modules:
     _stub = types.ModuleType("oracledb")
     _stub.create_pool = MagicMock(return_value=MagicMock())  # type: ignore[attr-defined]
+    # Add DB_TYPE_* sentinels so that other test modules that use oracledb.DB_TYPE_CLOB
+    # (e.g. test_skill_store, test_adb_error_store) do not fail with AttributeError
+    # when this stub is injected into sys.modules before the real oracledb is imported.
+    # The sentinel values are arbitrary — tests only need them to be truthy/passable.
+    _stub.DB_TYPE_CLOB = object()  # type: ignore[attr-defined]
+    _stub.DB_TYPE_NCLOB = object()  # type: ignore[attr-defined]
+    _stub.DB_TYPE_VARCHAR = object()  # type: ignore[attr-defined]
     sys.modules["oracledb"] = _stub
 
 from framework.core.adb_pool import (  # noqa: E402 — must come after stub injection

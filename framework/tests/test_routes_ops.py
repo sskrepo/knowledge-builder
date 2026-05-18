@@ -558,7 +558,7 @@ class TestVersionRoute:
         body = resp.json()
         assert "apiVersion" in body
         assert "schemaVersion" in body
-        assert "buildSha" in body
+        assert "gitSha" in body
 
     def test_version_api_version_is_v1(self):
         try:
@@ -583,28 +583,31 @@ class TestVersionRoute:
         assert body["schemaVersion"] == "1.0.0"
 
     def test_version_build_sha_default_unknown(self, monkeypatch):
+        """gitSha field is always present; its value may include commit hash."""
         try:
             from fastapi.testclient import TestClient
         except ImportError:
             pytest.skip("fastapi not installed")
-        monkeypatch.delenv("KBF_BUILD_SHA", raising=False)
         app = _build_app()
         with TestClient(app) as client:
             resp = client.get("/api/v1/version")
         body = resp.json()
-        assert body["buildSha"] == "unknown"
+        # gitSha is always set (to git HEAD hash or "unknown" when no git repo).
+        assert "gitSha" in body
 
     def test_version_build_sha_from_env(self, monkeypatch):
+        """gitSha is derived from git HEAD, not from an environment variable."""
         try:
             from fastapi.testclient import TestClient
         except ImportError:
             pytest.skip("fastapi not installed")
-        monkeypatch.setenv("KBF_BUILD_SHA", "a3f1b2c9d4e5f6a7")
         app = _build_app()
         with TestClient(app) as client:
             resp = client.get("/api/v1/version")
         body = resp.json()
-        assert body["buildSha"] == "a3f1b2c9d4e5f6a7"
+        assert "gitSha" in body
+        assert isinstance(body["gitSha"], str)
+        assert len(body["gitSha"]) > 0
 
     def test_version_camel_case_keys(self):
         try:

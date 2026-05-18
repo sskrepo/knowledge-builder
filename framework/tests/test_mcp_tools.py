@@ -53,14 +53,15 @@ def _run(coro):
 
 class TestExternalToolsSchema:
     def test_exactly_five_entries(self):
-        # ADR-023 added reviewSkillSession — now 5 tools
-        assert len(EXTERNAL_TOOLS_SCHEMA) == 5
+        # ADR-023 added reviewSkillSession; later added deleteSkill/listSkills/getSkill → 8 tools
+        assert len(EXTERNAL_TOOLS_SCHEMA) == 8
 
     def test_names_are_correct(self):
         names = {t["name"] for t in EXTERNAL_TOOLS_SCHEMA}
         assert names == {
             "askKnowledgeBase", "authorSkill", "reportBug",
             "uploadArtifact", "reviewSkillSession",
+            "deleteSkill", "listSkills", "getSkill",
         }
 
     def test_each_entry_has_name_description_inputschema(self):
@@ -132,10 +133,10 @@ class TestBuildExternalToolRegistry:
         assert isinstance(registry, dict)
 
     def test_exactly_five_tools(self):
-        # ADR-023 added reviewSkillSession — now 5 tools
+        # ADR-023 added reviewSkillSession; later added deleteSkill/listSkills/getSkill → 8 tools
         app = _make_mock_app()
         registry = build_external_tool_registry(app)
-        assert len(registry) == 5
+        assert len(registry) == 8
 
     def test_tool_names_match_schema(self):
         app = _make_mock_app()
@@ -143,6 +144,7 @@ class TestBuildExternalToolRegistry:
         assert set(registry.keys()) == {
             "askKnowledgeBase", "authorSkill", "reportBug",
             "uploadArtifact", "reviewSkillSession",
+            "deleteSkill", "listSkills", "getSkill",
         }
 
     def test_ask_handler_is_callable(self):
