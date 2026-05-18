@@ -1017,3 +1017,150 @@ class TestResolveOnlyNegativeSignals:
         assert result["matched"] is True, (
             "Shared positive/negative vocabulary should not over-penalise a positive query"
         )
+
+
+# ---------------------------------------------------------------------------
+# do_not_invoke_if_phrases — hard phrase exclusion (DECISION-013 Gate-4 fix)
+# ---------------------------------------------------------------------------
+
+def _make_card_with_phrases(
+    name: str,
+    positives: list[str],
+    negatives: list[str],
+    phrases: list[str],
+    summary: str = "",
+) -> dict:
+    """Build a card dict with do_not_invoke_if_phrases."""
+    return {
+        "name": name,
+        "persona": "tpm",
+        "summary": summary,
+        "use_when": "",
+        "example_invocations": positives[:2] if positives else [],
+        "_cfg": {
+            "skill_card": {
+                "summary": summary,
+                "routing_queries": {
+                    "positive": positives,
+                    "negative": negatives,
+                },
+                "do_not_invoke_if_phrases": phrases,
+            },
+        },
+    }
+
+
+class TestDoNotInvokeIfPhrases:
+    """do_not_invoke_if_phrases: hard exclusion when query contains a listed phrase.
+
+    Added 2026-05-18 to cover the Gate-4 edge case where shared vocabulary
+    (Kiwi Project) inflates positive overlap beyond what token-level negative
+    penalty can suppress.  Phrase matching is a pre-scoring hard veto.
+    """
+
+    def _make_shim(self, card: dict) -> ShimWorkflows:
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        wf_dir = Path(tmp) / "workflow_skills"
+        persona_dir = wf_dir / (card.get("persona") or "tpm")
+        persona_dir.mkdir(parents=True, exist_ok=True)
+        skill_name = card.get("name", "test_skill")
+        skill_card = (card.get("_cfg") or {}).get("skill_card") or {}
+        skill_yaml = {
+            "workflow_skill": skill_name,
+            "persona": card.get("persona", "tpm"),
+            "status": "promoted",
+            "trigger": {"on_request": {"enabled": True, "output_format": "pptx"}},
+            "skill_card": skill_card,
+        }
+        (persona_dir / f"{skill_name}.yaml").write_text(
+            yaml.safe_dump(skill_yaml, sort_keys=False)
+        )
+        shim = ShimWorkflows(wf_dir, skill_store=None)
+        shim._cards = [card]
+        shim._disk_cards = [card]
+        return shim
+
+    def test_positive_query_not_excluded_by_phrase(self):
+        """Positive queries that do not contain the exclusion phrase still route."""
+        card = _make_card_with_phrases(
+            name="kiwi_pptx",
+            positives=["create kiwi project pptx for exec review"],
+            negatives=[],
+            phrases=["not a pptx", "as a confluence page"],
+        )
+        shim = self._make_shim(card)
+        result = shim.resolve_only("create kiwi project pptx for exec review")
+        assert result["matched"] is True
+        assert result["skill_name"] == "kiwi_pptx"
+
+    def test_query_with_exclusion_phrase_is_skipped(self):
+        """Query containing an exact exclusion phrase must NOT route to the skill."""
+        card = _make_card_with_phrases(
+            name="kiwi_pptx",
+            positives=["create kiwi project pptx for exec review"],
+            negatives=[],
+            phrases=["not a pptx"],
+        )
+        shim = self._make_shim(card)
+        result = shim.resolve_only(
+            "write kiwi project lcm update as a confluence page (not a pptx)"
+        )
+        assert result.get("skill_name") != "kiwi_pptx", (
+            "Query containing 'not a pptx' must NOT route to kiwi_pptx — "
+            f"got skill_name={result.get('skill_name')!r}"
+        )
+
+    def test_phrase_match_is_case_insensitive(self):
+        """Phrase exclusion must be case-insensitive."""
+        card = _make_card_with_phrases(
+            name="kiwi_pptx",
+            positives=["create kiwi project pptx for exec review"],
+            negatives=[],
+            phrases=["Not A PPTX"],
+        )
+        shim = self._make_shim(card)
+        result = shim.resolve_only("kiwi project update (not a pptx) please")
+        assert result.get("skill_name") != "kiwi_pptx", (
+            "Phrase exclusion must be case-insensitive"
+        )
+
+    def test_phrase_exclusion_does_not_affect_other_skills(self):
+        """Phrase exclusion on skill A must not affect routing of skill B."""
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        wf_dir = Path(tmp) / "workflow_skills"
+        tpm_dir = wf_dir / "tpm"
+        tpm_dir.mkdir(parents=True, exist_ok=True)
+
+        # Skill A: kiwi pptx with phrase exclusion
+        skill_a = {
+            "workflow_skill": "kiwi_pptx",
+            "persona": "tpm",
+            "status": "promoted",
+            "trigger": {"on_request": {"enabled": True}},
+            "skill_card": {
+                "summary": "Kiwi PPTX",
+                "routing_queries": {"positive": ["create kiwi project pptx"]},
+                "do_not_invoke_if_phrases": ["not a pptx"],
+            },
+        }
+        # Skill B: email skill without exclusion
+        skill_b = {
+            "workflow_skill": "status_email",
+            "persona": "tpm",
+            "status": "promoted",
+            "trigger": {"on_request": {"enabled": True}},
+            "skill_card": {
+                "summary": "Stakeholder email",
+                "routing_queries": {"positive": ["send stakeholder email update"]},
+            },
+        }
+        (tpm_dir / "kiwi_pptx.yaml").write_text(yaml.safe_dump(skill_a))
+        (tpm_dir / "status_email.yaml").write_text(yaml.safe_dump(skill_b))
+
+        shim = ShimWorkflows(wf_dir, skill_store=None)
+        result = shim.resolve_only("send stakeholder email update")
+        assert result.get("skill_name") == "status_email", (
+            "Phrase exclusion on kiwi_pptx must not prevent status_email from routing"
+        )

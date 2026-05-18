@@ -77,6 +77,7 @@ def _cfg_to_card(cfg: dict, source: str = "disk", path: str = "") -> dict:
         "use_when": sc.get("use_when"),
         "example_invocations": sc.get("example_invocations", []),
         "do_not_use_for": sc.get("do_not_use_for"),
+        "do_not_invoke_if_phrases": sc.get("do_not_invoke_if_phrases"),
         "inputs": (triggers.get("on_request") or {}).get("inputs", []),
         "output_format": (triggers.get("on_request") or {}).get("output_format"),
         "on_request": on_request,
@@ -371,6 +372,12 @@ class ShimWorkflows:
         # PENALISE the score — queries that overlap more with negatives than positives
         # will not route to this skill (DECISION-013 Phase-1 precision fix).
         #
+        # do_not_invoke_if_phrases: exact-phrase hard exclusion (skill_card field).
+        # If the query contains any listed phrase (case-insensitive substring match),
+        # the card score is forced to 0 before overlap scoring.  This handles cases
+        # where shared vocabulary (e.g. project name) inflates positive overlap beyond
+        # what token-level negative penalty can suppress.
+        #
         # A real vector search can be plugged in here when available.
         query_lower = query.lower()
         query_tokens = set(query_lower.split())
@@ -381,6 +388,13 @@ class ShimWorkflows:
         for card in candidate_cards:
             card_tokens: set[str] = set()
             neg_tokens: set[str] = set()
+
+            # Hard phrase exclusion: do_not_invoke_if_phrases is a list of
+            # substrings; if any matches the query, skip this card entirely.
+            skill_card_check = (card.get("_cfg") or {}).get("skill_card") or {}
+            hard_excl = skill_card_check.get("do_not_invoke_if_phrases") or []
+            if any(phrase.lower() in query_lower for phrase in hard_excl):
+                continue
 
             # Extract tokens from all routing signal fields
             skill_card = (card.get("_cfg") or {}).get("skill_card") or {}

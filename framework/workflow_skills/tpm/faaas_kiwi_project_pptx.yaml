@@ -46,6 +46,15 @@ skill_card:
     - Create a Q3 roadmap slide deck for OCI Networking and include competitive analysis.
     - What is the current RAG status for the Kiwi Project?
     - Write a one-page Kiwi Project LCM update as a Confluence page (not a pptx).
+  # do_not_invoke_if_phrases: case-insensitive substring list for hard phrase exclusion.
+  # The token-overlap classifier cannot zero out scores when shared vocabulary (Kiwi,
+  # Project, LCM) inflates positive overlap.  Phrases here are checked before scoring;
+  # any match skips this skill entirely.  Handles output-format rejection signals.
+  do_not_invoke_if_phrases:
+  - "not a pptx"
+  - "as a confluence page"
+  - "not pptx"
+  - "write as a page"
 requires_extractions:
 - kb: tpm.faaas_kiwi_project_pptx
   required_fields:
