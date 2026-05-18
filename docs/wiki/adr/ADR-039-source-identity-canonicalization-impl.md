@@ -1,6 +1,6 @@
 ---
 title: ADR-039 — Source Identity Canonicalization Implementation
-status: proposed
+status: accepted
 created: 2026-05-18
 owner: architect
 deciders: user, architect
@@ -11,7 +11,7 @@ tags: [adr, identity, canonicalization, adapter-abc, eval-integrity, source-bind
 
 # ADR-039 — Source Identity Canonicalization Implementation
 
-> **Status: PROPOSED — pending user review of identity-derivation logic before merge**
+> **Status: ACCEPTED — merged to main per user approval (2026-05-18)**
 
 ---
 
