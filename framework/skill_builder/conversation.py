@@ -1071,6 +1071,29 @@ class SkillBuilderConversation:
         # output or sessions restored from pre-ADR-032 ADB state).
         sb_mode = normalised.get("source_binding_mode", "author_fixed")
         sb_signal = normalised.get("source_binding_signal", "")
+
+        # DECISION-019 Phase A fix: deterministic auto-resolution for "ambiguous" mode.
+        # When the LLM returns "ambiguous" but the intent text already contains a specific
+        # Confluence display URL (e.g. /display/SPACE/Title), the source is DEFINITIVELY
+        # fixed at author time — no CLARIFY question needed.  Auto-resolve to author_fixed
+        # so the unnecessary blocking CLARIFY question is suppressed and the session does
+        # not get stuck in "ambiguous" state all the way to synthesis.
+        #
+        # Rationale: a display URL is an unambiguous fixed-source signal.  The LLM may
+        # still emit "ambiguous" if the phrasing is unusual (e.g. "using fixed Confluence
+        # source" + URL), but the URL presence is deterministic evidence.
+        # Per ADR-031 §no-silent-degradation: we log the auto-resolution so it is auditable.
+        if sb_mode == "ambiguous" and _intent_contains_fixed_confluence_url(
+            self._data.intent_description or ""
+        ):
+            sb_mode = "author_fixed"
+            log.info(
+                "_advance_to_capture_intent: auto-resolved source_binding_mode "
+                "ambiguous → author_fixed (Confluence display URL detected in intent "
+                "— deterministic fixed-source signal). signal=%r",
+                sb_signal[:80] if sb_signal else "",
+            )
+
         self._data.source_binding_mode = sb_mode
         self._data.source_binding_signal = sb_signal
         log.info(
@@ -1087,6 +1110,24 @@ class SkillBuilderConversation:
         # treat all of them as blocking (safer default — prevent silent steamrolling).
         if ambiguities and not blocking_ambiguities and not nice_to_know_ambiguities:
             blocking_ambiguities = ambiguities
+
+        # DECISION-019 Phase A fix: when source_binding_mode was resolved from
+        # "ambiguous" → "author_fixed" via URL detection above, strip the
+        # source-binding clarification question from blocking_ambiguities so CLARIFY
+        # is not triggered for it.  Other blocking questions (schema, format, etc.)
+        # are unaffected.
+        if sb_mode == "author_fixed" and blocking_ambiguities:
+            _SB_FRAG = "source page fixed at authoring time or supplied"
+            pre_count = len(blocking_ambiguities)
+            blocking_ambiguities = [
+                q for q in blocking_ambiguities if _SB_FRAG not in q
+            ]
+            if len(blocking_ambiguities) < pre_count:
+                log.info(
+                    "_advance_to_capture_intent: stripped source-binding CLARIFY "
+                    "question (mode resolved to author_fixed). remaining=%d",
+                    len(blocking_ambiguities),
+                )
 
         # ADR-028 S3: route to CLARIFY when blocking ambiguities exist.
         # ADR-032 P1-C: when source_binding_mode is ask_parameterized or ambiguous,
@@ -6269,6 +6310,46 @@ class SkillBuilderConversation:
         # by INSPECT_SOURCES.  URL-form sources and explicit source.space fields are
         # fallbacks.
         sb_mode = self._data.source_binding_mode
+
+        # DECISION-019 Phase A safety net: if source_binding_mode is still "ambiguous"
+        # at synthesis time (i.e. the CLARIFY question was asked but not definitively
+        # answered, or the session was resumed from ADB in ambiguous state), auto-resolve
+        # using the same deterministic heuristic as _advance_to_capture_intent:
+        #   — If sources/source_samples carry a Confluence URL → author_fixed (fixed page).
+        #   — Otherwise → author_fixed (safer default per ADR-032 §H migration rule; a
+        #     skill with no fixed external source and no parameterized input is a pure
+        #     in-KB skill, which is author_fixed by definition).
+        # This ensures derive_pinned_source() is always called for sessions with a
+        # Confluence URL source, and the committed artifact carries source_binding
+        # instead of the hollow null-binding state.
+        if sb_mode == "ambiguous":
+            has_confluence_source = bool(
+                self._data.source_samples
+                or any(
+                    src.get("page_url", "").startswith("http")
+                    or any(
+                        (p.startswith("http") if isinstance(p, str) else False)
+                        for p in (src.get("pages") or [])
+                    )
+                    for src in (self._data.sources or [])
+                )
+                or _intent_contains_fixed_confluence_url(
+                    self._data.intent_description or ""
+                )
+            )
+            sb_mode = "author_fixed"
+            log.warning(
+                "_synthesize_preview: source_binding_mode was 'ambiguous' at synthesis "
+                "— auto-resolved to author_fixed "
+                "(has_confluence_source=%s, DECISION-019 Phase A safety net). "
+                "skill=%s",
+                has_confluence_source,
+                skill_name,
+            )
+            # Persist the resolved mode back to session data so VALIDATE / PROMOTE
+            # read the correct value from ADB.
+            self._data.source_binding_mode = sb_mode
+
         derived_space_allow_list: list[str] = []
         derived_pinned_source: dict | None = None
 
@@ -6495,6 +6576,47 @@ def _parse_field_edits(user_input: str) -> list[tuple]:
         elif m_rename:
             edits.append(("rename", m_rename.group(1), m_rename.group(2)))
     return edits
+
+
+def _intent_contains_fixed_confluence_url(intent_text: str) -> bool:
+    """Return True if the intent description contains a Confluence display URL.
+
+    A Confluence /display/{SPACE}/{Title} URL is a deterministic signal that the
+    author is specifying a FIXED source page — not parameterized.  This helper is
+    used by _advance_to_capture_intent to auto-resolve source_binding_mode from
+    "ambiguous" to "author_fixed" without requiring a CLARIFY round-trip.
+
+    Matches:
+      https://.../display/SPACE/Page+Title
+      https://.../confluence/display/SPACE/Page+Title
+      https://.../wiki/spaces/SPACE/pages/NNN/...
+      https://.../pages/NNN (numeric page ID in URL — also a fixed reference)
+      pageId=NNN patterns in intent text
+
+    Does NOT match:
+      Generic Confluence server mentions without a specific page path.
+      "for any Confluence page" style phrasing.
+    """
+    if not intent_text:
+        return False
+
+    # Pattern 1: /display/{SPACE}/{non-empty-path} — most reliable fixed-page signal
+    if re.search(r"/display/[A-Z0-9_\-]+/\S", intent_text, re.IGNORECASE):
+        return True
+
+    # Pattern 2: /wiki/spaces/{SPACE}/pages/{numeric-id} — Cloud URL with page ID
+    if re.search(r"/wiki/spaces/[A-Z0-9_\-]+/pages/\d+", intent_text, re.IGNORECASE):
+        return True
+
+    # Pattern 3: /pages/{numeric-id} — direct page link
+    if re.search(r"/pages/\d{6,}", intent_text):
+        return True
+
+    # Pattern 4: pageId=NNN parameter (numeric, >= 6 digits)
+    if re.search(r"pageId=\d{6,}", intent_text, re.IGNORECASE):
+        return True
+
+    return False
 
 
 def _extract_confluence_page_id(url: str) -> str | None:
