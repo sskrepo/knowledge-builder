@@ -116,6 +116,24 @@ class TestSynthesizePreviewAmbiguousResolution:
         conv._skill_store = MagicMock()
         return conv
 
+    def _mock_confluence_adapter(self, canonical_id: str = "18625350641"):
+        """Return a mock Confluence adapter that resolves any ref to the given numeric id.
+
+        ADR-039 bind-side fix: _synthesize_preview now calls _build_confluence_adapter
+        and invokes canonical_identity at author time.  Tests that call _synthesize_preview
+        with external Confluence URL sources must provide a mock adapter — otherwise the
+        function correctly raises PinnedSourceCanonicalizationError (no real config in CI).
+        """
+        from framework.adapters._base import CanonicalRef
+        mock_adapter = MagicMock()
+        mock_adapter.canonical_identity.return_value = CanonicalRef(
+            connector_id="confluence",
+            resource_type="page",
+            canonical_id=canonical_id,
+            display_hint="FAaaS Kiwi Project",
+        )
+        return mock_adapter
+
     def test_ambiguous_with_confluence_url_source_resolves_to_author_fixed(self):
         """ambiguous + Confluence URL source → _synthesize_preview resolves to author_fixed."""
         conv = self._make_conv(
@@ -135,7 +153,11 @@ class TestSynthesizePreviewAmbiguousResolution:
                 "display/OCIFACP/FAaaS+Kiwi+Project"
             ),
         )
-        artifacts = conv._synthesize_preview()
+        with patch(
+            "framework.skill_builder.conversation._build_confluence_adapter",
+            return_value=self._mock_confluence_adapter(),
+        ):
+            artifacts = conv._synthesize_preview()
         assert conv._data.source_binding_mode == "author_fixed", (
             "ambiguous mode must be resolved to author_fixed when Confluence URL is present"
         )
@@ -152,11 +174,18 @@ class TestSynthesizePreviewAmbiguousResolution:
             },
             intent_description="generate a weekly pptx from the fixed Confluence source",
         )
-        artifacts = conv._synthesize_preview()
+        with patch(
+            "framework.skill_builder.conversation._build_confluence_adapter",
+            return_value=self._mock_confluence_adapter(),
+        ):
+            artifacts = conv._synthesize_preview()
         assert conv._data.source_binding_mode == "author_fixed"
 
     def test_ambiguous_with_url_source_emits_source_binding_in_artifact(self):
-        """ambiguous + URL source → committed artifact has source_binding with author_fixed mode."""
+        """ambiguous + URL source → committed artifact has source_binding with author_fixed mode.
+
+        Post-ADR-039 bind-fix: pinned_ref is now the NUMERIC canonical_id (not the raw URL).
+        """
         conv = self._make_conv(
             source_binding_mode="ambiguous",
             sources=[{
@@ -169,7 +198,11 @@ class TestSynthesizePreviewAmbiguousResolution:
                 "take a look at https://confluence.oraclecorp.com/confluence/display/OCIFACP/FAaaS+Kiwi+Project"
             ),
         )
-        artifacts = conv._synthesize_preview()
+        with patch(
+            "framework.skill_builder.conversation._build_confluence_adapter",
+            return_value=self._mock_confluence_adapter("18625350641"),
+        ):
+            artifacts = conv._synthesize_preview()
         # Find the workflow skill YAML artifact
         wf_key = [k for k in artifacts.keys() if "workflow_skills" in k or k.endswith(".yaml")
                   and "faaas_kiwi" in k]
@@ -185,8 +218,13 @@ class TestSynthesizePreviewAmbiguousResolution:
             f"source_binding must be emitted for ambiguous+URL session. artifact={wf}"
         )
         assert wf["source_binding"]["mode"] == "author_fixed"
+        # Post-ADR-039 bind-fix: pinned_ref is numeric canonical_id, NOT the raw URL
         assert wf["source_binding"]["pinned_ref"] is not None
         assert wf["source_binding"]["pinned_ref"] != ""
+        assert wf["source_binding"]["pinned_ref"] == "18625350641", (
+            "Post-ADR-039 bind-fix: pinned_ref must be the numeric canonical_id, "
+            f"got: {wf['source_binding']['pinned_ref']!r}"
+        )
 
     def test_ambiguous_no_source_still_resolves_to_author_fixed(self):
         """ambiguous with NO sources → still resolves to author_fixed (pure in-KB default)."""
@@ -196,6 +234,8 @@ class TestSynthesizePreviewAmbiguousResolution:
             source_samples={},
             intent_description="generate a weekly review from internal data",
         )
+        # No adapter mock needed: no external Confluence source → derive_pinned_source
+        # returns None → canonicalize_pinned_source is not called.
         artifacts = conv._synthesize_preview()
         assert conv._data.source_binding_mode == "author_fixed", (
             "ambiguous mode must ALWAYS resolve to author_fixed at synthesis time "
@@ -203,7 +243,11 @@ class TestSynthesizePreviewAmbiguousResolution:
         )
 
     def test_author_fixed_mode_unchanged(self):
-        """author_fixed stays author_fixed at synthesis (no regression)."""
+        """author_fixed stays author_fixed at synthesis (no regression).
+
+        Post-ADR-039 bind-fix: _synthesize_preview calls _build_confluence_adapter
+        to canonicalize the pinned ref. Mock it so the test focuses on mode state.
+        """
         conv = self._make_conv(
             source_binding_mode="author_fixed",
             sources=[{
@@ -214,7 +258,11 @@ class TestSynthesizePreviewAmbiguousResolution:
             source_samples={},
             intent_description="create a pptx from the Kiwi Project page",
         )
-        artifacts = conv._synthesize_preview()
+        with patch(
+            "framework.skill_builder.conversation._build_confluence_adapter",
+            return_value=self._mock_confluence_adapter(),
+        ):
+            artifacts = conv._synthesize_preview()
         assert conv._data.source_binding_mode == "author_fixed"
 
     def test_ask_parameterized_mode_unchanged(self):

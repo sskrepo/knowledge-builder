@@ -693,6 +693,52 @@ Required test cases (all must pass; zero new failures in existing 8-baseline):
 - Migration cost: existing skills with raw-URL pinned_refs must be re-authored.
   This is accepted (DECISION-020 §7).
 
+## Implementation Gap Closed: bind-side canonicalization (2026-05-18)
+
+> **Identified by:** independent ADB inspection of session `synth-tpm-58a9780c`
+> (committed `tpm.faaas_kiwi_project_pptx` artifact had `source_binding.pinned_ref`=raw display URL).
+> **Closed in:** `fix/decision-020-bind-canonicalization` branch; merged to main same day.
+
+### Gap description
+
+The original ADR-039 implementation wired the **read path** (executor) but left the
+**write/bind path** (author-time `_synthesize_preview`) un-wired.
+
+Specifically: `derive_pinned_source()` in `synthesize_workflow.py` returned the raw author
+URL in `pinned_ref` without calling `canonical_identity()`. The executor
+(`_retrieve_author_fixed_pinned`) then called `resolve_to_numeric_id(session=None)` at
+retrieval time — which correctly returned `Unresolvable(TRANSIENT)` for display-by-title
+URLs, surfacing as `ConfluencePageNotInKBError`. This was the correct §4 hard-fail
+behavior but in the wrong place (runtime instead of author time).
+
+### Fix
+
+Added `canonicalize_pinned_source(pinned_source, canonicalize_fn)` in `synthesize_workflow.py`:
+- Called at `_synthesize_preview` time in `conversation.py`, immediately after
+  `derive_pinned_source()` returns a non-None result.
+- Uses the live Confluence adapter (built via `_build_confluence_adapter`) available
+  at author time.
+- On `CanonicalRef`: stores numeric `canonical_id` in `pinned_ref`; serializes full
+  `CanonicalRef` as `canonical_ref`; retains raw URL as non-authoritative `original_ref`.
+- On `Unresolvable`: raises `PinnedSourceCanonicalizationError` immediately — per
+  DECISION-020 §4, the raw URL is NEVER stored and authoring HARD-FAILs with an
+  actionable typed error distinguishing retryable (transient) vs permanent failures.
+
+### INGEST stamping assessment
+
+The INGEST path (`ConfluenceNativeAdapter.normalize()`) already correctly stamps
+`canonical_ref` using `raw_item.source_id` (the numeric page ID from the adapter's
+`fetch()` call). No changes needed to the INGEST side — it was correctly implemented
+in the original ADR-039 merge.
+
+### Parked session note
+
+Session `synth-tpm-58a9780c` retains the artifact with `pinned_ref=raw_display_URL`.
+That session will NOT auto-heal. The user must start a fresh authoring session to obtain
+a correctly canonicalized artifact. The session remains in ADB as evidence of the bug.
+
+---
+
 ## References
 
 - DECISION-020 — authorization for this ADR
