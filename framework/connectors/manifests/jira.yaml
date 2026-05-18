@@ -1,0 +1,26 @@
+connector_id: jira
+display_name: Jira
+description: >
+  Read-only access to Jira issues, filters, epics, and sprints via the
+  Jira REST API. Primary source for incident tickets, roadmap items,
+  and sprint data.
+resource_types:
+  - issue
+  - epic
+  - sprint
+  - filter
+  - project
+supported_operations:
+  - read
+  - query
+  - list
+  - search
+auth_model: api_key
+access_probe_hook: framework.adapters.jira.probe.verify_access
+granularity_filters:
+  - jql_filter
+  - project_key
+  - issue_type
+  - label
+  - sprint_id
+notes: JQL is the primary query language. Filters are pre-saved JQL queries.

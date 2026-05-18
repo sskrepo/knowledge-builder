@@ -1,0 +1,27 @@
+connector_id: udap
+display_name: UDAP / Sentinel Fleet
+description: >
+  Read-through access to the live fleet state database (UDAP/Sentinel).
+  Provides instance inventory, pod state, ops events, and service topology.
+  No re-ingestion — data is queried live via allowlisted views.
+resource_types:
+  - instance
+  - pod
+  - service
+  - ops_event
+  - tenancy
+supported_operations:
+  - query
+  - read
+auth_model: internal_db
+access_probe_hook: framework.adapters.udap_probe.verify_access
+granularity_filters:
+  - tenancy_id
+  - region
+  - service_name
+  - event_type
+  - time_window
+notes: >
+  UDAP/Sentinel is read-through only; no data is copied into framework stores.
+  query_fleet and text_to_sql MCP tools operate over this connector's
+  allowlisted view set.

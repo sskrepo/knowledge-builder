@@ -1,0 +1,23 @@
+connector_id: git
+display_name: Git Repository
+description: >
+  Read-only access to git repository content at a specified ref (branch,
+  tag, or commit SHA). Used for code wiki generation and source file
+  ingestion.
+resource_types:
+  - file
+  - directory
+  - commit
+  - ref
+supported_operations:
+  - read
+  - list
+auth_model: env_service_account
+access_probe_hook: framework.adapters.git_probe.verify_access
+granularity_filters:
+  - ref
+  - path_prefix
+  - file_extension
+notes: >
+  The git adapter supports both local clones and remote clone-on-demand.
+  Large monorepos should scope with path_prefix to avoid full-tree traversal.

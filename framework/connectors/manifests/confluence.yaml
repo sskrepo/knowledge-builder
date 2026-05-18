@@ -1,0 +1,23 @@
+connector_id: confluence
+display_name: Confluence
+description: >
+  Read-only access to Confluence spaces, pages, and attachments via the
+  Confluence REST API. Primary source for PM/TPM wiki content and
+  incident post-mortems.
+resource_types:
+  - page
+  - space
+  - attachment
+  - blog_post
+supported_operations:
+  - read
+  - search
+  - list
+auth_model: api_key
+access_probe_hook: framework.adapters.confluence.probe.verify_access
+granularity_filters:
+  - space_key
+  - label
+  - page_id_list
+  - ancestor_page_id
+notes: ~
