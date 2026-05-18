@@ -17,7 +17,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-from ._base import Adapter, ChangeEvent, HealthReport, RawItem, RawItemRef, SourceQuery
+from ._base import (
+    Adapter, ChangeEvent, HealthReport, RawItem, RawItemRef, SourceQuery,
+    AdapterWithIdentity, CanonicalResult,
+)
 
 _FIXTURES_DIR = Path(__file__).resolve().parents[1] / "_dev_fixtures" / "fleet"
 
@@ -80,7 +83,7 @@ def _record_to_raw_item(record: dict) -> RawItem:
     )
 
 
-class UdapAdapter:
+class UdapAdapter(AdapterWithIdentity):
     """Fleet read-through adapter.
 
     In filestore/dev mode: reads from _dev_fixtures/fleet/ JSON files.
@@ -190,3 +193,20 @@ class UdapAdapter:
         for record in accumulated:
             record_copy = dict(record)
             yield _record_to_ref(record_copy)
+
+    # ------------------------------------------------------------------
+    # ADR-039 (DECISION-020): canonical_identity stub
+    # ------------------------------------------------------------------
+
+    def canonical_identity(self, reference: str, resource_type: str) -> CanonicalResult:
+        """UDAP canonical identity — deferred until production JDBC path implemented.
+
+        Per ADR-036 Amendment 4 / Section O: UDAP is not registered in the
+        Connector Registry because its production JDBC path is not implemented.
+        canonical_identity raises NotImplementedError explicitly (ADR-036 §M.2)
+        so the ABC contract is enforced and UDAP cannot silently pass.
+        """
+        raise NotImplementedError(
+            "UDAP canonical_identity: deferred until production JDBC path is implemented. "
+            "UDAP is not registered in the Connector Registry per ADR-036 Amendment 4."
+        )

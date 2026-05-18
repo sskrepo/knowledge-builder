@@ -181,6 +181,8 @@ class ConnectorRegistry:
         self._dir = manifests_dir or _MANIFESTS_DIR
         self._catalog: dict[str, ConnectorManifest] = {}
         self._loaded = False
+        # ADR-039: adapter instance registry for canonical_identity delegation
+        self._adapter_instances: dict = {}
 
     # ------------------------------------------------------------------
     # Internal loader
@@ -375,12 +377,98 @@ class ConnectorRegistry:
             "Skill design has not been started. No partial state has been saved."
         )
 
+    # ------------------------------------------------------------------
+    # ADR-039 (DECISION-020): canonical_identity chokepoint
+    # ------------------------------------------------------------------
+
+    def canonical_identity(
+        self,
+        connector_id: str,
+        reference: str,
+        resource_type: str,
+    ):
+        """Single chokepoint for all canonical-identity resolution.
+
+        Retrieves the registered adapter instance for connector_id and delegates
+        to its canonical_identity(reference, resource_type). No code outside
+        this chokepoint resolves source identity — not executor.py, not
+        synthesize_workflow.py.
+
+        Per ADR-039 §3 and DECISION-020 §1.
+
+        Parameters
+        ----------
+        connector_id:
+            Registered connector identifier (e.g. "confluence", "jira").
+        reference:
+            Any reference form for the resource (URL, bare id, key, etc.).
+        resource_type:
+            Per ADR-036 manifest resource_types (e.g. "page", "issue").
+
+        Returns
+        -------
+        CanonicalRef or Unresolvable (never a raw string, never None).
+
+        Raises
+        ------
+        ConnectorNotRegisteredError
+            If connector_id is not registered in the manifest catalog.
+        """
+        from ..adapters._base import Unresolvable, UNRESOLVABLE_INVALID_REF
+        self._ensure_loaded()
+        manifest = self._catalog.get(connector_id)
+        if manifest is None:
+            raise ConnectorNotRegisteredError(connector_id)
+
+        # Get the adapter instance for this connector_id.
+        # The registry maintains a lazy adapter instance cache.
+        adapter = self._get_adapter_instance(connector_id)
+        if adapter is None:
+            return Unresolvable(
+                connector_id=connector_id,
+                resource_type=resource_type,
+                reference=reference,
+                reason=UNRESOLVABLE_INVALID_REF,
+                detail=(
+                    f"Connector '{connector_id}' is registered but no adapter instance "
+                    "is configured. Provide an adapter instance via "
+                    "register_adapter_instance() before calling canonical_identity()."
+                ),
+                retryable=False,
+            )
+
+        return adapter.canonical_identity(reference, resource_type)
+
+    def register_adapter_instance(self, connector_id: str, adapter) -> None:
+        """Register an adapter instance for canonical_identity delegation.
+
+        Called at startup (or in tests) to wire a concrete adapter to its
+        connector_id so canonical_identity() can delegate to it.
+
+        The adapter MUST implement canonical_identity (AdapterWithIdentity ABC).
+        """
+        self._adapter_instances[connector_id] = adapter
+
+    def _get_adapter_instance(self, connector_id: str):
+        """Return the registered adapter instance for connector_id, or None."""
+        return self._adapter_instances.get(connector_id)
+
 
 # ---------------------------------------------------------------------------
 # Module-level singleton
 # ---------------------------------------------------------------------------
 
 _registry: Optional[ConnectorRegistry] = None
+
+
+class ConnectorNotRegisteredError(Exception):
+    """Raised when canonical_identity is called for an unregistered connector."""
+    def __init__(self, connector_id: str):
+        self.connector_id = connector_id
+        super().__init__(
+            f"Connector '{connector_id}' is not registered in the Connector Registry. "
+            "Register a manifest first, then call canonical_identity()."
+        )
 
 
 def get_registry() -> ConnectorRegistry:

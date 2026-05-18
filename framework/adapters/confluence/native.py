@@ -13,13 +13,14 @@ from typing import Iterable
 
 from .._base import (
     Adapter, RawItem, RawItemRef, SourceQuery, ChangeEvent, HealthReport,
+    CanonicalResult, AdapterWithIdentity, canonical_ref_to_dict,
 )
-from .shared import resolve_token, to_raw_item
+from .shared import resolve_token, to_raw_item, resolve_to_numeric_id
 
 log = logging.getLogger(__name__)
 
 
-class ConfluenceNativeAdapter:
+class ConfluenceNativeAdapter(AdapterWithIdentity):
     name = "confluence:native"
     kind = "confluence"
     mode = "native"
@@ -146,6 +147,54 @@ class ConfluenceNativeAdapter:
                 source_id=str(page["id"]),
                 timestamp=_parse_iso(page.get("version", {}).get("when")) or datetime.utcnow(),
             )
+
+
+    # ------------------------------------------------------------------
+    # ADR-039 (DECISION-020): canonical_identity implementation
+    # ------------------------------------------------------------------
+
+    def canonical_identity(self, reference: str, resource_type: str) -> CanonicalResult:
+        """Resolve any Confluence reference to a CanonicalRef with numeric page ID.
+
+        Delegates to shared.resolve_to_numeric_id() which implements the full
+        ADR-039 §4 three-step algorithm:
+          Step 1: fast-path numeric extraction from URL patterns (no API call)
+          Step 2: display-by-title URL title lookup (/display/SPACE/Title → id)
+          Step 3: ID validation via /rest/api/content/{id} (verifies existence + access)
+
+        Returns CanonicalRef on success or Unresolvable on any failure.
+        NEVER returns a raw string (eliminates RC1/_resolve_page_id silent-degradation).
+        """
+        return resolve_to_numeric_id(
+            reference=reference,
+            resource_type=resource_type,
+            session=self._session,
+            base_url=self.base_url,
+        )
+
+    def normalize(self, raw_item: "RawItem") -> dict:
+        """Produce a ContentItem dict from a RawItem.
+
+        ADR-039: stamps canonical_ref onto metadata so the executor can compare
+        canonical_id == canonical_id without any URL reconciliation.
+        """
+        meta = dict(raw_item.metadata or {})
+        numeric_id = str(raw_item.source_id)
+        # Stamp canonical_ref — the two-sided stamping required by ADR-039 §7.
+        from .._base import canonical_ref_to_dict, CanonicalRef
+        meta["canonical_ref"] = canonical_ref_to_dict(CanonicalRef(
+            connector_id="confluence",
+            resource_type="page",
+            canonical_id=numeric_id,
+            display_hint=meta.get("title", ""),
+        ))
+        return {
+            "kind": raw_item.kind,
+            "source": raw_item.source,
+            "source_id": raw_item.source_id,
+            "payload": raw_item.payload,
+            "metadata": meta,
+        }
 
 
 def _parse_iso(s: str | None) -> datetime | None:

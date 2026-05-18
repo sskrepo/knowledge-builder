@@ -129,7 +129,7 @@ def maybe_render_artifact(app_state, result: dict, question: str,
     source_binding.input_param is resolved and threaded into the executor
     inputs dict.  The page reference is resolved with this precedence:
       1. Explicit body field matching input_param (e.g. body["page_id"]).
-      2. Extracted from the question string using _extract_confluence_page_ids.
+      2. Extracted from the question string using _extract_numeric_id_fast (ADR-039).
     If no page ref can be resolved for an ask_parameterized skill, the call
     hard-fails with an actionable message (never executes with an empty page id).
 
@@ -263,7 +263,7 @@ def maybe_render_artifact(app_state, result: dict, question: str,
     # ask_parameterized skills: inputs={"input": question, input_param: page_ref}
     #   where page_ref is resolved with precedence:
     #     1. Explicit body field matching input_param (highest priority).
-    #     2. Extracted from the question string via _extract_confluence_page_ids.
+    #     2. Extracted from the question string via _extract_numeric_id_fast (ADR-039).
     #   If neither yields a page ref: hard-fail with actionable message.
     #   Never execute with an empty page id (no silent substitution).
     # -----------------------------------------------------------------------
@@ -272,10 +272,12 @@ def maybe_render_artifact(app_state, result: dict, question: str,
     inputs: dict = {"input": question}
 
     if sb_mode == "ask_parameterized":
-        from ...workflow_runtime.executor import (
-            ConfluencePageNotInKBError,
-            _extract_confluence_page_ids,
-        )
+        from ...workflow_runtime.executor import ConfluencePageNotInKBError
+        # ADR-039 (DECISION-020): _extract_confluence_page_ids deleted.
+        # Use _extract_numeric_id_fast from the adapter's shared helpers to extract
+        # a Confluence page ID from the question text. This is the fast-path numeric
+        # extraction (no API call) — the full canonical resolution happens in the executor.
+        from ...adapters.confluence.shared import _extract_numeric_id_fast
         input_param = source_binding.get("input_param", "page_id")
 
         # Priority 1: explicit body field (e.g. body["page_id"])
@@ -287,14 +289,12 @@ def maybe_render_artifact(app_state, result: dict, question: str,
                 input_param, page_ref,
             )
 
-        # Priority 2: extract from question string
+        # Priority 2: extract from question string using fast-path numeric extraction.
+        # ADR-039: _extract_numeric_id_fast handles all known URL forms (pageId=, /pages/NNN, etc).
         if not page_ref:
-            extracted_ids = _extract_confluence_page_ids({"input": question})
-            if extracted_ids:
-                # Use the full question text as the page_ref so _resolve_page_id
-                # in the executor can extract the numeric ID from the URL/pageId= form.
-                # _extract_confluence_page_ids already extracted the ID; pass it directly.
-                page_ref = extracted_ids[0]
+            extracted_id = _extract_numeric_id_fast(question)
+            if extracted_id:
+                page_ref = extracted_id
                 log.debug(
                     "render: ask_parameterized page_ref extracted from question: %r",
                     page_ref,
