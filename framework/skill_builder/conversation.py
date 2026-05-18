@@ -55,10 +55,52 @@ from ..adapters.confluence.factory import build_confluence_adapter as _build_con
 # ADR-034: layout catalog — provides plain-language preset descriptions injected
 # into design_skill prompt so LLM reasons over descriptions, never over hardcoded ids.
 from ..renderers.layout_catalog import catalog_for_prompt as _layout_catalog_for_prompt  # noqa: E402
+# ADR-036: Connector Registry — type-level capability gate for CONFIGURE_SOURCES.
+# Aliased to avoid shadowing prompt_registry.get_registry imported above.
+from ..connectors.registry import (  # noqa: E402
+    get_registry as _get_connector_registry,
+    format_supported_connectors_block as _format_supported_connectors_block,
+    HARD_STOP as _CONNECTOR_HARD_STOP,
+)
 
 
 # ADR-030 C1: All prompt constants moved to framework/config/prompts/skill_builder.yaml.
 # Use get_registry().get_prompt(prompt_id, ...) at each call site.
+
+
+# ---------------------------------------------------------------------------
+# ADR-036 discoverability: proactive supported-connector block helper
+# ---------------------------------------------------------------------------
+
+def _build_proactive_connector_block() -> str:
+    """Return the proactive 'Supported source connectors' block for CONFIGURE_SOURCES.
+
+    This is shown to the skill author at the TOP of the CONFIGURE_SOURCES prompt
+    BEFORE they specify any sources, so they see what connectors are available
+    without first having to guess-and-fail.
+
+    Rendering is delegated to format_supported_connectors_block() in the
+    connector registry module — the SAME helper that renders the supported-
+    connector list in the hard-stop rejection message.  Both surfaces share
+    a single code path, so they can never drift from each other.
+
+    Returns:
+        Multi-line string suitable for prepending to the CONFIGURE_SOURCES prompt.
+    """
+    try:
+        registry = _get_connector_registry()
+        lines = _format_supported_connectors_block(registry.list_connectors())
+        return (
+            "Supported source connectors:\n"
+            f"{lines}\n"
+        )
+    except Exception as exc:
+        log.warning(
+            "_build_proactive_connector_block: could not load registry (%s) — "
+            "skipping proactive connector list",
+            exc,
+        )
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -1507,10 +1549,12 @@ class SkillBuilderConversation:
                 existing_pages.add(p)
 
         if not self._data.sources:
+            connector_block = _build_proactive_connector_block()
             return ConversationTurn(
                 state="CONFIGURE_SOURCES",
                 message=(
-                    "I could not find specific source references in your intent.\n\n"
+                    (connector_block + "\n" if connector_block else "")
+                    + "I could not find specific source references in your intent.\n\n"
                     "Please provide at least one source:\n"
                     "  • Paste a Confluence page URL or page ID\n"
                     "  • Confluence space: 'confluence SPACE_KEY'\n"
@@ -3783,6 +3827,143 @@ class SkillBuilderConversation:
             options=["yes, continue", "no, let me revise fields"],
         )
 
+    # -- ADR-036: Connector Registry type-check gate -------------------------
+
+    def _gate_source_connector(
+        self,
+        source: dict,
+        user_input: str = "",
+        operation: str | None = None,
+    ) -> "ConversationTurn | None":
+        """ADR-036 §D.1 Step 2: connector type-check against the registry.
+
+        Returns a HARD_STOP ConversationTurn when the connector_id in
+        ``source["kind"]`` is not registered or does not support
+        ``operation``.  Returns None when the source passes the gate.
+
+        Also auto-logs a CONNECTOR-REQ record (ADR-036 Amendment 1) when
+        a hard stop is triggered.
+
+        Args:
+            source:     Parsed source dict with at minimum a ``"kind"`` key.
+            user_input: Original user text (stored in connector-request record).
+            operation:  Operation to validate (default None — type-check only).
+        """
+        connector_id = source.get("kind", "")
+        if not connector_id:
+            return None
+
+        if connector_id == "unknown":
+            # _parse_source_descriptor could not classify the input.
+            # Treat the first word of the raw input as the attempted connector_id
+            # and check it against the registry.  If it's not registered, fire
+            # HARD_STOP with the honest message — the user used an unknown descriptor
+            # that does not match any recognized connector or URL pattern.
+            raw = source.get("raw", user_input or "").strip()
+            first_word = raw.split()[0] if raw.split() else ""
+            if not first_word:
+                return None
+            connector_id = first_word.lower()
+
+        registry = _get_connector_registry()
+        result = registry.gate_connector_type(connector_id, operation)
+
+        if result.status == _CONNECTOR_HARD_STOP:
+            # ADR-036 Amendment 1: log a New Connector Request demand record
+            self._log_connector_request(
+                connector_id=connector_id,
+                operation=operation or "unknown",
+                user_input=user_input,
+                gating_result=result,
+                registry=registry,
+            )
+            return ConversationTurn(
+                state="CONFIGURE_SOURCES",
+                message=result.message,
+                awaiting_user=True,
+                must_show_human=True,
+            )
+        return None
+
+    def _log_connector_request(
+        self,
+        connector_id: str,
+        operation: str,
+        user_input: str,
+        gating_result: Any,
+        registry: Any,
+    ) -> None:
+        """ADR-036 Amendment 1: log a CONNECTOR-REQ demand record to ADB.
+
+        Uses AdbErrorStore.record_user_bug with ``record_kind: "connector_request"``
+        in extra_json (discriminator per Amendment 1 §L.2).
+
+        Per §L.5: write failure is logged at ERROR, never silently swallowed,
+        and never suppresses the hard stop that has already been issued.
+        """
+        import uuid as _uuid
+        from datetime import datetime as _dt, timezone as _tz
+        queue_id = f"CONNECTOR-REQ-{_uuid.uuid4().hex[:5]}"
+        now_iso = _dt.now(tz=_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        supported_set = [m.connector_id for m in registry.list_connectors()]
+
+        entry = {
+            "queue_id": queue_id,
+            "timestamp": now_iso,
+            "tool": "authorSkill",
+            "description": (
+                f"New Connector Request: unsupported connector \"{connector_id}\" "
+                f"requested (operation={operation!r}) during CONFIGURE_SOURCES."
+            ),
+            # ADR-036 Amendment 1 §L.3 extra_json fields:
+            "record_kind": "connector_request",
+            "requested_connector_id": connector_id,
+            "inferred_operation": operation,
+            "supported_set_at_rejection": supported_set,
+            "user_request_text": user_input[:2000] if user_input else "",
+            "persona": self._data.persona or None,
+            "session_id": self._data.synth_id or None,
+            "request_id": "",
+        }
+
+        # Try skill_store's error_store if available; fall back to a filestore
+        # ErrorStore so the demand signal is never silently dropped (ADR-036 §L.5).
+        error_store = None
+        try:
+            if self._skill_store is not None:
+                error_store = getattr(self._skill_store, "error_store", None)
+        except Exception:
+            pass
+
+        if error_store is None:
+            # Fallback: write to filesystem JSONL under ~/.kbf/store/
+            try:
+                from ..deploy.error_store import ErrorStore as _ErrorStore
+                import os as _os
+                store_root = _os.path.expanduser("~/.kbf/store")
+                error_store = _ErrorStore(store_root)
+            except Exception as fe:
+                log.error(
+                    "ADR-036 connector-request log: could not initialise fallback "
+                    "ErrorStore: %s — demand record LOST: %s",
+                    fe, entry,
+                )
+                return
+
+        try:
+            error_store.record_user_bug(entry)
+            log.info(
+                "ADR-036 connector-request logged: queue_id=%s connector=%s",
+                queue_id, connector_id,
+            )
+        except Exception as exc:
+            # §L.5: failure MUST be logged at ERROR, never silently swallowed.
+            log.error(
+                "ADR-036 connector-request: ADB write failed — demand record "
+                "queue_id=%s connector=%s LOST: %s",
+                queue_id, connector_id, exc,
+            )
+
     def _advance_to_configure_sources(self) -> ConversationTurn:
         self._state = "CONFIGURE_SOURCES"
 
@@ -3809,10 +3990,12 @@ class SkillBuilderConversation:
                     options=["done", "add another source"],
                 )
 
+        connector_block = _build_proactive_connector_block()
         return ConversationTurn(
             state="CONFIGURE_SOURCES",
             message=(
-                "Where does the source data live?\n"
+                (connector_block + "\n" if connector_block else "")
+                + "Where does the source data live?\n"
                 "Describe one or more sources (you can add multiple):\n\n"
                 "  • Confluence specific page (recommended when you have a link):\n"
                 "      paste the page URL, e.g.\n"
@@ -3845,6 +4028,14 @@ class SkillBuilderConversation:
             return self._advance_to_configure_triggers()
 
         source = _parse_source_descriptor(user_input)
+
+        # ADR-036 §D.1 Step 2: registry type-check before accepting the source.
+        hard_stop = self._gate_source_connector(source, user_input=user_input)
+        if hard_stop is not None:
+            # HARD_STOP — connector not in registry.  Do NOT add to sources.
+            # No partial state saved.  Message already formatted per §D.2.
+            return hard_stop
+
         self._data.sources.append(source)
 
         return ConversationTurn(

@@ -711,7 +711,7 @@ userId: review-test-user
 @pytest.mark.skipif(not _FASTAPI_AVAILABLE, reason="fastapi not installed")
 class TestMcpToolReviewSkillSession:
     def test_tools_list_has_expected_tools(self, tmp_path):
-        """EXTERNAL_TOOLS_SCHEMA must include all 8 registered tools."""
+        """EXTERNAL_TOOLS_SCHEMA must include all 9 registered tools."""
         app, dev_token = _make_review_test_app(tmp_path)
         with TestClient(app) as client:
             resp = client.post(
@@ -721,11 +721,12 @@ class TestMcpToolReviewSkillSession:
         assert resp.status_code == 200
         tools = resp.json()["tools"]
         names = {t["name"] for t in tools}
-        assert len(tools) == 8, f"Expected 8 tools, got {len(tools)}: {names}"
+        assert len(tools) == 9, f"Expected 9 tools, got {len(tools)}: {names}"
         assert "reviewSkillSession" in names
         assert "deleteSkill" in names
         assert "listSkills" in names
         assert "getSkill" in names
+        assert "listConnectors" in names
 
     def test_mcp_tool_requires_auth(self, tmp_path):
         """No bearer token should return 401."""

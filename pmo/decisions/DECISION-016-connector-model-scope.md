@@ -185,3 +185,17 @@ using Claude Code directly (LLM-auto-committed credential-handling network code
 contradicts the project's safety discipline); the framework's role is to gate
 unsupported connectors honestly and capture the demand backlog, not to auto-generate
 adapters. No ADR-039.
+
+## Amendment — 2026-05-17: UDAP deferred — NOT registered in the connector registry
+
+UDAP is intentionally **not registered** in the Connector Registry until its production
+JDBC path is implemented. `framework/adapters/udap_adapter.py` raises `NotImplementedError`
+for all production `list`/`fetch`/`discover` calls; it only works in filestore/dev mode
+against `_dev_fixtures/fleet/*.json`. Registering an unimplemented connector would violate
+the capability-honesty principle this decision establishes — the very defect ADR-036 was
+created to eliminate. UDAP is effectively another ADB database connector to be implemented
+when its production JDBC path is ready. Tracked as future work alongside UDAP/ADB
+implementation. The registry exposes exactly THREE connectors: Confluence, Jira, Git. Any
+`source_type: "udap"` or `source_type: "fleet"` request at CONFIGURE_SOURCES will
+hard-stop with the standard unsupported-connector message and log a `CONNECTOR-REQ-…`
+demand record per ADR-036 Amendment 1 (L.3).

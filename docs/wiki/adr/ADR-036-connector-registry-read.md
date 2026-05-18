@@ -688,6 +688,95 @@ remains a KBF developer task, informed by the demand signal from the
 
 ---
 
+## O. Amendment 4 — UDAP intentionally excluded from the registry (2026-05-17)
+
+UDAP is **not registered** in the Connector Registry. The connector manifests directory
+(`framework/connectors/manifests/`) contains exactly three manifests: Confluence, Jira,
+Git. No `udap.yaml` exists or should be added until the UDAP adapter's production JDBC
+path is implemented.
+
+**Rationale**: `framework/adapters/udap_adapter.py` raises `NotImplementedError` for all
+production `list`/`fetch`/`discover` operations. It only works in filestore/dev mode
+against `_dev_fixtures/fleet/*.json`. Registering an adapter whose production path is
+unimplemented would be exactly the capability-dishonesty this ADR was created to
+eliminate — skill authors would see "udap" in the supported connector list, attempt to
+build fleet-data skills, and get `NotImplementedError` at runtime. The hard stop must
+happen here, not there.
+
+Any `source_type: "udap"` or `source_type: "fleet"` at CONFIGURE_SOURCES hits the
+honest hard-stop (Section D.2) and logs a `CONNECTOR-REQ-…` demand record per
+Amendment 1 (Section L). This is the correct behavior — the demand signal accumulates
+until the production JDBC path is implemented and UDAP passes the conformance harness
+(Amendment 2, Section M), at which point its manifest is registered.
+
+This is a scope decision, not a defect. See DECISION-016 Amendment (2026-05-17) for
+the full rationale.
+
+---
+
+## P. Connector Discoverability (2026-05-18)
+
+### P.1 Gap Addressed
+
+ADR-036 shipped the gating/rejection surface only: CONFIGURE_SOURCES shows the
+supported connector list reactively, when a skill author requests an unsupported
+connector. There was no proactive way to discover the supported set.
+
+This was filed as BUG-queue-19f2f (severity MEDIUM, discovered_by architect,
+status fixed): "users could only learn supported connectors by failing — undermines
+the capability-honesty intent of ADR-036."
+
+### P.2 Two Surfaces Added
+
+**1. `listConnectors` MCP tool** (`framework/deploy/mcp_tools.py`):
+- Read-only, no side effects. No write/admin scope required — mirrors the auth
+  gating of other read-only tools (reportBug, listSkills).
+- Registered in `EXTERNAL_TOOLS_SCHEMA` (appears in `/mcp/tools/list`) and in
+  `build_external_tool_registry()` (callable via `POST /mcp/tools/call`).
+- Returns, per connector: `connector_id`, `display_name`, `description`,
+  `resource_types`, `supported_operations`, `auth_model`.
+- Strips internal fields (`access_probe_hook`, `granularity_filters`).
+- Source: `get_registry().list_connectors_user_facing()` — the registry is the
+  only source of truth. No duplicate connector lists anywhere.
+- Returns exactly 3 connectors (confluence, git, jira). UDAP not present
+  (capability-honesty, per Amendment 4 / Section O).
+
+**2. Proactive supported-connector block at CONFIGURE_SOURCES entry** (`framework/skill_builder/conversation.py`):
+- When the FSM enters CONFIGURE_SOURCES (`_advance_to_configure_sources` and
+  the `_advance_to_configure_sources_v2` no-sources path), the prompt now includes:
+  ```
+  Supported source connectors:
+    - confluence      (Confluence — page, space, attachment...)
+    - git             (Git Repository — file, directory, commit...)
+    - jira            (Jira — issue, epic, sprint...)
+  ```
+- The author sees the supported set BEFORE specifying sources, not only after
+  requesting an unsupported one.
+
+### P.3 Single Shared Helper — Drift Prevention
+
+Both the proactive block and the hard-stop rejection message (Section D.2) render
+through `format_supported_connectors_block()` in `framework/connectors/registry.py`.
+This is the sole rendering code path — a connector added to or removed from the
+registry automatically propagates to both surfaces without additional code changes.
+`manifest_to_user_facing()` is the single projection that strips internal fields.
+
+Test `TestSharedFormattingHelperDriftGuard` verifies this: change the registry
+test-double once, assert both surfaces reflect it.
+
+### P.4 Test Coverage
+
+`framework/tests/unit/test_adr036_discoverability.py` (33 tests):
+- `listConnectors` returns exactly 3 connectors with 6 user-facing fields, no
+  internal probe fields, UDAP absent.
+- `listConnectors` appears in `EXTERNAL_TOOLS_SCHEMA` and `build_external_tool_registry`.
+- Callable with read-only scope, no-scope anonymous, or no _consumer.
+- CONFIGURE_SOURCES proactive block contains all 3 display names and `connector_id`s.
+- Drift guard: same helper → both surfaces update from one registry change.
+- No regression in supported/unsupported CONFIGURE_SOURCES flows.
+
+---
+
 ## References
 
 - `framework/adapters/` — existing ad-hoc adapter implementations (migration target)

@@ -265,6 +265,21 @@ EXTERNAL_TOOLS_SCHEMA = [
         },
     },
     {
+        "name": "listConnectors",
+        "description": (
+            "List all connector types currently supported by this framework installation. "
+            "Returns the user-facing capability manifest for each registered connector: "
+            "its id, display name, description, resource types, supported operations, and "
+            "auth model. Use this to discover which source connectors you can reference "
+            "when authoring a skill with authorSkill. "
+            "Read-only, no side effects, no admin scope required."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
         "name": "uploadArtifact",
         "description": (
             "Upload a local file (PPT, DOCX, Markdown, text) to the server for "
@@ -333,6 +348,7 @@ def build_external_tool_registry(app) -> dict[str, Any]:
         "deleteSkill": _make_delete_skill_handler(app),
         "listSkills": _make_list_skills_handler(app),
         "getSkill": _make_get_skill_handler(app),
+        "listConnectors": _make_list_connectors_handler(app),
     }
 
 
@@ -1074,6 +1090,56 @@ def _make_delete_skill_handler(app):
         }
 
     return delete_skill_handler
+
+
+# ---------------------------------------------------------------------------
+# listConnectors handler (ADR-036 discoverability)
+# ---------------------------------------------------------------------------
+
+
+def _make_list_connectors_handler(app):
+    """Build the listConnectors MCP tool handler (ADR-036 discoverability).
+
+    Returns the user-facing manifest fields for every connector registered in
+    the Connector Registry.  Read-only, no side effects.  The source of truth
+    is ConnectorRegistry.list_connectors() — no duplicate connector lists.
+
+    Auth gating: mirrors other read-only tools (reportBug, listSkills) — no
+    write/admin scope required.  Any authenticated caller (or anonymous in dev
+    mode) can discover the supported connector set.
+
+    Strips internal fields (access_probe_hook, granularity_filters) that are
+    implementation details and must not be exposed to skill authors or MCP
+    callers.  Exposed fields per connector:
+      connector_id, display_name, description,
+      resource_types, supported_operations, auth_model.
+    """
+
+    async def list_connectors_handler(
+        *,
+        _consumer=None,
+    ) -> dict:
+        """MCP handler for listConnectors.
+
+        Args:
+            _consumer: ConsumerManifest injected by MCP dispatch.
+
+        Returns:
+            dict with 'connectors' (list of user-facing dicts) and 'total' (int).
+        """
+        from ..connectors.registry import get_registry
+
+        log.info("mcp:listConnectors")
+
+        registry = get_registry()
+        connectors = registry.list_connectors_user_facing()
+
+        return {
+            "connectors": connectors,
+            "total": len(connectors),
+        }
+
+    return list_connectors_handler
 
 
 # ---------------------------------------------------------------------------

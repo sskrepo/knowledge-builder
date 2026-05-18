@@ -827,6 +827,12 @@ def cmd_export_bugs(args):
       - KB_SHIM.KBF_BUG_REPORTS  — user-reported bugs (via reportBug MCP tool)
       - KB_SHIM.KBF_AUDIT_RUNS   — critic-found audit findings (via reviewSkillSession)
 
+    ADR-036 Amendment 1: connector-request demand records (``record_kind:
+    "connector_request"`` in extra_json) are exported separately under
+    ``pmo/connector-requests/`` when ``--kind connector_request`` is passed.
+    Default (no ``--kind``) exports ordinary bug records only (unchanged
+    existing behaviour).
+
     Generates one .md file per record plus an INDEX.md summary table.
     Files use YAML frontmatter for metadata and <details> blocks for full content,
     so they render nicely in GitHub / IDE markdown viewers with expandable sections.
@@ -835,10 +841,11 @@ def cmd_export_bugs(args):
     Re-running overwrites previous exports.
 
     Usage:
-        kb-cli export-bugs [--out-dir pmo/bugs] [--env laptop] [--status open]
+        kb-cli export-bugs [--out-dir pmo/bugs] [--env laptop] [--kind bug|connector_request|all]
     """
     import datetime as _dt
 
+    kind_filter = getattr(args, "kind", None) or "bug"
     out_dir = Path(getattr(args, "out_dir", None) or (REPO_ROOT / "pmo" / "bugs")).resolve()
     env = getattr(args, "env", "") or os.environ.get("KBF_ENV", "laptop")
 
@@ -901,7 +908,10 @@ def cmd_export_bugs(args):
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # ── Fetch user-reported bugs ────────────────────────────────────────────
-    user_bugs: list[dict] = []
+    # ADR-036 §L.4: records in KBF_BUG_REPORTS are discriminated by
+    # ``record_kind`` in extra_json.  Absent or ``"bug"`` = ordinary bug.
+    # ``"connector_request"`` = CONNECTOR-REQ demand record.
+    user_bugs_all: list[dict] = []
     try:
         with pool.acquire() as conn:
             with conn.cursor() as cur:
@@ -924,10 +934,20 @@ def cmd_export_bugs(args):
                         except (json.JSONDecodeError, TypeError):
                             pass
                     rec.update(extra)
-                    user_bugs.append(rec)
-        print(f"  Fetched {len(user_bugs)} user bug(s) from KBF_BUG_REPORTS")
+                    user_bugs_all.append(rec)
+        print(f"  Fetched {len(user_bugs_all)} record(s) from KBF_BUG_REPORTS")
     except Exception as exc:
         print(f"⚠ Could not read KBF_BUG_REPORTS: {exc}", file=sys.stderr)
+
+    # Partition: ordinary bugs vs connector-request demand records (ADR-036 §L.2)
+    user_bugs = [
+        r for r in user_bugs_all
+        if r.get("record_kind", "bug") != "connector_request"
+    ]
+    connector_requests = [
+        r for r in user_bugs_all
+        if r.get("record_kind") == "connector_request"
+    ]
 
     # ── Fetch audit run findings ────────────────────────────────────────────
     audit_runs: list[dict] = []
@@ -960,10 +980,17 @@ def cmd_export_bugs(args):
 
     _close_pool(pool)
 
+    # ── Determine which records to export based on --kind ──────────────────
+    # Default (no flag / "bug") = ordinary bugs only (unchanged behaviour).
+    # "connector_request" = demand records only (pmo/connector-requests/).
+    # "all" = both.
+    export_bugs = kind_filter in ("bug", "all")
+    export_connector_requests = kind_filter in ("connector_request", "all")
+
     # ── Write per-bug markdown files ────────────────────────────────────────
     written_bugs: list[dict] = []
 
-    for bug in user_bugs:
+    for bug in (user_bugs if export_bugs else []):
         qid = bug.get("queue_id") or bug.get("request_id", "unknown")
         safe_id = qid.replace("/", "-").replace(" ", "-")
         filename = f"{safe_id}.md"
@@ -1103,6 +1130,104 @@ run_at: {ts}
         })
         print(f"  ✓ {filename}")
 
+    # ── Write connector-request demand records (ADR-036 Amendment 1 §L.4) ──
+    written_connector_requests: list[dict] = []
+    if export_connector_requests and connector_requests:
+        cr_out_dir = (
+            out_dir.parent / "connector-requests"
+            if kind_filter == "connector_request"
+            else out_dir.parent / "connector-requests"
+        )
+        cr_out_dir.mkdir(parents=True, exist_ok=True)
+
+        # Demand grouping: count per requested_connector_id (§L.4)
+        from collections import Counter as _Counter
+        demand_counts: dict = _Counter(
+            r.get("requested_connector_id", "unknown") for r in connector_requests
+        )
+
+        for req in connector_requests:
+            qid = req.get("queue_id") or req.get("request_id", "unknown")
+            safe_id = qid.replace("/", "-").replace(" ", "-")
+            filename = f"{safe_id}.md"
+            filepath = cr_out_dir / filename
+
+            ts = _fmt_ts(req.get("timestamp_utc"))
+            connector_id = req.get("requested_connector_id", "unknown")
+            operation = req.get("inferred_operation", "unknown")
+            persona = req.get("persona", "_unknown_")
+            session_id = req.get("session_id", "_unknown_")
+            user_text = req.get("user_request_text", "_not recorded_")
+            supported_at_rejection = req.get("supported_set_at_rejection", [])
+            demand_count = demand_counts.get(connector_id, 1)
+
+            md = f"""---
+queue_id: {qid}
+record_kind: connector_request
+connector_id: {connector_id}
+inferred_operation: {operation}
+filed_at: {ts}
+demand_count: {demand_count}
+---
+
+# {qid}
+
+**Connector requested**: `{connector_id}` | **Operation**: `{operation}` | **Filed**: {ts[:10] if ts else "unknown"}
+
+**Demand signal**: this connector has been requested **{demand_count}** time(s) in connector-request records.
+
+<details>
+<summary>Full details</summary>
+
+**Persona**: {persona}
+**Session ID**: {session_id}
+**Supported connectors at rejection**: {", ".join(f"`{c}`" for c in supported_at_rejection) or "_none_"}
+
+**User request text**:
+{user_text}
+
+</details>
+"""
+            filepath.write_text(md, encoding="utf-8")
+            written_connector_requests.append({
+                "filename": str(filepath.relative_to(cr_out_dir)),
+                "id": qid,
+                "connector_id": connector_id,
+                "operation": operation,
+                "filed_at": ts,
+                "demand_count": demand_count,
+            })
+            print(f"  ✓ connector-requests/{filename}")
+
+        # Write connector-requests INDEX.md grouped by connector_id
+        cr_rows = "\n".join(
+            f"| `{connector_id}` | {count} | "
+            + " ".join(
+                f"[{r['id']}]({r['filename']})"
+                for r in written_connector_requests
+                if r["connector_id"] == connector_id
+            )
+            + " |"
+            for connector_id, count in sorted(demand_counts.items(), key=lambda x: -x[1])
+        ) or "_none_"
+
+        cr_index_md = f"""# KBF Connector Requests — {_dt.datetime.now(tz=_dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}
+
+> **ADR-036 Amendment 1**: connector demand backlog for KBF developers.
+> Generated by `kb-cli export-bugs --kind connector_request`. Re-run to refresh.
+> **Do not edit these files manually** — ADB is the source of truth.
+
+## Demand Summary (grouped by connector_id)
+
+| Connector ID | Request Count | Records |
+|---|---|---|
+{cr_rows}
+
+Total: {len(written_connector_requests)} connector request(s) for {len(demand_counts)} unique connector(s).
+"""
+        (cr_out_dir / "INDEX.md").write_text(cr_index_md, encoding="utf-8")
+        print(f"  ✓ connector-requests/INDEX.md")
+
     # ── Write INDEX.md ───────────────────────────────────────────────────────
     now_str = _dt.datetime.now(tz=_dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -1135,7 +1260,15 @@ run_at: {ts}
 """
     (out_dir / "INDEX.md").write_text(index_md, encoding="utf-8")
     print(f"  ✓ INDEX.md")
-    print(f"\n✓ export-bugs — {len(written_bugs)} user bug(s) + {len(written_audits)} audit run(s) → {out_dir}/")
+    cr_summary = (
+        f" + {len(written_connector_requests)} connector-request(s)"
+        if written_connector_requests
+        else ""
+    )
+    print(
+        f"\n✓ export-bugs — {len(written_bugs)} user bug(s) + {len(written_audits)} "
+        f"audit run(s){cr_summary} → {out_dir}/"
+    )
     return 0
 
 
@@ -1856,6 +1989,17 @@ def main():
         "--env",
         default=None,
         help="config env name (overrides KBF_ENV, default: laptop)",
+    )
+    peb.add_argument(
+        "--kind",
+        default=None,
+        choices=["bug", "connector_request", "all"],
+        help=(
+            "ADR-036: filter records by kind. "
+            "'bug' = ordinary bug reports (default when omitted); "
+            "'connector_request' = CONNECTOR-REQ demand records; "
+            "'all' = both kinds."
+        ),
     )
     peb.set_defaults(fn=cmd_export_bugs)
 
