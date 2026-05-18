@@ -312,8 +312,9 @@ async def _handle_continue(req: Request, consumer, synth_id: str, user_input: st
         user_input=user_input,
     )
 
-    # After a PROMOTE the session is done — reload ShimKb so newly promoted
-    # KBs are immediately visible without a server restart (Option B).
+    # After a PROMOTE the session is done — reload ShimKb AND ShimWorkflows so
+    # newly promoted KBs and skills are immediately visible without a server
+    # restart (ADR-033 Option B).
     if result.get("done"):
         shim_kb = getattr(req.app.state, "shim_kb", None)
         if shim_kb is not None:
@@ -322,6 +323,29 @@ async def _handle_continue(req: Request, consumer, synth_id: str, user_input: st
                 log.info("shim_kb reloaded after session done: synth_id=%s", synth_id)
             except Exception as exc:
                 log.warning("shim_kb.reload() failed: %s", exc)
+
+        # ADR-033: ShimWorkflows must also reload so the newly promoted skill
+        # card is immediately visible to the Tier-1 router without a server
+        # restart.  Without this, /api/v1/ask returns tier-4 for the new skill
+        # until the next server restart (BUG: Gate-5 regression found 2026-05-18).
+        shim_workflows = getattr(req.app.state, "shim_workflows", None)
+        if shim_workflows is not None:
+            try:
+                shim_workflows.reload()
+                log.info(
+                    "shim_workflows reloaded after session done: synth_id=%s "
+                    "cards=%d",
+                    synth_id, len(getattr(shim_workflows, "_cards", [])),
+                )
+            except Exception as exc:
+                log.warning("shim_workflows.reload() failed: %s", exc)
+        else:
+            log.warning(
+                "shim_workflows not found on app state after PROMOTE — "
+                "server restart required for new skill to be routable. "
+                "synth_id=%s",
+                synth_id,
+            )
 
     return _envelope_response(result)
 

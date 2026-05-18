@@ -727,6 +727,30 @@ class TestRC1APassageMatchesPageIdDisplayUrl:
         }
         assert not _passage_matches_page_id(passage, self.DISPLAY_URL)
 
+    def test_display_url_in_metadata_page_id_matches(self):
+        """SearchWikiRetriever stores display URL as metadata.page_id.
+
+        RC1-A Phase-B fix (2026-05-18): _passage_matches_display_url now also
+        checks metadata.page_id when it is itself a display URL.  Without this,
+        passages from SearchWikiRetriever (which sets page_id=display_url but no
+        space field) never matched, causing path-A eval failures for skills with
+        display-URL pinned_refs.
+        """
+        from framework.workflow_runtime.executor import _passage_matches_page_id
+        # SearchWikiRetriever result: page_id=display_url, no space field in metadata
+        passage = {
+            "text": "Kiwi Project status content",
+            "citation": "https://confluence.oraclecorp.com/confluence/pages/viewpage.action?pageId=20382503622",
+            "metadata": {
+                "page_id": "https://confluence.oraclecorp.com/confluence/display/OCIFACP/FAaaS+Kiwi+Project",
+                "title": "FAaaS Kiwi Project",
+                "path": "/Users/.kbf/wiki/ocifacp/...",
+                "persona": "tpm",
+                # NOTE: no 'space' field — this is what breaks the original Check 1
+            },
+        }
+        assert _passage_matches_page_id(passage, self.DISPLAY_URL)
+
     def test_numeric_page_id_still_works(self):
         """Numeric pageId path is unaffected by the RC1-A fix."""
         from framework.workflow_runtime.executor import _passage_matches_page_id

@@ -137,7 +137,23 @@ def _passage_matches_display_url(passage: dict, space_key: str, title_slug: str)
         if meta_space == space_key and title_slug.lower() in meta_title.lower():
             return True
 
-    # Check 2: citation URL contains both space key and title slug tokens
+    # Check 2: metadata page_id is a display URL containing space+title
+    # WikiMetadataStore stores the display URL as page_id when the ingestor
+    # receives a display-URL input (SearchWikiRetriever puts page_id in metadata).
+    meta_page_id = str(meta.get("page_id", "")).strip()
+    if meta_page_id and _is_display_url(meta_page_id):
+        pid_lower = meta_page_id.lower()
+        if (space_key.lower() in pid_lower
+                and title_slug.replace(" ", "+").lower() in pid_lower):
+            return True
+        # Also check URL-decoded form (spaces → %20 or +)
+        import urllib.parse
+        pid_decoded = urllib.parse.unquote(meta_page_id).lower()
+        if (space_key.lower() in pid_decoded
+                and title_slug.lower() in pid_decoded):
+            return True
+
+    # Check 3: citation URL contains both space key and title slug tokens
     citation = str(passage.get("citation", "")).strip()
     if citation:
         citation_lower = citation.lower()

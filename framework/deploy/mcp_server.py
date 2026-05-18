@@ -394,6 +394,7 @@ def _load_app():
             skill_store=app.state.skill_store,
         )
         state["shim_workflows"] = shim_workflows
+        app.state.shim_workflows = shim_workflows  # expose for hot-reload after PROMOTE
 
         ops_eng_skill = OpsEngSkill(
             llm=state["llm"], shim_kb=state["shim_kb"], retrievers=retrievers,
