@@ -17,14 +17,19 @@ from typing import Any, Iterable
 
 from .._base import (
     AdapterWithIdentity,
+    CanonicalRef,
     CanonicalResult,
     ChangeEvent,
     HealthReport,
     RawItem,
     RawItemRef,
     SourceQuery,
+    Unresolvable,
+    UNRESOLVABLE_NOT_FOUND,
+    UNRESOLVABLE_NO_ACCESS,
+    UNRESOLVABLE_TRANSIENT,
 )
-from .shared import to_raw_item, resolve_to_numeric_id
+from .shared import to_raw_item, resolve_to_numeric_id, _DISPLAY_URL_PATTERN, _extract_numeric_id_fast
 from ...core.emcp_runtime import EmcpAuthError, EmcpError, EmcpRuntime
 
 log = logging.getLogger(__name__)
@@ -332,26 +337,170 @@ class ConfluenceEmcpDirectAdapter(AdapterWithIdentity):
     # ADR-039 (DECISION-020): canonical_identity implementation
     # ------------------------------------------------------------------
 
+    def _resolve_via_emcp(self, reference: str, resource_type: str) -> CanonicalResult:
+        """Resolve a display-by-title URL to a CanonicalRef via the eMCP fetch tool.
+
+        Uses the SAME EmcpRuntime channel that CONFIGURE_SOURCES/sampler uses
+        successfully to fetch pages. The `fetch` tool resolves URLs (including
+        /display/SPACE/Title forms) server-side and returns the numeric page id
+        in the payload.
+
+        Called ONLY for display-by-title URLs (and non-numeric refs) where
+        resolve_to_numeric_id(session=None) would structurally fail (TRANSIENT).
+        Numeric refs go through the fast-path and never reach this method.
+
+        Error mapping:
+          - FileNotFoundError / 'not_found' error in payload   → NOT_FOUND, retryable=False
+          - EmcpAuthError (keychain/permission failure)         → NO_ACCESS, retryable=False
+          - EmcpError / any other exception (network/transient) → TRANSIENT, retryable=True
+        """
+        try:
+            text = self.runtime.call_tool_for_text(
+                self._TOOL_FETCH, {"id": reference},
+            )
+        except EmcpAuthError as exc:
+            return Unresolvable(
+                connector_id="confluence",
+                resource_type=resource_type,
+                reference=reference,
+                reason=UNRESOLVABLE_NO_ACCESS,
+                detail=(
+                    f"eMCP auth failure resolving {reference!r}: {exc}. "
+                    "Run `codex mcp login` to restore the OAuth binding."
+                ),
+                retryable=False,
+            )
+        except EmcpError as exc:
+            return Unresolvable(
+                connector_id="confluence",
+                resource_type=resource_type,
+                reference=reference,
+                reason=UNRESOLVABLE_TRANSIENT,
+                detail=f"eMCP network/transient error resolving {reference!r}: {exc}",
+                retryable=True,
+            )
+
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return Unresolvable(
+                connector_id="confluence",
+                resource_type=resource_type,
+                reference=reference,
+                reason=UNRESOLVABLE_TRANSIENT,
+                detail=(
+                    f"eMCP fetch returned non-JSON for {reference!r}: {text[:200]}"
+                ),
+                retryable=True,
+            )
+
+        # Parse the response using the same path as fetch() / normalize()
+        inner = payload.get("results") or payload
+        meta = inner.get("metadata") or {}
+
+        # Server signals not-found explicitly
+        if meta.get("error") == "not_found" or payload.get("error") == "not_found":
+            return Unresolvable(
+                connector_id="confluence",
+                resource_type=resource_type,
+                reference=reference,
+                reason=UNRESOLVABLE_NOT_FOUND,
+                detail=f"Confluence page not found for reference {reference!r}.",
+                retryable=False,
+            )
+
+        # Extract numeric page id from payload — the `id` field in metadata
+        numeric_id = str(meta.get("id") or "")
+        if not numeric_id:
+            # Fallback: some server versions expose id at the top level
+            numeric_id = str(inner.get("id") or "")
+
+        if not numeric_id:
+            # No id returned — treat as not found
+            return Unresolvable(
+                connector_id="confluence",
+                resource_type=resource_type,
+                reference=reference,
+                reason=UNRESOLVABLE_NOT_FOUND,
+                detail=(
+                    f"eMCP fetch returned no numeric page id for {reference!r}. "
+                    f"Server meta: {str(meta)[:200]}"
+                ),
+                retryable=False,
+            )
+
+        display_hint = meta.get("title") or ""
+        log.info(
+            "emcp_direct canonical_identity: resolved %r → numeric id %s (title=%r)",
+            reference, numeric_id, display_hint,
+        )
+        return CanonicalRef(
+            connector_id="confluence",
+            resource_type=resource_type,
+            canonical_id=numeric_id,
+            display_hint=display_hint,
+        )
+
     def canonical_identity(self, reference: str, resource_type: str) -> CanonicalResult:
         """Resolve any Confluence reference to a CanonicalRef with numeric page ID.
 
-        emcp_direct mode: canonical_identity uses the same shared resolution
-        algorithm as native.py (resolve_to_numeric_id). However, emcp_direct
-        accesses Confluence via the MCP server, not a direct REST session.
+        emcp_direct mode — two-path resolution:
 
-        For the identity-resolution call specifically, we use the fast-path
-        numeric extraction (no MCP round-trip required when reference contains
-        a numeric ID). For display-by-title URLs, we must defer to
-        Unresolvable(TRANSIENT) because we have no direct REST session available
-        in emcp_direct mode. This is an accepted limitation: authors using
-        emcp_direct should use numeric IDs or ?pageId= URL forms when authoring.
+        Fast path (no MCP round-trip):
+          If `reference` contains a numeric page ID in any of the known forms
+          (?pageId=NNN, /pages/NNN/, bare digit string, etc.), extract it
+          directly and return CanonicalRef.  This preserves the behavior of
+          shared.resolve_to_numeric_id() Step 1 — no eMCP call needed.
+
+        eMCP path (for display-by-title and other non-numeric refs):
+          For /display/SPACE/Title URLs (and any other reference that doesn't
+          contain a numeric id), use the same EmcpRuntime channel that
+          CONFIGURE_SOURCES/sampler uses successfully to fetch pages.  The
+          `fetch` tool resolves URLs server-side and returns the numeric `id`
+          in the response payload.  We read that numeric id and build the
+          CanonicalRef.
+
+          This closes the structural gap reported in BUG-queue-98ca0: with
+          session=None, shared.resolve_to_numeric_id always returned
+          Unresolvable(TRANSIENT) for display URLs — even though the EmcpRuntime
+          channel was already working (the SAME channel fetches pages fine).
+          The prior keychain-retry RCA was a mis-diagnosis; the root cause was
+          that canonical_identity was not using the available eMCP channel.
+
+        Error returns (typed — never a raw string):
+          - not found           → Unresolvable(NOT_FOUND, retryable=False)
+          - auth / permission   → Unresolvable(NO_ACCESS, retryable=False)
+          - network / transient → Unresolvable(TRANSIENT, retryable=True)
         """
-        return resolve_to_numeric_id(
+        # Step 1: fast-path numeric extraction — zero MCP round-trip.
+        # Delegates to the same shared algorithm used by native.py / mcp.py.
+        # When it succeeds it returns CanonicalRef directly.
+        # When session=None and a numeric id is present, shared returns it too.
+        fast_result = resolve_to_numeric_id(
             reference=reference,
             resource_type=resource_type,
-            session=None,   # No direct REST session in emcp_direct mode.
-            base_url="",    # Not used when session=None.
+            session=None,   # fast-path only; session required for title lookup
+            base_url="",    # not used when session=None
         )
+
+        # If fast-path found a numeric id → return it (no eMCP round-trip).
+        if isinstance(fast_result, CanonicalRef):
+            return fast_result
+
+        # fast_result is Unresolvable — check whether it's a display-by-title
+        # URL or any other non-numeric form that the eMCP channel can resolve.
+        # For INVALID_REF (not a recognized Confluence reference at all) we
+        # preserve the Unresolvable from shared rather than making an eMCP call
+        # that would also fail.
+        from .._base import UNRESOLVABLE_INVALID_REF
+        if fast_result.reason == UNRESOLVABLE_INVALID_REF:
+            # Unknown reference form — not a display URL, not a numeric id.
+            # Return shared's typed result unchanged.
+            return fast_result
+
+        # Display-by-title URL (or other non-numeric ref the eMCP fetch tool
+        # can resolve): use the EmcpRuntime channel.
+        return self._resolve_via_emcp(reference=reference, resource_type=resource_type)
 
     def close(self) -> None:
         self.runtime.close()
