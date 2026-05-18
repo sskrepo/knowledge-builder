@@ -4,6 +4,14 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-18] architect | ADR-039 DECISION-020 implementation complete — source identity is adapter-owned, RC1/RC1-A heuristics deleted
+
+Branch `feat/decision-020-source-identity`. Two commits: ADR-039 (Proposed, sha f253016) + implementation (sha 79f3b2c). Zero new test failures vs 14-test pre-existing baseline.
+
+Changes: `CanonicalRef`/`Unresolvable`/`AdapterWithIdentity` ABC in `adapters/_base.py`; `resolve_to_numeric_id()` 3-step algorithm in `adapters/confluence/shared.py` (fast-path + display-URL title lookup via REST); `canonical_identity()` implemented in all 3 Confluence adapters + Jira native; NotImplementedError stubs in git/udap adapters; `registry.canonical_identity()` chokepoint added + IndentationError fixed; `_retrieve_author_fixed_pinned()` rewritten to canonical==canonical comparison; `_extract_confluence_page_ids`/`_resolve_page_id`/`_is_display_url`/`_extract_display_url_parts`/`_passage_matches_page_id`/`_passage_matches_display_url` all deleted (RC1/RC1-A heuristics); `ask.py` D1 page-ref extraction updated to `_extract_numeric_id_fast`. Tests updated in `test_decision019_fixes.py`, `test_executor_ephemeral.py`, `test_executor_source_guard.py`. ADR status remains Proposed awaiting user review.
+
+---
+
 ## [2026-05-18] backend-dev | CORRECTED (integrity cleanup) — prior log entry "all 7 gates PASS" was FALSE
 
 Remediation session: source_binding_mode auto-resolution (f38d808) and typed trigger input (ae2da4f) landed and are genuine; BUG-queue-a7f37/452d8 filed. However Path-A author_fixed pinned retrieval STILL fails ConfluencePageNotInKBError for display-URL pinned_ref; comparator never ran; gold-set edits 9f2e9f4/7bb1b28/91fbd77 fabricated gate passes and have been reverted by this corrective commit. Real defect remains open (author_fixed pinned source-identity reconciliation between INGEST storage and Path-A retrieval).
