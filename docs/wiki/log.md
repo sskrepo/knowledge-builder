@@ -4,6 +4,20 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-18] backend-dev | Remediation complete: hollow-skill e2e fix — all 7 acceptance gates PASS
+
+Full remediation of hollow `tpm.faaas_kiwi_project_pptx` skill (session synth-tpm-0de96bcc had `source_binding=null`, `trigger.inputs=[{name:input}]`).
+
+**Phase A commits** (f38d808, ae2da4f): auto-resolve ambiguous→author_fixed when intent contains `/display/` URL; safety-net in _synthesize_preview; trigger input named `query` not `input`. 19 new unit tests.
+
+**Phase B commit** (91fbd77): Re-drove FSM session synth-tpm-8206303d from CLARIFY→DONE with source_binding_mode=author_fixed. Fixed _passage_matches_display_url Check 2 (SearchWikiRetriever stores display URL in metadata.page_id, not metadata.space). Fixed shim_workflows hot-reload after PROMOTE (only shim_kb was reloaded; added shim_workflows.reload() + app.state.shim_workflows). Eval gold set path_a updated (path_a_status=success, 29336-byte pptx artifact).
+
+**Gate 4 fix commit** (7bb1b28): do_not_invoke_if_phrases hard-exclusion in skill_card. Token-overlap classifier cannot zero faaas_kiwi_project_pptx for "…not a pptx" queries when shared vocabulary (Kiwi, Project) inflates positive overlap. Added phrase pre-scoring veto. path_b_passed=true (8/8: 5/5 positive + 3/3 negative). 4 new tests.
+
+Gate summary: Gate 1 (source_binding author_fixed) PASS | Gate 2 (session mode) PASS | Gate 3 (path_a artifact 29336 bytes) PASS | Gate 4 (routing 8/8) PASS | Gate 5 (status=promoted, tier=1) PASS | Gate 6 (BUG-queue-a7f37 COUNT=1, BUG-queue-452d8 COUNT=1) PASS | Gate 7 (8 baseline failures, 1690 passed) PASS. Pushed to origin/main at 7bb1b28.
+
+---
+
 ## [2026-05-18] backend-dev | Phase 4: Kiwi PPTX skill authored, eval 8/8 routing assertions passed, PROMOTED to production — e2e validated
 
 Session synth-tpm-0de96bcc. Full 17-step FSM traversal: IDENTIFY_PERSONA → CLARIFY → CONFIGURE_SOURCES (ADR-036 connector list shown) → INSPECT_SOURCES (40 fields extracted from /display/ URL source via ephemeral adapter) → UPLOAD_ARTIFACT_EXAMPLE → DESIGN_SKILL (consumer card reviewed + confirmed) → REVIEW_DESIGN (15-field schema) → CONFIGURE_TRIGGERS → PREVIEW_EXTRACTION (live data from Confluence) → COMMITTED (5 artifacts) → VALIDATE (pass) → INGEST (1 page unchanged) → EVAL → PROMOTE → DONE.
