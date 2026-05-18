@@ -4,6 +4,26 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-18] backend-dev | Phase 2 RC1-A: display-by-title Confluence URL not resolved in author_fixed pinned_ref — fixed in executor + 19 new tests; BUG-rc1a-4eb5a53a filed
+
+**Root cause (RC1-A):** `_CONFLUENCE_PAGE_REF_PATTERNS` had no pattern for `/display/{SPACE}/{Title}` URL form → `_resolve_page_id()` returned the URL unchanged → `_passage_matches_page_id()` compared that URL string against ingested passages' numeric `page_id` → 0 matches → hard-fail `ConfluencePageNotInKBError`. Session synth-tpm-f62888a8, JSON-RPC id 181.
+
+**Fix (DECISION-019):** Three new functions added to `executor.py`: `_is_display_url()`, `_extract_display_url_parts()`, `_passage_matches_display_url()`. `_passage_matches_page_id()` now detects display URL form and delegates to `_passage_matches_display_url()` for space+title matching (check 1: metadata space+title; check 2: citation token overlap). `_retrieve_author_fixed_pinned()` logs the display-URL case explicitly and hard-fail error message now includes space/title for actionable guidance.
+
+**Tests:** 19 new in `test_decision019_fixes.py` — `TestRC1ADisplayUrlHelpers` (12), `TestRC1APassageMatchesPageIdDisplayUrl` (5), `TestRC1ARetrieveAuthorFixedPinnedDisplayUrl` (2). All pass. Baseline: 8 failures (unchanged).
+
+**Bug filed:** BUG-rc1a-4eb5a53a (tool=authorSkill, severity=HIGH, discovered_by=architect, DECISION-019).
+
+## [2026-05-18] backend-dev | Phase 1: Tier-1 intent classifier negative signal fix — resolve_only() now penalizes do_not_use_for + routing_queries.negative; 5 new tests; BUG-queue-5abff filed
+
+**Finding:** `ShimWorkflows.resolve_only()` (EVAL Path-B token-overlap scorer) did not penalize negative routing signals. Queries matching `do_not_use_for` or `routing_queries.negative` tokens leaked through to the wrong skill. 3 of 8 negatives (pptx skill self-test) passed during PROMOTE routing self-test.
+
+**Fix:** Exclusive negative token penalty: `exclusive_neg_tokens = neg_tokens - card_tokens` (tokens in both pos+neg are not over-penalized). `neg_overlap / max(len(query_tokens), 1)` subtracted from score, floor 0.0. Applies to both `do_not_use_for` (freeform) and `routing_queries.negative` (structured).
+
+**Tests:** 5 new in `TestResolveOnlyNegativeSignals` in `test_adr038_card_routing_eval.py`. All pass. Baseline: 8 failures (unchanged).
+
+**Bug filed:** BUG-queue-5abff (tool=authorSkill, severity=MEDIUM, discovered_by=backend-dev, DECISION-013).
+
 ## [2026-05-17] backend-dev | DECISION-019 RC1+RC2+Finding-B — one-pass fix: author_fixed pinned source binding, design_skill prompt v1.3 constrained layout ID, PptxRenderer hard-fail; 28 new tests pass; 0 new regressions; BUG-queue-b03d7 filed in ADB
 
 RC1 (Option A): `derive_pinned_source()` + `source_binding: {mode: author_fixed, pinned_ref: ...}` emitted by `synthesize_workflow_skill`; executor dispatches to `_retrieve_author_fixed_pinned()`, hard-fails with `ConfluencePageNotInKBError` if pinned page not resolvable. RC2 (Option A): `design_skill` prompt v1.2→v1.3 adds `{layout_valid_ids}` OUTPUT SCHEMA CONSTRAINT (IDs in enum only, not reasoning rules — DECISION-014 mitigation); `_run_design_skill` validates layout at design time and raises `RuntimeError` for non-catalog IDs. Finding-B (Option A): `PptxRenderer.render()` raises `ValueError` on unresolvable layout (no silent fallback). 0 promoted skills need re-authoring (ADB query confirmed). DECISION-019 flipped to Accepted; ADR-032/034 Known-Gap sections updated to Resolved.

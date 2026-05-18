@@ -864,3 +864,156 @@ class TestPromptRegistry:
         assert required.issubset(set(card_meta.required_vars)), (
             f"design_skill_card missing required_vars: {required - set(card_meta.required_vars)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 — DECISION-013 classifier precision fix
+# resolve_only() must penalise negative routing_queries and do_not_use_for
+# ---------------------------------------------------------------------------
+
+def _make_card_with_routing(
+    name: str,
+    positives: list[str],
+    negatives: list[str],
+    summary: str = "",
+    do_not_use_for: str = "",
+) -> dict:
+    """Helper: build a minimal promoted card dict for ShimWorkflows tests."""
+    return {
+        "name": name,
+        "persona": "tpm",
+        "summary": summary,
+        "use_when": "",
+        "example_invocations": positives[:2] if positives else [],
+        "do_not_use_for": do_not_use_for,
+        "_cfg": {
+            "skill_card": {
+                "routing_queries": {
+                    "positive": positives,
+                    "negative": negatives,
+                },
+            },
+        },
+    }
+
+
+class TestResolveOnlyNegativeSignals:
+    """DECISION-013 Phase-1: resolve_only() must honor negative routing_queries
+    and do_not_use_for as disqualifying signals.
+
+    Without this fix, a query like 'send email summary to stakeholders' would
+    share tokens ('summary', 'stakeholders') with a PPTX skill's positive queries
+    and score > 0, causing the routing self-test to report a false positive.
+    """
+
+    def _make_shim(self, card: dict) -> ShimWorkflows:
+        """Create a ShimWorkflows with one YAML skill and inject the test card."""
+        import tempfile
+        tmp = tempfile.mkdtemp()
+        wf_dir = Path(tmp) / "workflow_skills"
+        persona_dir = wf_dir / (card.get("persona") or "tpm")
+        persona_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write a minimal YAML for this card so load() succeeds
+        skill_name = card.get("name", "test_skill")
+        skill_yaml = {
+            "workflow_skill": skill_name,
+            "persona": card.get("persona", "tpm"),
+            "status": "promoted",
+            "trigger": {"on_request": {"enabled": True, "output_format": "pptx"}},
+            "skill_card": (card.get("_cfg") or {}).get("skill_card") or {
+                "summary": card.get("summary", ""),
+                "use_when": card.get("use_when", ""),
+                "example_invocations": card.get("example_invocations") or [],
+                "do_not_use_for": card.get("do_not_use_for", ""),
+            },
+        }
+        (persona_dir / f"{skill_name}.yaml").write_text(
+            yaml.safe_dump(skill_yaml, sort_keys=False)
+        )
+        # Use skill_store=None (laptop/disk mode) so all disk cards are served
+        shim = ShimWorkflows(wf_dir, skill_store=None)
+        # Post-load: replace the loaded card with our full test card so that
+        # _cfg.skill_card with routing_queries is present for resolve_only().
+        shim._cards = [card]
+        shim._disk_cards = [card]
+        return shim
+
+    def test_positive_query_routes_to_skill(self):
+        """A positive query that matches the skill's signals must route to it."""
+        card = _make_card_with_routing(
+            name="kiwi_pptx",
+            positives=["create kiwi project slide deck for exec review"],
+            negatives=["send email update to stakeholders"],
+            summary="Generate a Kiwi project PPTX slide",
+        )
+        shim = self._make_shim(card)
+        result = shim.resolve_only("create kiwi project pptx slide", scope="ingest_or_later")
+        assert result["matched"] is True
+        assert result["skill_name"] == "kiwi_pptx"
+
+    def test_negative_query_does_not_route_to_skill(self):
+        """A query matching a negative routing_query must NOT route to the skill.
+        DECISION-013 Phase-1 fix: exclusive negative tokens penalise the score.
+        """
+        card = _make_card_with_routing(
+            name="kiwi_pptx",
+            positives=["create kiwi project slide deck for exec review"],
+            negatives=["send email update to stakeholders"],
+            summary="Generate a Kiwi project PPTX slide",
+        )
+        shim = self._make_shim(card)
+        result = shim.resolve_only("send email update to stakeholders", scope="ingest_or_later")
+        # The negative query's tokens should penalise the score to 0 or
+        # be outweighed enough that matched=False.
+        assert result["matched"] is False, (
+            f"Negative query leaked to skill '{result.get('skill_name')}' "
+            f"with confidence={result.get('confidence')} — negative scoring not applied"
+        )
+
+    def test_do_not_use_for_tokens_penalise_score(self):
+        """Tokens from do_not_use_for that are not in positives should penalise."""
+        card = _make_card_with_routing(
+            name="kiwi_pptx",
+            positives=["create kiwi project slide deck for exec review"],
+            negatives=[],
+            summary="Generate a Kiwi project PPTX slide",
+            do_not_use_for="email single-fact lookup non-deck requests",
+        )
+        shim = self._make_shim(card)
+        result = shim.resolve_only("write email single-fact lookup", scope="ingest_or_later")
+        assert result["matched"] is False, (
+            "do_not_use_for tokens should penalise score for 'email single-fact lookup'"
+        )
+
+    def test_neutral_query_no_overlap_does_not_match(self):
+        """A query with no overlap with positive OR negative tokens does not match."""
+        card = _make_card_with_routing(
+            name="kiwi_pptx",
+            positives=["create kiwi project slide deck"],
+            negatives=["send email update"],
+        )
+        shim = self._make_shim(card)
+        result = shim.resolve_only("quarterly finance budget analysis", scope="ingest_or_later")
+        assert result["matched"] is False
+
+    def test_shared_vocabulary_not_over_penalised(self):
+        """Tokens that appear in BOTH positive and negative are not penalised
+        (they are part of the positive signal; the penalty only applies to
+        EXCLUSIVE negative tokens not present in positives).
+        """
+        card = _make_card_with_routing(
+            name="kiwi_pptx",
+            positives=["create kiwi project slide summary"],
+            negatives=["send email project summary to stakeholders"],
+            summary="",
+        )
+        shim = self._make_shim(card)
+        # 'project' and 'summary' appear in BOTH positive and negative.
+        # A query containing 'kiwi' + 'slide' (positive-only tokens) should still route.
+        result = shim.resolve_only("create kiwi project slide", scope="ingest_or_later")
+        # 'project' is in exclusive_neg only if it's in neg but not pos — it IS in pos,
+        # so it should NOT penalise. The query should still match.
+        assert result["matched"] is True, (
+            "Shared positive/negative vocabulary should not over-penalise a positive query"
+        )

@@ -65,6 +65,95 @@ _CONFLUENCE_PAGE_REF_PATTERNS = [
     re.compile(r"(?i)\bpage[\s_-]?id\b[\s:]+(\d{8,})"),
 ]
 
+# RC1-A fix (DECISION-019): display-by-title URL pattern — captures (SPACE, title_slug).
+# Form: https://.../confluence/display/{SPACE}/{Title+With+Pluses_or_underscores}
+# Does NOT yield a numeric pageId — used by _is_display_url() and
+# _passage_matches_display_url() to match passages by space+title slug.
+_DISPLAY_URL_PATTERN = re.compile(
+    r"/display/([A-Z0-9_\-]+)/([^/?#]+)",
+    re.IGNORECASE,
+)
+
+
+def _is_display_url(ref: str) -> bool:
+    """Return True if ref is a Confluence display-by-title URL (/display/SPACE/Title).
+
+    RC1-A: These URLs are NOT parseable by _resolve_page_id() because they
+    encode SPACE+Title, not a numeric pageId.  When _resolve_page_id returns the
+    original URL unchanged (non-numeric), callers use this check to switch to
+    the space+title matching path instead of the pageId matching path.
+    """
+    return bool(_DISPLAY_URL_PATTERN.search(ref))
+
+
+def _extract_display_url_parts(ref: str) -> tuple[str, str] | None:
+    """Extract (space_key, title_slug) from a Confluence /display/SPACE/Title URL.
+
+    Returns (space_key.upper(), url-decoded title slug) or None if the URL
+    does not match the display-by-title form.
+
+    RC1-A fix: title slugs in Confluence display URLs use + for spaces and
+    are otherwise URL-encoded.  We normalise + → space and %XX → char so
+    that 'FAaaS+Kiwi+Project' matches 'FAaaS Kiwi Project' in passage metadata.
+    """
+    m = _DISPLAY_URL_PATTERN.search(ref)
+    if not m:
+        return None
+    space_key = m.group(1).upper()
+    title_slug = m.group(2).replace("+", " ").replace("_", " ").strip()
+    # URL-decode percent-encoded chars
+    try:
+        from urllib.parse import unquote
+        title_slug = unquote(title_slug)
+    except Exception:
+        pass
+    return space_key, title_slug
+
+
+def _passage_matches_display_url(passage: dict, space_key: str, title_slug: str) -> bool:
+    """Return True if a passage corresponds to a Confluence page identified by
+    space_key + title_slug (the display-by-title URL form).
+
+    RC1-A fix: when the pinned_ref is a /display/SPACE/Title URL that _resolve_page_id
+    could not convert to a numeric pageId, we fall back to matching by space+title
+    in the passage metadata/citation.
+
+    Checks (in priority order):
+      1. passage["metadata"]["space"] == space_key AND
+         passage["metadata"]["title"] contains title_slug (case-insensitive)
+      2. passage["citation"] contains the original space_key AND title_slug
+         tokens (URL-encoded or plain, best-effort).
+
+    The no-silent-substitution guard (ADR-031) is maintained because we only
+    match when BOTH space AND title agree — a different-space or different-title
+    page will never match.
+    """
+    meta = passage.get("metadata") or {}
+
+    # Check 1: structured metadata space + title
+    meta_space = str(meta.get("space", "")).strip().upper()
+    meta_title = str(meta.get("title", "")).strip()
+    if meta_space and meta_title:
+        if meta_space == space_key and title_slug.lower() in meta_title.lower():
+            return True
+
+    # Check 2: citation URL contains both space key and title slug tokens
+    citation = str(passage.get("citation", "")).strip()
+    if citation:
+        citation_lower = citation.lower()
+        # The citation might be a /display/ URL itself, a /pages/<id>?pageId= URL,
+        # or a wiki:// URI. We check if the citation contains the space key AND
+        # at least the first significant word of the title slug (to avoid
+        # false matches on single short words).
+        space_in_citation = space_key.lower() in citation_lower
+        title_words = [w for w in title_slug.lower().split() if len(w) > 3]
+        if title_words and space_in_citation:
+            words_matched = sum(1 for w in title_words if w in citation_lower)
+            if words_matched >= min(2, len(title_words)):
+                return True
+
+    return False
+
 
 class ConfluencePageNotInKBError(Exception):
     """Raised when the user requested a specific Confluence page that is not
@@ -136,14 +225,26 @@ def _passage_matches_page_id(passage: dict, requested_page_id: str) -> bool:
     Confluence page id.
 
     Checks (in order):
-      1. passage["metadata"]["page_id"] — set by SearchWikiRetriever and
+      1. RC1-A: if requested_page_id is a display-by-title URL (/display/SPACE/Title),
+         delegate to _passage_matches_display_url() for space+title matching — because
+         _resolve_page_id() cannot extract a numeric pageId from this URL form, so the
+         caller passes the original URL string and we must match by space+title instead.
+      2. passage["metadata"]["page_id"] — set by SearchWikiRetriever and
          ReadWikiPageRetriever on every Result object.
-      2. requested_page_id appears anywhere in passage["citation"] — covers
+      3. requested_page_id appears anywhere in passage["citation"] — covers
          Confluence URLs (https://.../wiki/...?pageId=<id>), wiki:// URIs
          (wiki://<page_id>), and fixture paths.
 
     ADR-032 P3 — bound to the real field names in Result + retriever metadata.
+    RC1-A fix (DECISION-019): display-by-title URL support added.
     """
+    # RC1-A: display-by-title URL form — _resolve_page_id returned the URL unchanged,
+    # so requested_page_id IS the display URL.  Delegate to space+title matcher.
+    if _is_display_url(requested_page_id):
+        parts = _extract_display_url_parts(requested_page_id)
+        if parts:
+            return _passage_matches_display_url(passage, parts[0], parts[1])
+
     meta = passage.get("metadata") or {}
     meta_page_id = str(meta.get("page_id", "")).strip()
     if meta_page_id and meta_page_id == requested_page_id:
@@ -1069,6 +1170,18 @@ class WorkflowExecutor:
         # Resolve a numeric page_id from the pinned_ref (URL or bare ID).
         pinned_page_id = _resolve_page_id(pinned_ref)
 
+        # RC1-A: if _resolve_page_id returned the original ref unchanged, it may be a
+        # display-by-title URL (/display/SPACE/Title) which contains no numeric pageId.
+        # In that case _passage_matches_page_id will automatically delegate to
+        # _passage_matches_display_url() via the _is_display_url() branch.
+        # We log this case explicitly so operators can identify display-URL pinned refs.
+        if pinned_page_id == pinned_ref and _is_display_url(pinned_ref):
+            log.info(
+                "RC1-A display-URL pinned_ref: %r — numeric pageId not resolvable from "
+                "URL form; will match passages by space+title slug instead (DECISION-019).",
+                pinned_ref,
+            )
+
         # --- Strategy 1: KB retriever lookup scoped to the pinned page -------
         # Attempt to retrieve passages from the KB that match the pinned page.
         # We use the existing retrievers but then filter to only passages that
@@ -1157,11 +1270,29 @@ class WorkflowExecutor:
             f"Pinned Confluence page {pinned_ref!r} (from source_binding.pinned_ref) "
             "is not found in the knowledge base via KB retrieval. "
         ]
+        # RC1-A: display-URL pinned_ref gives actionable guidance referencing the URL form.
+        is_display = _is_display_url(pinned_ref) and pinned_page_id == pinned_ref
         if not ingest_on_demand:
-            reason_parts.append(
-                f"Run: kb-cli ingest --page-id {pinned_page_id} --persona tpm "
-                "to ingest the page, or re-author the skill with ingest_on_demand: true."
-            )
+            if is_display:
+                parts = _extract_display_url_parts(pinned_ref)
+                display_hint = ""
+                if parts:
+                    display_hint = (
+                        f" (display-by-title URL: space={parts[0]!r}, title={parts[1]!r})"
+                    )
+                reason_parts.append(
+                    f"The pinned_ref is a display-by-title URL{display_hint}. "
+                    "Run: kb-cli ingest --space-key {parts[0]} --title {parts[1]!r} --persona tpm "
+                    "to ingest the page, or re-author the skill with ingest_on_demand: true."
+                    if parts else
+                    "Run: kb-cli ingest to ingest the page, or re-author the skill with "
+                    "ingest_on_demand: true."
+                )
+            else:
+                reason_parts.append(
+                    f"Run: kb-cli ingest --page-id {pinned_page_id} --persona tpm "
+                    "to ingest the page, or re-author the skill with ingest_on_demand: true."
+                )
         elif self.confluence_adapter is None:
             reason_parts.append(
                 "ingest_on_demand: true is set but the Confluence adapter is not "

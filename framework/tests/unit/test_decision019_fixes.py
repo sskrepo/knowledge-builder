@@ -572,3 +572,310 @@ class TestFindingBRendererHardFail:
         result = renderer.render(data)
         assert isinstance(result, bytes)
         assert len(result) > 100
+
+
+# ===========================================================================
+# RC1-A Tests — display-by-title URL pinned_ref matching (DECISION-019)
+# ===========================================================================
+# Root cause: _CONFLUENCE_PAGE_REF_PATTERNS has NO pattern for
+# /display/{SPACE}/{Title} URL form → _resolve_page_id returns URL unchanged
+# → _passage_matches_page_id compared URL against ingested passages' numeric
+# pageId → 0 matches → hard-fail ConfluencePageNotInKBError.
+# Fix: _passage_matches_page_id detects display URL form and delegates to
+# _passage_matches_display_url() for space+title matching.
+# ===========================================================================
+
+
+class TestRC1ADisplayUrlHelpers:
+    """_is_display_url, _extract_display_url_parts, _passage_matches_display_url."""
+
+    def test_is_display_url_matches_standard_form(self):
+        """Standard Confluence display URL is detected."""
+        from framework.workflow_runtime.executor import _is_display_url
+        assert _is_display_url(
+            "https://confluence.oraclecorp.com/confluence/display/OCIFACP/FAaaS+Kiwi+Project"
+        )
+
+    def test_is_display_url_matches_lowercase_display(self):
+        """Case-insensitive match on /display/ segment."""
+        from framework.workflow_runtime.executor import _is_display_url
+        assert _is_display_url("https://confluence.example.com/display/MYSPACE/Some+Page")
+
+    def test_is_display_url_rejects_pageid_url(self):
+        """?pageId=<numeric> URL is NOT a display URL."""
+        from framework.workflow_runtime.executor import _is_display_url
+        assert not _is_display_url(
+            "https://confluence.oraclecorp.com/pages/18625350641?pageId=18625350641"
+        )
+
+    def test_is_display_url_rejects_bare_numeric_id(self):
+        """Bare numeric page ID string is not a display URL."""
+        from framework.workflow_runtime.executor import _is_display_url
+        assert not _is_display_url("18625350641")
+
+    def test_extract_display_url_parts_space_and_title(self):
+        """Returns (SPACE_KEY, decoded_title) for a standard display URL."""
+        from framework.workflow_runtime.executor import _extract_display_url_parts
+        parts = _extract_display_url_parts(
+            "https://confluence.oraclecorp.com/confluence/display/OCIFACP/FAaaS+Kiwi+Project"
+        )
+        assert parts is not None
+        space, title = parts
+        assert space == "OCIFACP"
+        assert "kiwi" in title.lower()  # URL-decoded + normalised
+
+    def test_extract_display_url_parts_title_with_percent_encoding(self):
+        """URL-encoded chars in title are decoded."""
+        from framework.workflow_runtime.executor import _extract_display_url_parts
+        parts = _extract_display_url_parts(
+            "https://confluence.example.com/display/ENG/My%20Page%20Title"
+        )
+        assert parts is not None
+        _, title = parts
+        assert "my" in title.lower()
+        assert "page" in title.lower()
+
+    def test_extract_display_url_parts_none_for_non_display_url(self):
+        """Returns None for non-display URLs."""
+        from framework.workflow_runtime.executor import _extract_display_url_parts
+        assert _extract_display_url_parts("https://confluence.example.com/pages/12345") is None
+
+    def test_passage_matches_display_url_via_metadata(self):
+        """Match via passage metadata space + title (priority 1 path)."""
+        from framework.workflow_runtime.executor import _passage_matches_display_url
+        passage = {
+            "text": "FAaaS Kiwi Project overview",
+            "citation": "wiki://OCIFACP/faaas-kiwi-project",
+            "metadata": {"space": "OCIFACP", "title": "FAaaS Kiwi Project", "page_id": "12345678901"},
+        }
+        assert _passage_matches_display_url(passage, "OCIFACP", "FAaaS Kiwi Project")
+
+    def test_passage_matches_display_url_case_insensitive_title(self):
+        """Title match is case-insensitive."""
+        from framework.workflow_runtime.executor import _passage_matches_display_url
+        passage = {
+            "text": "content",
+            "citation": "",
+            "metadata": {"space": "OCIFACP", "title": "faaas kiwi project"},
+        }
+        assert _passage_matches_display_url(passage, "OCIFACP", "FAaaS Kiwi Project")
+
+    def test_passage_matches_display_url_wrong_space_rejected(self):
+        """Different space key is rejected even if title matches."""
+        from framework.workflow_runtime.executor import _passage_matches_display_url
+        passage = {
+            "text": "content",
+            "citation": "",
+            "metadata": {"space": "OTHER", "title": "FAaaS Kiwi Project"},
+        }
+        assert not _passage_matches_display_url(passage, "OCIFACP", "FAaaS Kiwi Project")
+
+    def test_passage_matches_display_url_no_metadata_falls_back_to_citation(self):
+        """When metadata is missing, citation-based fallback is used."""
+        from framework.workflow_runtime.executor import _passage_matches_display_url
+        passage = {
+            "text": "content",
+            "citation": "https://confluence.oraclecorp.com/confluence/display/OCIFACP/FAaaS+Kiwi+Project",
+            "metadata": {},
+        }
+        # Title has 3 significant words (>3 chars): faaas, kiwi, project
+        # Space in citation + at least 2 of those words → match
+        assert _passage_matches_display_url(passage, "OCIFACP", "FAaaS Kiwi Project")
+
+    def test_passage_no_match_different_page(self):
+        """Completely different page returns False."""
+        from framework.workflow_runtime.executor import _passage_matches_display_url
+        passage = {
+            "text": "content",
+            "citation": "https://confluence.example.com/display/ENG/Something+Else",
+            "metadata": {"space": "ENG", "title": "Something Else"},
+        }
+        assert not _passage_matches_display_url(passage, "OCIFACP", "FAaaS Kiwi Project")
+
+
+class TestRC1APassageMatchesPageIdDisplayUrl:
+    """_passage_matches_page_id routes to display URL matching when pinned_ref is a display URL.
+
+    This is the core RC1-A fix: when _resolve_page_id returns the original URL unchanged
+    (because no numeric pageId is extractable), the numeric pageId path fails.
+    _passage_matches_page_id now detects the display URL form and delegates to
+    _passage_matches_display_url() instead.
+    """
+
+    DISPLAY_URL = (
+        "https://confluence.oraclecorp.com/confluence/display/OCIFACP/FAaaS+Kiwi+Project"
+    )
+
+    def test_display_url_pinned_ref_matches_metadata_passage(self):
+        """Display URL pinned_ref matches passage by space+title metadata."""
+        from framework.workflow_runtime.executor import _passage_matches_page_id
+        passage = {
+            "text": "Kiwi Project content",
+            "citation": "wiki://OCIFACP/faaas-kiwi",
+            "metadata": {"space": "OCIFACP", "title": "FAaaS Kiwi Project", "page_id": "12345678901"},
+        }
+        # requested_page_id IS the display URL (resolve failed → returned unchanged)
+        assert _passage_matches_page_id(passage, self.DISPLAY_URL)
+
+    def test_display_url_pinned_ref_no_match_different_space(self):
+        """Display URL does NOT match passage from a different space."""
+        from framework.workflow_runtime.executor import _passage_matches_page_id
+        passage = {
+            "text": "content",
+            "citation": "",
+            "metadata": {"space": "OTHER", "title": "FAaaS Kiwi Project"},
+        }
+        assert not _passage_matches_page_id(passage, self.DISPLAY_URL)
+
+    def test_numeric_page_id_still_works(self):
+        """Numeric pageId path is unaffected by the RC1-A fix."""
+        from framework.workflow_runtime.executor import _passage_matches_page_id
+        passage = {
+            "text": "content",
+            "citation": "https://confluence.oraclecorp.com/pages/12345678901",
+            "metadata": {"page_id": "12345678901"},
+        }
+        assert _passage_matches_page_id(passage, "12345678901")
+
+    def test_numeric_page_id_in_citation_still_works(self):
+        """Numeric pageId in citation (not metadata) still matches."""
+        from framework.workflow_runtime.executor import _passage_matches_page_id
+        passage = {
+            "text": "content",
+            "citation": "https://confluence.oraclecorp.com/pages/viewpage.action?pageId=12345678901",
+            "metadata": {},
+        }
+        assert _passage_matches_page_id(passage, "12345678901")
+
+    def test_non_display_url_not_matched_by_display_path(self):
+        """A non-display URL with no numeric ID does not falsely match."""
+        from framework.workflow_runtime.executor import _passage_matches_page_id
+        passage = {
+            "text": "content",
+            "citation": "https://confluence.example.com/pages/SPACE/page.html",
+            "metadata": {"space": "SPACE", "title": "Some Page"},
+        }
+        # Not a display URL, not a numeric ID, citation doesn't contain the URL
+        assert not _passage_matches_page_id(
+            passage,
+            "https://confluence.example.com/pages/OTHER/page.html"
+        )
+
+
+class TestRC1ARetrieveAuthorFixedPinnedDisplayUrl:
+    """_retrieve_author_fixed_pinned handles display-URL pinned_ref (RC1-A e2e)."""
+
+    DISPLAY_URL = (
+        "https://confluence.oraclecorp.com/confluence/display/OCIFACP/FAaaS+Kiwi+Project"
+    )
+
+    def _make_executor(self, retrievers=None, shim_kb=None):
+        from framework.workflow_runtime.executor import WorkflowExecutor
+        return WorkflowExecutor(
+            store=None,
+            llm=None,
+            retrievers=retrievers or {},
+            shim_kb=shim_kb,
+            confluence_adapter=None,
+        )
+
+    def test_display_url_pinned_ref_found_in_kb_returns_passages(self):
+        """When pinned_ref is a display URL and matching passages are in KB, returns them.
+
+        This is the synth-tpm-f62888a8 scenario: the skill was authored with a
+        /display/OCIFACP/FAaaS+Kiwi+Project URL but _resolve_page_id returned the
+        URL unchanged.  The fix makes _passage_matches_page_id route to space+title
+        matching, so passages are found.
+        """
+        from framework.workflow_runtime.executor import WorkflowExecutor
+
+        # Passage from KB has numeric page_id + space+title metadata
+        matching_passage = MagicMock()
+        matching_passage.text = "FAaaS Kiwi Project — Q3 update"
+        matching_passage.citation_url = (
+            "https://confluence.oraclecorp.com/confluence/display/OCIFACP/FAaaS+Kiwi+Project"
+        )
+        matching_passage.metadata = {
+            "space": "OCIFACP",
+            "title": "FAaaS Kiwi Project",
+            "page_id": "12345678901",
+        }
+
+        mock_retriever = MagicMock(return_value=[matching_passage])
+        mock_shim_kb = MagicMock()
+        mock_shim_kb.all_cards.return_value = [
+            {
+                "name": "faaas_kiwi_project_pptx",
+                "persona": "tpm",
+                "retrieval_tools": ["search_wiki"],
+            }
+        ]
+
+        executor = self._make_executor(
+            retrievers={"search_wiki": mock_retriever},
+            shim_kb=mock_shim_kb,
+        )
+        cfg = {
+            "workflow_skill": "tpm.faaas_kiwi_project_pptx",
+            "persona": "tpm",
+            "source_binding": {
+                "mode": "author_fixed",
+                "source_type": "confluence_page",
+                "pinned_ref": self.DISPLAY_URL,
+                "space_allow_list": ["OCIFACP"],
+                "ingest_on_demand": False,
+            },
+            "requires_extractions": [{"kb": "tpm.faaas_kiwi_project_pptx"}],
+        }
+        source_binding = cfg["source_binding"]
+        passages = executor._retrieve_author_fixed_pinned(
+            cfg, {"input": "kiwi project status"}, source_binding
+        )
+
+        assert len(passages) == 1
+        assert passages[0]["text"] == "FAaaS Kiwi Project — Q3 update"
+
+    def test_display_url_pinned_ref_not_in_kb_raises_confluence_error(self):
+        """When display-URL pinned page is not in KB, hard-fails with ConfluencePageNotInKBError."""
+        from framework.workflow_runtime.executor import WorkflowExecutor, ConfluencePageNotInKBError
+
+        # Retriever returns a passage from a DIFFERENT space (not OCIFACP)
+        non_matching_passage = MagicMock()
+        non_matching_passage.text = "Some other content"
+        non_matching_passage.citation_url = "https://confluence.example.com/display/OTHER/Other+Page"
+        non_matching_passage.metadata = {"space": "OTHER", "title": "Other Page"}
+
+        mock_retriever = MagicMock(return_value=[non_matching_passage])
+        mock_shim_kb = MagicMock()
+        mock_shim_kb.all_cards.return_value = [
+            {
+                "name": "faaas_kiwi_project_pptx",
+                "persona": "tpm",
+                "retrieval_tools": ["search_wiki"],
+            }
+        ]
+
+        executor = self._make_executor(
+            retrievers={"search_wiki": mock_retriever},
+            shim_kb=mock_shim_kb,
+        )
+        cfg = {
+            "workflow_skill": "tpm.faaas_kiwi_project_pptx",
+            "persona": "tpm",
+            "source_binding": {
+                "mode": "author_fixed",
+                "source_type": "confluence_page",
+                "pinned_ref": self.DISPLAY_URL,
+                "space_allow_list": ["OCIFACP"],
+                "ingest_on_demand": False,
+            },
+            "requires_extractions": [{"kb": "tpm.faaas_kiwi_project_pptx"}],
+        }
+        source_binding = cfg["source_binding"]
+
+        with pytest.raises(ConfluencePageNotInKBError) as exc_info:
+            executor._retrieve_author_fixed_pinned(
+                cfg, {"input": "kiwi project"}, source_binding
+            )
+        # Error message must contain the display URL (RC1-A: actionable error)
+        assert "OCIFACP" in str(exc_info.value) or "FAaaS" in str(exc_info.value) or "display" in str(exc_info.value).lower()

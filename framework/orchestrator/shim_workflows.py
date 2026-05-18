@@ -365,10 +365,12 @@ class ShimWorkflows:
                 "matched": False,
             }
 
-        # Simple embedding-free matching: score each card by term overlap between
+        # Token-overlap matching: score each card by term overlap between
         # the query and the card's routing_queries.positive + example_invocations +
-        # summary + use_when.  This is sufficient for EVAL Path-B self-test where
-        # the positive queries are curated to be highly specific to the skill.
+        # summary + use_when.  Negative routing_queries and do_not_use_for tokens
+        # PENALISE the score — queries that overlap more with negatives than positives
+        # will not route to this skill (DECISION-013 Phase-1 precision fix).
+        #
         # A real vector search can be plugged in here when available.
         query_lower = query.lower()
         query_tokens = set(query_lower.split())
@@ -378,6 +380,7 @@ class ShimWorkflows:
 
         for card in candidate_cards:
             card_tokens: set[str] = set()
+            neg_tokens: set[str] = set()
 
             # Extract tokens from all routing signal fields
             skill_card = (card.get("_cfg") or {}).get("skill_card") or {}
@@ -392,11 +395,29 @@ class ShimWorkflows:
             if card.get("use_when"):
                 card_tokens.update(card["use_when"].lower().split())
 
+            # Negative disqualifiers: routing_queries.negative and do_not_use_for.
+            # Tokens that appear ONLY in negatives (not in positives) are disqualifying.
+            for neg_q in (rq.get("negative") or []):
+                neg_tokens.update(neg_q.lower().split())
+            if card.get("do_not_use_for"):
+                neg_tokens.update(str(card["do_not_use_for"]).lower().split())
+            # Restrict neg_tokens to tokens not present in the positive signal
+            # so we don't penalise shared vocabulary (e.g. common words).
+            exclusive_neg_tokens = neg_tokens - card_tokens
+
             if not card_tokens:
                 continue
 
             overlap = len(query_tokens & card_tokens)
             score = overlap / max(len(query_tokens), 1)
+
+            # Apply negative penalty: each exclusive negative token overlapping the
+            # query reduces the score proportionally.  If all query tokens are
+            # exclusive-negative tokens, the score collapses to 0.
+            if exclusive_neg_tokens:
+                neg_overlap = len(query_tokens & exclusive_neg_tokens)
+                penalty = neg_overlap / max(len(query_tokens), 1)
+                score = max(0.0, score - penalty)
 
             if score > best_score:
                 best_score = score
