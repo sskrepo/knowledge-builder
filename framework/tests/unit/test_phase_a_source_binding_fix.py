@@ -299,10 +299,26 @@ class TestFixedSourceIntentYieldsPinnedArtifact:
         assert sb["source_type"] == "confluence_page"
         assert sb["ingest_on_demand"] is False
 
-        # Gate 1b: trigger input must still be present (generic for author_fixed)
+        # Gate 1b: trigger input must be present AND named "query" (not "input")
+        # for author_fixed + pinned_source skills — satisfies acceptance gate 1
+        # which says NOT {name:input, type:string}.
         trigger = result.get("trigger", {})
         inputs = trigger.get("on_request", {}).get("inputs", [])
         assert len(inputs) > 0, "trigger.on_request.inputs must be non-empty"
+        # The first input must be named "query" (not the placeholder "input")
+        first_input = inputs[0]
+        assert first_input["name"] == "query", (
+            f"trigger.on_request.inputs[0].name must be 'query' for "
+            f"author_fixed + pinned_source skills, got: {first_input['name']!r}. "
+            "The hollow-state symptom was {name:input,type:string} — fix must "
+            "produce a meaningful named input."
+        )
+        assert first_input["type"] == "string"
+        # Must NOT be the placeholder generic input
+        assert first_input["name"] != "input", (
+            "trigger input must NOT be the placeholder {name:input} for "
+            "author_fixed + pinned_source skills"
+        )
 
     def test_source_binding_mode_ambiguous_with_display_url_resolved_at_capture_intent(self):
         """

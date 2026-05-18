@@ -327,6 +327,11 @@ def synthesize_workflow_skill(
             skill_name,
             source_binding_mode=source_binding_mode,
             input_param=input_param,
+            # DECISION-019 Phase A: pass pinned_source_type so _build_trigger
+            # can produce a named "query" input instead of the placeholder "input".
+            pinned_source_type=(
+                pinned_source.get("source_type") if pinned_source else None
+            ),
         ),
         "skill_card": _build_skill_card(task, skill_name, output_format),
         "requires_extractions": _build_requires_extractions(
@@ -390,6 +395,11 @@ def _build_trigger(
     skill_name: str,
     source_binding_mode: str = "author_fixed",
     input_param: str = "page_id",
+    # DECISION-019 Phase A: for author_fixed skills with a pinned external source,
+    # the trigger input name must be "query" (not the placeholder "input") so the
+    # skill contract reflects its purpose — accepting a USER QUERY, not a page ref.
+    # This satisfies acceptance gate 1 (NOT {name:input,type:string} for pinned skills).
+    pinned_source_type: str | None = None,
 ) -> dict:
     trigger: dict = {}
 
@@ -408,9 +418,33 @@ def _build_trigger(
                     "required": True,
                 }
             ]
+        elif (
+            source_binding_mode == "author_fixed"
+            and pinned_source_type is not None
+            and not trigger_cfg.get("inputs")
+        ):
+            # DECISION-019 Phase A: author_fixed with a pinned external source.
+            # The trigger accepts a USER QUERY (not a page reference), so we name
+            # the input "query" rather than the placeholder "input".  This makes
+            # the contract explicit and satisfies the acceptance gate that rejects
+            # the hollow-state generic {name:input,type:string} placeholder.
+            # Only overrides when trigger_cfg does NOT already have named inputs
+            # (preserves pre-DECISION-019 byte-identical output for existing skills
+            # that explicitly declared their trigger inputs).
+            inputs = [
+                {
+                    "name": "query",
+                    "type": "string",
+                    "description": (
+                        f"User query or request. The skill retrieves data from the "
+                        f"fixed {pinned_source_type} source."
+                    ),
+                    "required": True,
+                }
+            ]
         else:
-            # author_fixed: use whatever the trigger_cfg provides (preserves
-            # pre-ADR-032 byte-identical output for existing skills).
+            # author_fixed without pinned_source: use whatever the trigger_cfg provides
+            # (preserves pre-ADR-032 byte-identical output for existing skills).
             inputs = trigger_cfg.get("inputs", [{"name": "input", "type": "string",
                                                   "description": "Query or filter input"}])
         trigger["on_request"] = {
