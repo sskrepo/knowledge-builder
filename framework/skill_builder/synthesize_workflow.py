@@ -9,6 +9,14 @@ synthesizer emits a full source_binding block and replaces the generic
 trigger input with a typed page_id input.  author_fixed mode produces
 byte-identical output to the pre-ADR-032 synthesizer (no source_binding
 block, generic trigger input).
+
+DECISION-019 RC1 addition: when source_binding_mode == "author_fixed" AND a
+fixed external source exists (i.e., source_samples has at least one entry),
+the synthesizer now emits a source_binding block with mode: author_fixed and
+a pinned_ref derived from source_samples.  This allows the runtime executor to
+resolve the exact page the skill was authored against, preventing silent wrong-
+page retrieval.  Skills with no external fixed source (pure in-KB) continue to
+emit NO source_binding block — unchanged pre-ADR-032 behavior.
 """
 from __future__ import annotations
 
@@ -106,6 +114,119 @@ def derive_space_allow_list(
 
 
 # ---------------------------------------------------------------------------
+# pinned_source derivation (DECISION-019 RC1 — author_fixed source binding)
+# ---------------------------------------------------------------------------
+
+def derive_pinned_source(
+    sources: list[dict],
+    source_samples: dict,
+) -> dict | None:
+    """Derive the pinned external source for an author_fixed skill.
+
+    Returns a dict with keys:
+      - ``pinned_ref``       — the canonical Confluence URL or page ID
+      - ``source_type``      — "confluence_page" (default)
+      - ``space_allow_list`` — list[str] of space keys (may be empty if
+                               space cannot be derived — caller responsibility
+                               to validate)
+
+    Returns None when no external fixed source can be identified
+    (e.g., purely in-KB skills with no live Confluence source in session state).
+    A None return means NO source_binding block should be emitted for
+    author_fixed skills — unchanged pre-DECISION-019 behavior.
+
+    Derivation priority (mirrors derive_space_allow_list — same session state):
+
+    1. ``source_samples`` — the INSPECT_SOURCES step stores fetched page
+       metadata in ``source_samples[key]`` where ``key`` is
+       ``"confluence:{source_id}"``.  The source_id is a URL or page ID.
+       This is the most reliable source: it reflects the actual page the
+       author configured, confirmed by a live API call during authoring.
+
+    2. ``sources[*].page_url`` / ``sources[*].pages`` (URL form) — used as
+       fallback when source_samples is absent.
+
+    3. ``sources[*].source_id`` or ``sources[*].page_id`` — bare page IDs as
+       last resort.
+
+    Design principle (DECISION-019 RC1 + ADR-031 no-silent-degradation):
+      A wrong pinned_ref is LESS dangerous than no binding — a wrong ref
+      causes a deterministic lookup failure at runtime (actionable), whereas
+      no binding causes silent wrong-page retrieval (the original bug).
+      We prefer a deterministic source even if it may not resolve, because
+      the executor will hard-fail loudly on a bad ref rather than silently
+      substituting.
+    """
+    # --- Priority 1: source from source_samples (most reliable) -------------
+    # source_samples: dict[str, list[dict]] keyed "confluence:{source_id}".
+    # The source_id part (after "confluence:") is the URL or page ID.
+    for key in (source_samples or {}):
+        if not key.startswith("confluence:"):
+            continue
+        source_id = key[len("confluence:"):]
+        if source_id:
+            space_allow_list = _spaces_from_source_samples(source_samples)
+            source_type = "confluence_page"
+            return {
+                "pinned_ref": source_id,
+                "source_type": source_type,
+                "space_allow_list": space_allow_list,
+            }
+
+    # --- Priority 2: URL-form source from sources ----------------------------
+    _URL_SPACE_PATTERNS = [
+        re.compile(r"/wiki/spaces/([A-Z0-9_\-]+)/", re.IGNORECASE),
+        re.compile(r"/spaces/([A-Z0-9_\-]+)/", re.IGNORECASE),
+        re.compile(r"/display/([A-Z0-9_\-]+)/", re.IGNORECASE),
+    ]
+    for src in (sources or []):
+        page_url = src.get("page_url", "")
+        if page_url and page_url.startswith("http"):
+            space_allow_list = derive_space_allow_list(sources, {})
+            return {
+                "pinned_ref": page_url,
+                "source_type": "confluence_page",
+                "space_allow_list": space_allow_list,
+            }
+        # pages list
+        for pg in (src.get("pages") or []):
+            if isinstance(pg, str) and pg.startswith("http"):
+                space_allow_list = derive_space_allow_list(sources, {})
+                return {
+                    "pinned_ref": pg,
+                    "source_type": "confluence_page",
+                    "space_allow_list": space_allow_list,
+                }
+
+    # --- Priority 3: bare page_id or source_id on source dict ---------------
+    for src in (sources or []):
+        pid = src.get("page_id") or src.get("source_id") or src.get("id")
+        if pid and isinstance(pid, (str, int)) and str(pid).strip().isdigit():
+            space_allow_list = derive_space_allow_list(sources, source_samples)
+            return {
+                "pinned_ref": str(pid).strip(),
+                "source_type": "confluence_page",
+                "space_allow_list": space_allow_list,
+            }
+
+    # No external fixed source found — pure in-KB skill, emit no binding.
+    return None
+
+
+def _spaces_from_source_samples(source_samples: dict) -> list[str]:
+    """Extract space keys from source_samples (mirror of derive_space_allow_list P1)."""
+    spaces: set[str] = set()
+    for _key, samples in (source_samples or {}).items():
+        if not isinstance(samples, list):
+            continue
+        for s in samples:
+            sp = s.get("space", "")
+            if sp and isinstance(sp, str) and sp.strip():
+                spaces.add(sp.strip().upper())
+    return sorted(spaces)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -121,6 +242,8 @@ def synthesize_workflow_skill(
     input_param: str = "page_id",
     ephemeral_ttl_seconds: int = 300,
     source_type: str = "confluence_page",
+    # DECISION-019 RC1: author_fixed pinned source binding
+    pinned_source: dict | None = None,
 ) -> dict:
     """Generate a workflow skill YAML structure as a Python dict.
 
@@ -146,17 +269,33 @@ def synthesize_workflow_skill(
         source_type: type of source for the source_binding block.
                      Default "confluence_page".
 
+        pinned_source: optional dict returned by derive_pinned_source().
+                      When provided AND source_binding_mode == "author_fixed",
+                      emits a source_binding block with mode: author_fixed and
+                      the pinned_ref so the runtime executor resolves the exact
+                      page the skill was authored against (DECISION-019 RC1).
+                      When None (default) AND source_binding_mode ==
+                      "author_fixed": NO source_binding block emitted —
+                      byte-identical to pre-DECISION-019 behavior for pure in-KB
+                      skills.
+
     Returns:
         A dict that can be round-tripped through yaml.safe_dump to produce a
         valid workflow_skills/{persona}/{skill_name}.yaml file.
 
-    Behavior contract (ADR-032):
-        author_fixed (default):
-            - NO source_binding block emitted.
-            - trigger.on_request.inputs uses whatever is in intent["trigger"],
-              defaulting to the generic {name:input, type:string} fallback.
-            - Output is byte-identical to pre-ADR-032 synthesizer for all
-              author_fixed skills.
+    Behavior contract (ADR-032 + DECISION-019 RC1):
+        author_fixed with external fixed source (pinned_source not None):
+            - Emits a source_binding block: {mode: author_fixed,
+              source_type: <type>, pinned_ref: <url_or_id>,
+              space_allow_list: [...], ingest_on_demand: <bool>}
+            - trigger.on_request.inputs unchanged (generic string input).
+            - The runtime executor uses pinned_ref to resolve the specific
+              page before/instead of generic KB retrieval.
+
+        author_fixed without external fixed source (pinned_source is None):
+            - NO source_binding block emitted (unchanged pre-DECISION-019
+              behavior for pure in-KB skills).
+            - trigger.on_request.inputs unchanged.
 
         ask_parameterized:
             - A full source_binding block is emitted with all 6 required fields:
@@ -204,8 +343,18 @@ def synthesize_workflow_skill(
         },
     }
 
-    # ADR-032: emit source_binding block for ask_parameterized skills.
-    # author_fixed: NO source_binding block — absent == author_fixed per §H.
+    # ADR-032 / DECISION-019 RC1: emit source_binding block.
+    #
+    # ask_parameterized: full 6-field block (ADR-032 §D.1).
+    #
+    # author_fixed + pinned_source: emit pinned-ref block so the runtime
+    # executor resolves the exact page this skill was authored against
+    # (DECISION-019 RC1 Option A).  The block is SYMMETRIC with
+    # ask_parameterized except: no input_param (source is fixed, not
+    # parameterized), and pinned_ref carries the URL/ID.
+    #
+    # author_fixed + no pinned_source: NO block (unchanged pre-DECISION-019
+    # behavior; absent == author_fixed per ADR-032 §H migration rule).
     if source_binding_mode == "ask_parameterized":
         result["source_binding"] = {
             "mode": "ask_parameterized",
@@ -214,6 +363,18 @@ def synthesize_workflow_skill(
             "source_type": source_type,
             "space_allow_list": list(space_allow_list) if space_allow_list else [],
             "ephemeral_ttl_seconds": ephemeral_ttl_seconds,
+        }
+    elif source_binding_mode == "author_fixed" and pinned_source is not None:
+        # DECISION-019 RC1: pinned source binding for author_fixed with
+        # an external fixed source (Confluence page identified at author time).
+        # ingest_on_demand defaults False: executor looks up the pinned page
+        # from the KB (already ingested at authorSkill time).
+        result["source_binding"] = {
+            "mode": "author_fixed",
+            "source_type": pinned_source.get("source_type", "confluence_page"),
+            "pinned_ref": pinned_source["pinned_ref"],
+            "space_allow_list": list(pinned_source.get("space_allow_list") or []),
+            "ingest_on_demand": False,
         }
 
     return result

@@ -52,13 +52,27 @@ class PptxRenderer(BaseRenderer):
         layout = data.get("layout", "")
         # ADR-034: dispatch via layout_catalog — catalog is the single source of truth.
         # Dispatch keys are internal_ids; callers must not assume hard-coded strings.
+        #
+        # DECISION-019 Finding-B Option A: if get_preset() returns None for a non-empty
+        # layout string, RAISE a hard error instead of silently falling back to the
+        # default stub renderer.  The stub fallback was the silent-degradation amplifier
+        # (Finding-B): it masked RC1+RC2 as a confident-success response when the
+        # skill's contract was unsatisfiable.
+        #
+        # Skills with valid registered layouts ("default", "weekly_exec_review_v1", etc.)
+        # are completely unaffected.  Only skills with unresolvable layout strings raise.
+        # The raised error propagates as an executor failure and surfaces as [HIGH] in the
+        # DECISION-018 §H three-section EVAL/execution report.
         if layout:
             preset = get_preset(layout)
             if preset is None:
-                log.warning(
-                    "PptxRenderer: unknown layout id %r (not in layout_catalog); "
-                    "falling back to default multi-slide rendering.",
-                    layout,
+                raise ValueError(
+                    f"PptxRenderer: layout id {layout!r} is not a registered catalog "
+                    "internal_id (not in layout_catalog). "
+                    "The skill artifact carries an unresolvable layout — this is a "
+                    "[HIGH] rendering failure (DECISION-019 Finding-B). "
+                    "Re-author the skill so DESIGN_SKILL emits a valid layout id "
+                    "(DECISION-019 RC2), or update layout_catalog.py to register this id."
                 )
             elif preset.internal_id == "weekly_exec_review_v1":
                 return self._render_weekly_exec_review_v1(data)

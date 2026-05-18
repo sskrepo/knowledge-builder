@@ -595,7 +595,7 @@ class WorkflowExecutor:
           input_param path instead (ADR-032 §E.4 retirement plan).
         """
         # ------------------------------------------------------------------
-        # ADR-032 P2-Exec: ask_parameterized branch — MUST be first.
+        # ADR-032 P2-Exec / DECISION-019 RC1: source_binding dispatch.
         # ------------------------------------------------------------------
         source_binding = cfg.get("source_binding") or {}
         sb_mode = source_binding.get("mode", "author_fixed")
@@ -605,6 +605,15 @@ class WorkflowExecutor:
             # NOT from regex scanning over free-form prose.  This is the structural
             # replacement for the BUG-990fe P3 regex heuristic for parameterized skills.
             return self._retrieve_ask_parameterized(cfg, inputs, source_binding)
+
+        if sb_mode == "author_fixed" and source_binding.get("pinned_ref"):
+            # DECISION-019 RC1 Option A: pinned source binding for author_fixed skills.
+            # When the skill carries a pinned_ref (derived from source_samples at
+            # synthesis time), resolve THAT specific page from the KB instead of
+            # falling through to generic KB retrieval.
+            # This prevents the silent wrong-page substitution (RC1 bug: executor
+            # returned "Project Plan" instead of "FAaaS Kiwi Project").
+            return self._retrieve_author_fixed_pinned(cfg, inputs, source_binding)
 
         # ------------------------------------------------------------------
         # author_fixed path — unchanged behaviour
@@ -1002,6 +1011,167 @@ class WorkflowExecutor:
             page_id, fetched_space, skill_name, content_hash, ttl,
         )
         return passages
+
+    # ------------------------------------------------------------------
+    # DECISION-019 RC1 — author_fixed pinned source resolution path
+    # ------------------------------------------------------------------
+
+    def _retrieve_author_fixed_pinned(
+        self,
+        cfg: dict,
+        inputs: dict,
+        source_binding: dict,
+    ) -> list[dict]:
+        """Resolve the pinned Confluence page for an author_fixed skill.
+
+        DECISION-019 RC1 Option A: when a committed skill artifact carries
+        source_binding.mode: author_fixed with a pinned_ref, the executor
+        must resolve THAT specific page — not fall through to generic KB
+        retrieval.
+
+        Resolution strategy:
+          1. Use the KB retrievers (search_wiki / read_wiki_page) with the
+             pinned_ref as a targeted page lookup.  This mirrors the
+             ask_parameterized ephemeral path but uses already-ingested KB
+             content rather than live-fetching.
+          2. If source_binding.ingest_on_demand is True (opt-in), fall back
+             to the ephemeral adapter fetch path (identical to
+             ask_parameterized) for the pinned page — allows the skill to
+             work even if the page was not pre-ingested.
+          3. If no retriever returns a matching passage and ingest_on_demand
+             is False: hard-fail with an actionable message (ADR-031
+             no-silent-degradation — do NOT silently fall through to generic
+             KB retrieval returning the wrong page).
+
+        Crucially this method NEVER falls back to generic KB retrieval
+        without the pinned_ref constraint — that is the RC1 bug we are fixing.
+
+        Parameters
+        ----------
+        cfg:
+            Parsed workflow skill YAML dict.
+        inputs:
+            Skill inputs dict.
+        source_binding:
+            The parsed source_binding block from cfg (mode: author_fixed,
+            pinned_ref: <url_or_id>, ...).
+        """
+        skill_name = cfg.get("workflow_skill", "")
+        pinned_ref = source_binding.get("pinned_ref", "")
+        source_type = source_binding.get("source_type", "confluence_page")
+        ingest_on_demand = source_binding.get("ingest_on_demand", False)
+
+        log.info(
+            "RC1 pinned-source resolution: skill=%s pinned_ref=%r ingest_on_demand=%s",
+            skill_name, pinned_ref, ingest_on_demand,
+        )
+
+        # Resolve a numeric page_id from the pinned_ref (URL or bare ID).
+        pinned_page_id = _resolve_page_id(pinned_ref)
+
+        # --- Strategy 1: KB retriever lookup scoped to the pinned page -------
+        # Attempt to retrieve passages from the KB that match the pinned page.
+        # We use the existing retrievers but then filter to only passages that
+        # match the pinned page ID or URL.  If none match, move to strategy 2.
+        passages: list[dict] = []
+        query_text = " ".join(str(v) for v in inputs.values() if v)
+
+        if self.retrievers and self.shim_kb:
+            all_cards = self.shim_kb.all_cards() if hasattr(self.shim_kb, "all_cards") else []
+            cards_by_name = {c.get("name"): c for c in all_cards if c.get("name")}
+            for req in cfg.get("requires_extractions", []):
+                kb_full_name = req.get("kb") or ""
+                short_name = kb_full_name.split(".")[-1]
+                card = cards_by_name.get(short_name) or cards_by_name.get(kb_full_name)
+                if not card:
+                    continue
+                tools = card.get("retrieval_tools") or []
+                for tool_name in tools:
+                    retriever = self.retrievers.get(tool_name)
+                    if retriever is None:
+                        continue
+                    try:
+                        results = retriever(query=query_text, persona=card.get("persona"))
+                    except TypeError:
+                        results = retriever(query=query_text)
+                    except Exception as exc:
+                        log.error("RC1 pinned retriever %s raised: %s", tool_name, exc)
+                        continue
+                    for r in results or []:
+                        p = {
+                            "text": getattr(r, "text", "") or "",
+                            "citation": getattr(r, "citation_url", "") or "",
+                            "metadata": getattr(r, "metadata", {}) or {},
+                            "kb": kb_full_name,
+                        }
+                        # Only keep passages that match the pinned page.
+                        if _passage_matches_page_id(p, pinned_page_id):
+                            passages.append(p)
+
+        if passages:
+            log.info(
+                "RC1 pinned-source: resolved %d passage(s) for skill=%s pinned_ref=%r "
+                "via KB retriever (pinned page found in KB).",
+                len(passages), skill_name, pinned_ref,
+            )
+            return passages
+
+        # --- Strategy 2: on-demand fetch (if ingest_on_demand: true) ---------
+        if ingest_on_demand and self.confluence_adapter is not None:
+            log.info(
+                "RC1 pinned-source: pinned page %r not in KB for skill=%s — "
+                "ingest_on_demand=True, attempting adapter fetch.",
+                pinned_ref, skill_name,
+            )
+            # Mirror the ask_parameterized path: construct a synthetic source_binding
+            # that treats the pinned_ref as the input_param value.
+            synthetic_sb = {
+                "mode": "ask_parameterized",
+                "input_param": "_pinned_ref_input",
+                "ingest_on_demand": True,
+                "source_type": source_type,
+                "space_allow_list": source_binding.get("space_allow_list") or [],
+                "ephemeral_ttl_seconds": source_binding.get("ephemeral_ttl_seconds", 300),
+            }
+            synthetic_inputs = dict(inputs)
+            synthetic_inputs["_pinned_ref_input"] = pinned_ref
+            try:
+                return self._retrieve_ask_parameterized(cfg, synthetic_inputs, synthetic_sb)
+            except ConfluencePageNotInKBError:
+                raise
+            except Exception as exc:
+                raise ConfluencePageNotInKBError(
+                    page_id=pinned_page_id,
+                    skill_name=skill_name,
+                    reason=(
+                        f"Pinned Confluence page {pinned_ref!r} could not be fetched "
+                        f"on demand: {exc}."
+                    ),
+                ) from exc
+
+        # --- Strategy 3: hard-fail (ADR-031 no-silent-degradation) -----------
+        # The pinned page is not in the KB and ingest_on_demand is False (or no
+        # adapter).  We MUST NOT fall through to generic KB retrieval — that
+        # would reproduce the original RC1 bug.
+        reason_parts = [
+            f"Pinned Confluence page {pinned_ref!r} (from source_binding.pinned_ref) "
+            "is not found in the knowledge base via KB retrieval. "
+        ]
+        if not ingest_on_demand:
+            reason_parts.append(
+                f"Run: kb-cli ingest --page-id {pinned_page_id} --persona tpm "
+                "to ingest the page, or re-author the skill with ingest_on_demand: true."
+            )
+        elif self.confluence_adapter is None:
+            reason_parts.append(
+                "ingest_on_demand: true is set but the Confluence adapter is not "
+                "configured in this deployment. Contact your administrator."
+            )
+        raise ConfluencePageNotInKBError(
+            page_id=pinned_page_id,
+            skill_name=skill_name,
+            reason="".join(reason_parts),
+        )
 
     def _log_ephemeral_fetch(
         self,

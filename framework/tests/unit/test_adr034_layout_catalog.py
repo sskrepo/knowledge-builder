@@ -140,10 +140,14 @@ class TestCatalogSingleSourceOfTruth:
         assert isinstance(result, bytes)
         assert len(result) > 100
 
-    def test_renderer_unknown_layout_falls_back_to_default_with_warning(self, caplog):
-        """PptxRenderer logs a warning and falls back for unknown layout ids."""
-        pytest.importorskip("pptx")
-        import logging
+    def test_renderer_unknown_layout_raises_hard_error(self):
+        """DECISION-019 Finding-B: PptxRenderer raises ValueError for unknown layout ids.
+
+        The old behavior (log.warning + fallback) was the silent-degradation amplifier
+        (Finding-B). It is replaced by a hard-fail that propagates as an executor
+        failure and surfaces as [HIGH] in the DECISION-018 §H three-section report.
+        Skills with valid registered layouts (default, weekly_exec_review_v1) unaffected.
+        """
         from framework.renderers.pptx_renderer import PptxRenderer
         renderer = PptxRenderer()
         data = {
@@ -151,12 +155,8 @@ class TestCatalogSingleSourceOfTruth:
             "layout": "some_future_layout_not_in_catalog",
             "sections": {"s": "content"},
         }
-        with caplog.at_level(logging.WARNING, logger="framework.renderers.pptx_renderer"):
-            result = renderer.render(data)
-        assert isinstance(result, bytes)
-        assert any("unknown layout id" in r.message for r in caplog.records), (
-            "Expected a warning for unknown layout id"
-        )
+        with pytest.raises(ValueError, match="not a registered catalog internal_id"):
+            renderer.render(data)
 
     def test_all_presets_returns_both(self):
         from framework.renderers.layout_catalog import all_presets
@@ -342,6 +342,8 @@ class TestPromptRegistryParsesSkilBuilderYaml:
             shutil.copy(overlays_src, tmp_path / "persona_overlays.yaml")
 
         registry = PromptRegistry(tmp_path)
+        from framework.renderers.layout_catalog import internal_ids
+        _valid_ids_str = ", ".join(f'"{i}"' for i in internal_ids()) + ", null"
         spec = registry.get_prompt(
             "design_skill",
             persona="tpm",
@@ -350,6 +352,7 @@ class TestPromptRegistryParsesSkilBuilderYaml:
             artifact_layout="null",
             existing_kb_cards="[]",
             layout_preset_catalog=catalog_for_prompt("pptx"),
+            layout_valid_ids=_valid_ids_str,
         )
         assert spec.text
         # The rendered prompt must not contain any bare internal preset id as a rule

@@ -292,32 +292,50 @@ place regardless.
 
 ---
 
-## Known Gap (RC2) — DESIGN_SKILL Emits layout as Prose; No Prose-to-Renderer-ID Resolution Step Exists
+## Known Gap (RC2) — Resolved (2026-05-17, DECISION-019 Option A)
 
 **Identified**: 2026-05-17, post-investigation of junk-PPTX bug (request id 146, skill `tpm.faaas_kiwi_project_pptx`, session `synth-tpm-b518aab6`).
-**Status**: Awaiting user decision on fix direction (DECISION-019).
+**Status**: Resolved — DECISION-019 RC2 Option A implemented.
 
-### Gap Description
+### Gap Description (historical)
 
-ADR-034 §B (Prompt injection) states: the LLM should "Select the catalog entry whose `when_to_use` best matches the intent" and "Emit the corresponding `internal_id` in `workflow_shape.layout`." In practice, after removing the hardcoded preset ID from the prompt (the DECISION-014 fix), the DESIGN_SKILL LLM has no structural enforcement to output a catalog `internal_id` — it reasons over the plain-language catalog descriptions and emits a prose description of the layout rather than the ID token.
+ADR-034 §B stated the LLM should emit the `internal_id` in `workflow_shape.layout`, but this was a soft instruction. In practice the DESIGN_SKILL LLM emitted prose layout descriptions instead of catalog `internal_id` tokens. The committed `synthesis.layout` field carried the prose; `get_preset(prose)` returned `None`; renderer fell back to the 6-slide stub.
 
-The `design_skill` prompt v1.2 includes the instruction to emit the `internal_id`, but this is a soft instruction in a free-text output schema; the LLM correctly follows the reasoning guidance (selects a conceptually appropriate layout) but does not necessarily produce the machine token. The committed `synthesis.layout` field carries the prose string. At execution time, `get_preset(layout)` returns `None` for any prose input; `PptxRenderer.render()` logs a WARNING and falls back to the default stub renderer.
+### Resolution: Constrained ID Output + Design-Time Validation (Option A)
 
-ADR-034 closed the loop from the prompt-output side (removed hardcoded IDs from the instructions) but did not close the loop from the output-to-renderer side (no validation that `workflow_shape.layout` is a registered `internal_id` before synthesis commits the artifact, and no resolver to map prose back to an ID).
+Two changes implemented in one pass:
 
-### Evidence
+**1. Prompt v1.3 — OUTPUT SCHEMA CONSTRAINT section:**
 
-- Session `synth-tpm-b518aab6`: `design.workflow_shape.layout` = prose sentence ("Standard executive order single-slide: title/status first…") — identical prose in both the DESIGN_SKILL output and the committed artifact.
-- The prose originates at DESIGN_SKILL, not at synthesis — synthesize_workflow faithfully propagated it.
-- `get_preset("<prose>")` returns `None`; renderer falls back to 6-slide key/value stub.
-- Runtime request 146: none of the designed extraction fields (slide_title, rag_summary, etc.) appear in the output.
+`design_skill` prompt bumped from v1.2 to v1.3. A new `{layout_valid_ids}` var is injected at render time (populated by `layout_catalog.internal_ids()`). The valid enum appears ONLY in the OUTPUT SCHEMA CONSTRAINT section — not in the reasoning rules or examples. This preserves the DECISION-014 intent: the LLM reasons over `layout_preset_catalog` (human descriptions only), then maps to a machine ID as its final output step.
 
-### Blast Radius
+```
+## OUTPUT SCHEMA CONSTRAINT
 
-Likely affects every skill designed after ADR-034 shipped where the DESIGN_SKILL LLM emitted a prose layout description instead of a catalog `internal_id`. All such skills produce the default stub renderer output at execution time. Skills designed before ADR-034 (which hardcoded `weekly_exec_review_v1` in the artifact) are unaffected.
+workflow_shape.layout MUST be exactly one of the following registered catalog internal_ids
+(or null if no layout-dispatched output is required):
+  {layout_valid_ids}
 
-### Fix Options
+Emitting any value not in this list is a schema violation.
+```
 
-See DECISION-019 for the three options under consideration (Option A: constrained ID output from DESIGN_SKILL prompt; Option B: post-design prose→ID resolver step with must_show_human review; Option C: renderer-side fuzzy/semantic dispatch).
+`layout_valid_ids` is a required_var in v1.3, populated at render time from `layout_catalog.internal_ids()`.
 
-**Interaction with DECISION-014**: Option A reintroduces the catalog `internal_id` values into the DESIGN_SKILL output schema (as a constrained enum), not as reasoning instructions. This is consistent with DECISION-014's intent: the IDs must not appear in reasoning prompts shown to authors, but they may appear as machine output fields in the structured response schema. The user must confirm this interpretation before Option A is implemented.
+**2. Design-time validation in `_run_design_skill`:**
+
+After parsing the DESIGN_SKILL LLM response, `conversation.py` validates `workflow_shape.layout`:
+
+```python
+if _designed_layout is not None and _designed_layout != "":
+    _valid_ids = internal_ids()
+    if _designed_layout not in _valid_ids:
+        raise RuntimeError(
+            f"DESIGN_SKILL: workflow_shape.layout={_designed_layout!r} is not a "
+            f"registered catalog internal_id. Valid ids: {_valid_ids}. ..."
+            "This is a design-time error (DECISION-019 RC2)..."
+        )
+```
+
+This surfaces the error at design time (in the authoring session) rather than silently at execution time. The author can immediately correct the layout selection.
+
+**DECISION-014 compliance note:** The catalog `internal_id` values appear in the OUTPUT SCHEMA CONSTRAINT section only — not in reasoning instructions, not as examples in the rules section. The `layout_preset_catalog` (human_label + description + when_to_use) remains in the reasoning section. This is the intended DECISION-014 mitigation: reason over descriptions, emit a machine token as the final structured field.

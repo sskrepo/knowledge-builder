@@ -66,6 +66,8 @@ _DESIGN_SKILL_BASE = dict(
     existing_kb_cards="[]",
     # ADR-034: layout_preset_catalog is now a required_var in design_skill
     layout_preset_catalog="(test placeholder — no presets)",
+    # DECISION-019 RC2: layout_valid_ids injected into OUTPUT SCHEMA section only
+    layout_valid_ids='"weekly_exec_review_v1", "default", null',
 )
 
 

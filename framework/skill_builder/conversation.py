@@ -2163,9 +2163,15 @@ class SkillBuilderConversation:
         # and we supply empty-string defaults to preserve the old graceful-degradation behavior.
         # ADR-034: layout_preset_catalog is injected here so the LLM reasons over
         # plain-language descriptions, never over hardcoded preset identifiers.
+        # DECISION-019 RC2: layout_valid_ids injected into OUTPUT SCHEMA section ONLY
+        # (not into reasoning rules) — DECISION-014 mitigation: IDs appear as constrained
+        # enum in the output schema, not as reasoning instructions or examples.
         from .prompt_registry import MissingVarsError as _MissingVarsError
+        from ..renderers.layout_catalog import internal_ids as _layout_internal_ids
         # Derive output_format hint from normalised_intent for catalog filtering
         _output_fmt_hint = (self._data.normalised_intent or {}).get("output_kind")
+        _valid_layout_ids = _layout_internal_ids()
+        _layout_valid_ids_str = ", ".join(f'"{i}"' for i in _valid_layout_ids) + (", null" if _valid_layout_ids else "null")
         _design_base_kwargs = dict(
             normalised_intent=json.dumps(self._data.normalised_intent, indent=2),
             source_capability=json.dumps(self._data.source_capability, indent=2),
@@ -2174,6 +2180,7 @@ class SkillBuilderConversation:
             else "null",
             existing_kb_cards=json.dumps(cards_summary, indent=2),
             layout_preset_catalog=_layout_catalog_for_prompt(_output_fmt_hint),
+            layout_valid_ids=_layout_valid_ids_str,
         )
         try:
             spec = get_registry().get_prompt(
@@ -2316,6 +2323,28 @@ class SkillBuilderConversation:
         self._data.output_format = ws.get("output_format", "markdown")
         trigger = ws.get("trigger", {"on_request": True})
         self._data.trigger = trigger
+
+        # DECISION-019 RC2: validate workflow_shape.layout against the catalog.
+        # The design_skill prompt v1.3 (OUTPUT SCHEMA CONSTRAINT) requires the LLM
+        # to emit exactly one of the registered catalog internal_ids or null.
+        # If the LLM emits a prose string or an unrecognised ID, fail LOUD here —
+        # a design-time error that prevents a skill with an unresolvable layout from
+        # ever being committed.  Do NOT silently accept prose, do NOT auto-map.
+        # (DECISION-019 RC2 Option A — Option B/prose-resolver was rejected.)
+        _designed_layout = ws.get("layout")
+        if _designed_layout is not None and _designed_layout != "":
+            from ..renderers.layout_catalog import internal_ids as _layout_ids_check
+            _valid_ids = _layout_ids_check()
+            if _designed_layout not in _valid_ids:
+                raise RuntimeError(
+                    f"DESIGN_SKILL: workflow_shape.layout={_designed_layout!r} is not a "
+                    f"registered catalog internal_id. "
+                    f"Valid ids: {_valid_ids}. "
+                    "The LLM must emit exactly one of these ids (or null) for layout. "
+                    "This is a design-time error (DECISION-019 RC2) — the skill cannot "
+                    "be committed with a prose or unrecognised layout value. "
+                    "Retry DESIGN_SKILL or manually set workflow_shape.layout to a valid id."
+                )
 
         # ADR-038 §A: generate the consumer-facing skill_card + routing_queries
         # AFTER the main design LLM call and AFTER self._data.output_format is set
@@ -5985,7 +6014,11 @@ class SkillBuilderConversation:
     def _synthesize_preview(self) -> dict[str, Any]:
         from .synthesize_schema import synthesize_extraction_schema
         from .synthesize_builder import synthesize_persona_builder_diff
-        from .synthesize_workflow import synthesize_workflow_skill, derive_space_allow_list
+        from .synthesize_workflow import (
+            synthesize_workflow_skill,
+            derive_space_allow_list,
+            derive_pinned_source,
+        )
         from .gold_seed import seed_gold_set, seed_workflow_gold
 
         persona = self._data.persona
@@ -6040,17 +6073,17 @@ class SkillBuilderConversation:
             "reuse": self._data.reuse_result,
         }
 
-        # ADR-032: derive space_allow_list for ask_parameterized skills.
-        # The derivation reads session state populated by INSPECT_SOURCES:
-        # source_samples carries live-fetched space metadata (most reliable).
-        # URL-form sources and explicit source.space fields are fallbacks.
-        # An empty result means the space is underivable — VALIDATE will hard-fail
-        # with an actionable message (space_allow_list check in
-        # _validate_source_binding_contract), which is better than guessing wrong.
-        # See derive_space_allow_list() docstring for full derivation priority.
+        # ADR-032 / DECISION-019 RC1: derive source binding data from session state.
+        # source_samples carries live-fetched page metadata (most reliable) populated
+        # by INSPECT_SOURCES.  URL-form sources and explicit source.space fields are
+        # fallbacks.
         sb_mode = self._data.source_binding_mode
         derived_space_allow_list: list[str] = []
+        derived_pinned_source: dict | None = None
+
         if sb_mode == "ask_parameterized":
+            # ADR-032: derive space_allow_list for ask_parameterized skills.
+            # An empty result means the space is underivable — VALIDATE will hard-fail.
             derived_space_allow_list = derive_space_allow_list(
                 sources=self._data.sources,
                 source_samples=self._data.source_samples,
@@ -6063,6 +6096,32 @@ class SkillBuilderConversation:
                 len(self._data.source_samples),
                 len(self._data.sources),
             )
+        elif sb_mode == "author_fixed":
+            # DECISION-019 RC1: derive pinned source for author_fixed skills.
+            # When the session has source_samples (live-fetched pages at INSPECT_SOURCES),
+            # emit a source_binding block with mode: author_fixed and pinned_ref so the
+            # executor resolves the exact page this skill was authored against — preventing
+            # silent wrong-page retrieval (the RC1 bug: executor fell back to generic KB
+            # retrieval and returned "Project Plan" instead of "FAaaS Kiwi Project").
+            # Pure in-KB skills (no source_samples, no URL sources) return None — no block
+            # emitted, unchanged pre-DECISION-019 behavior.
+            derived_pinned_source = derive_pinned_source(
+                sources=self._data.sources,
+                source_samples=self._data.source_samples,
+            )
+            if derived_pinned_source is not None:
+                log.info(
+                    "_synthesize_preview: author_fixed skill=%s derived pinned_source=%r "
+                    "(DECISION-019 RC1 — pinned source binding will be emitted in artifact)",
+                    skill_name,
+                    derived_pinned_source.get("pinned_ref", ""),
+                )
+            else:
+                log.debug(
+                    "_synthesize_preview: author_fixed skill=%s has no external fixed source "
+                    "— NO source_binding block emitted (pure in-KB or pre-ADR-032 session)",
+                    skill_name,
+                )
 
         wf_struct = synthesize_workflow_skill(
             persona=persona,
@@ -6072,6 +6131,7 @@ class SkillBuilderConversation:
             template_path=None,
             source_binding_mode=sb_mode,
             space_allow_list=derived_space_allow_list if sb_mode == "ask_parameterized" else None,
+            pinned_source=derived_pinned_source if sb_mode == "author_fixed" else None,
         )
 
         # ADR-038 §B: LOAD-BEARING carry-through.

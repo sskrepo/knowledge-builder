@@ -90,6 +90,7 @@
     ],
     "artifact_layout": "weekly_exec_review_v1",
     "existing_kb_cards": [],
-    "layout_preset_catalog": "(ADR-034 test placeholder — catalog injected at runtime)"
+    "layout_preset_catalog": "(ADR-034 test placeholder — catalog injected at runtime)",
+    "layout_valid_ids": "\"weekly_exec_review_v1\", \"default\", null"
   }
 }

@@ -103,6 +103,7 @@ class TestC1ConversationPromptIds:
             artifact_layout="null",
             existing_kb_cards="[]",
             layout_preset_catalog="(ADR-034 test placeholder — catalog injected at runtime)",
+            layout_valid_ids='"weekly_exec_review_v1", "default", null',
         )
         assert "exec-safe" in spec.text, (
             "tpm persona overlay must inject extraction_style (with 'exec-safe') into design_skill. "

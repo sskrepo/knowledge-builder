@@ -4,6 +4,10 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-17] backend-dev | DECISION-019 RC1+RC2+Finding-B — one-pass fix: author_fixed pinned source binding, design_skill prompt v1.3 constrained layout ID, PptxRenderer hard-fail; 28 new tests pass; 0 new regressions; BUG-queue-b03d7 filed in ADB
+
+RC1 (Option A): `derive_pinned_source()` + `source_binding: {mode: author_fixed, pinned_ref: ...}` emitted by `synthesize_workflow_skill`; executor dispatches to `_retrieve_author_fixed_pinned()`, hard-fails with `ConfluencePageNotInKBError` if pinned page not resolvable. RC2 (Option A): `design_skill` prompt v1.2→v1.3 adds `{layout_valid_ids}` OUTPUT SCHEMA CONSTRAINT (IDs in enum only, not reasoning rules — DECISION-014 mitigation); `_run_design_skill` validates layout at design time and raises `RuntimeError` for non-catalog IDs. Finding-B (Option A): `PptxRenderer.render()` raises `ValueError` on unresolvable layout (no silent fallback). 0 promoted skills need re-authoring (ADB query confirmed). DECISION-019 flipped to Accepted; ADR-032/034 Known-Gap sections updated to Resolved.
+
 ## [2026-05-17] architect | DECISION-019 + ADR-032/034 known-gaps — author_fixed source propagation (RC1) and layout-id resolution (RC2) captured as design records; no code changed; awaiting user decision on fix scope/sequencing
 
 ## [2026-05-17] backend-dev | fix(adr-038): Option B — restore post-design card-gen ordering (output_format fidelity) + order-robust ADR-028 persona-injection test; BUG filed in ADB

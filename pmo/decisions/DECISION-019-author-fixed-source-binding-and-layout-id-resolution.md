@@ -1,10 +1,32 @@
 # DECISION-019: author_fixed Source Propagation Gap (RC1) + Layout-ID Resolution Gap (RC2)
 
-**Status**: Proposed — awaiting user decision on fix scope/sequencing
+**Status**: Accepted — all three root causes resolved (2026-05-17)
 **Date**: 2026-05-17
 **Raised by**: architect (post-investigation of junk-PPTX bug, request id 146)
 **Skill under investigation**: `tpm.faaas_kiwi_project_pptx`, authoring session `synth-tpm-b518aab6`
 **Related**: ADR-032 (RC1), ADR-034 (RC2), DECISION-014, ADR-038/DECISION-018, spec §8
+
+---
+
+## Accepted Decisions (2026-05-17)
+
+All five items resolved in one coherent implementation pass (commit on branch `claude/vigilant-kare-a4d86f`):
+
+1. **RC1 fix direction**: **Option A** — `synthesize_workflow_skill` now calls `derive_pinned_source(sources, source_samples)` and emits `source_binding: {mode: author_fixed, pinned_ref: ..., space_allow_list: [...], ingest_on_demand: false}`. Executor dispatches to `_retrieve_author_fixed_pinned()` for this mode, hard-fails (`ConfluencePageNotInKBError`) if the pinned page is not resolvable — never falls through to generic KB retrieval.
+
+2. **RC2 fix direction**: **Option A** — `design_skill` prompt bumped to v1.3. `{layout_valid_ids}` injected at render time (from `layout_catalog.internal_ids()`). The valid ID enum appears ONLY in the OUTPUT SCHEMA CONSTRAINT section (DECISION-014 mitigation: no hardcoded IDs in reasoning rules). `_run_design_skill` in `conversation.py` validates the returned `workflow_shape.layout` against the catalog at design time and raises loud (`RuntimeError`) if a non-catalog value is returned.
+
+3. **Finding B fix direction**: **Option A** — `PptxRenderer.render()` now raises `ValueError` (hard error, surfaced as `[HIGH]` executor failure) when `get_preset(layout)` returns `None`. No silent fallback to stub.
+
+4. **Sequencing**: One-pass implementation (RC1 + RC2 + Finding-B implemented together).
+
+5. **Backfill**: **No backfill**. Existing promoted `author_fixed` PPTX skills have no prose-layout artifacts (confirmed by ADB query: 6 promoted skills, all with `layout=None` — authored before ADR-034). Re-author on next use.
+
+**Bug record**: `BUG-queue-b03d7` filed in `KB_SHIM.KBF_BUG_REPORTS` (2026-05-17).
+
+**Re-author scope**: 0 existing promoted skills need immediate re-authoring (ADB query confirmed all 6 promoted `workflow_skill` artifacts have `layout=None` and `source_binding.mode=None`).
+
+**Test coverage**: 28 new tests in `framework/tests/unit/test_decision019_fixes.py` (all pass). Full suite: 1550 passed, 8 failed (all pre-existing baseline failures), 0 new regressions.
 
 ---
 

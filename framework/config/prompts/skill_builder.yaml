@@ -190,12 +190,12 @@ prompts:
   # ---------------------------------------------------------------------------
   design_skill:
     id: design_skill
-    version: "1.2"
+    version: "1.3"
     model: synthesis
     max_tokens: 8192
     response_format: json_object
     description: "Design a complete skill from intent, source capability inventory, artifact layout, and reusable KB cards."
-    required_vars: [persona, normalised_intent, source_capability, artifact_layout, existing_kb_cards, persona_key_fields, persona_extraction_style, persona_few_shot_example, layout_preset_catalog]
+    required_vars: [persona, normalised_intent, source_capability, artifact_layout, existing_kb_cards, persona_key_fields, persona_extraction_style, persona_few_shot_example, layout_preset_catalog, layout_valid_ids]
     template: |
       You are a Knowledge Builder Framework skill architect. Design a complete skill from
       the user's intent, the source capability inventory, the artifact layout, and the
@@ -237,7 +237,7 @@ prompts:
         }},
         "workflow_shape": {{
           "output_format": "pptx|docx|markdown|email|slack",
-          "layout": "<layout_id_selected_from_catalog_or_null>",
+          "layout": null,
           "layout_rationale": "<one-sentence plain-language explanation of why this layout fits>",
           "trigger": {{"on_request": true, "schedule": "cron_or_null"}},
           "retriever": "search_wiki"
@@ -257,6 +257,14 @@ prompts:
         ],
         "source_binding_mode": "author_fixed | ask_parameterized"
       }}
+
+      OUTPUT SCHEMA CONSTRAINT — layout field:
+      The "layout" field in workflow_shape MUST be one of these exact machine identifiers
+      or null. These are the only accepted values:
+      {layout_valid_ids}
+      Any other value for "layout" will be rejected at authoring time as a design-time error.
+      Reason over the catalog descriptions above to select the best fit, then output exactly
+      one of these identifiers (or null if no preset fits or output_format is not pptx).
 
       Rules:
       - Include fields that at least one source can support with confidence "high", "medium",
@@ -290,11 +298,12 @@ prompts:
         * Reason over the user ask, the artifact layout hint, and the "best for" guidance
           in each catalog entry above.
         * Select the catalog entry whose description and "best for" clause best matches
-          the intent. Emit its layout_id in "layout".
+          the intent.
         * If the output_format is not "pptx", set "layout" to null — layout presets only
           apply to PPTX output.
         * If no catalog entry is a clear fit, set "layout" to null (default rendering).
-        * NEVER emit a layout value that is not present in the catalog above.
+        * The "layout" value MUST be one of the exact identifiers listed in the OUTPUT
+          SCHEMA CONSTRAINT above, or null. Never emit any other string.
         * Do NOT add a blocking_question whose answer is a layout preset name or id.
           If you must ask about presentation style, phrase the question in plain language
           describing the structural alternatives (e.g. "single dense summary slide vs.

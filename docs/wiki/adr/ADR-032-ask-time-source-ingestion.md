@@ -830,32 +830,40 @@ an un-ingested pageId is supplied.
 
 ---
 
-## Known Gap (RC1) — author_fixed Does Not Propagate Fixed Source into Runtime Skill
+## Known Gap (RC1) — Resolved (2026-05-17, DECISION-019 Option A)
 
 **Identified**: 2026-05-17, post-investigation of junk-PPTX bug (request id 146, skill `tpm.faaas_kiwi_project_pptx`, session `synth-tpm-b518aab6`).
-**Status**: Awaiting user decision on fix direction (DECISION-019).
+**Status**: Resolved — DECISION-019 RC1 Option A implemented.
 
-### Gap Description
+### Gap Description (historical)
 
-ADR-032 §D.1 specifies that `author_fixed` skills emit NO `source_binding` block in the committed YAML artifact. This is correct per the ADR-032 design: the `source_binding` block was introduced for `ask_parameterized` skills to communicate the per-request page reference at execution time. For `author_fixed` skills, the assumption was that the fixed source pages are ingested into the skill's KB at `authorSkill → INGEST` time, and the KB-scoped retriever returns the right content at runtime.
+ADR-032 §D.1 specified that `author_fixed` skills emit NO `source_binding` block in the committed YAML artifact. This created a runtime gap: the fixed source page(s) identified during `INSPECT_SOURCES` / `DESIGN_SKILL` were used to design the extraction schema at author time and then discarded from the artifact. The executor had no page binding, fell through to generic KB retrieval, and could return the wrong page.
 
-The gap: the specific fixed source page(s) identified during `INSPECT_SOURCES` / `DESIGN_SKILL` (e.g., `https://confluence.oraclecorp.com/confluence/display/OCIFACP/FAaaS+Kiwi+Project`) are used to design the extraction schema at author time and then **discarded from the artifact**. Nothing in the committed YAML tells the executor "this skill's fixed source is page X." The runtime trigger is the generic `{input: string}`. The executor has no page binding, falls through to generic KB retrieval, and may return the wrong page if the intended source page is not the top-scoring KB hit for the user's query.
+### Resolution: author_fixed source_binding block (Option A)
 
-### Evidence
+`synthesize_workflow_skill` now calls `derive_pinned_source(sources, source_samples)` which derives the pinned reference from `source_samples` using three-priority lookup:
 
-- Session `synth-tpm-b518aab6` `source_samples`: correct page ("FAaaS Kiwi Project", `space=OCIFACP`, `text_len=3987`) fetched and used at author time.
-- Committed artifact: `source_binding: None`, `trigger.on_request.inputs = [{name: input, type: string}]`.
-- Runtime request 146: executor retrieved "Project Plan" (a different OCIFACP page), not "FAaaS Kiwi Project".
+1. Direct `page_url` / `page_id` key in source_sample
+2. URL embedded in `source_id` field (e.g., `confluence:https://...`)
+3. Space + title lookup fallback
 
-### Blast Radius
+When `source_binding_mode = "author_fixed"` and a pinned source is derived, the committed artifact now emits:
 
-Likely affects every `author_fixed` skill with an external fixed source (Confluence page, Jira filter, git ref) where the intended source page is not also the highest-scoring KB hit for the user's query. The defect is silent: execution proceeds with wrong content, response reports success.
+```yaml
+source_binding:
+  mode: author_fixed
+  source_type: confluence_page
+  pinned_ref: "https://confluence.oraclecorp.com/confluence/display/OCIFACP/FAaaS+Kiwi+Project"
+  space_allow_list: ["OCIFACP"]
+  ingest_on_demand: false
+```
 
-### Fix Options
+The executor dispatches to `_retrieve_author_fixed_pinned()` for this mode, which:
+1. Filters KB retrieval to passages from the pinned page ID (via `_passage_matches_page_id`)
+2. Falls back to ephemeral adapter fetch if `ingest_on_demand=True`
+3. Hard-fails with `ConfluencePageNotInKBError` if the pinned page cannot be resolved — NEVER falls through to generic KB retrieval
 
-See DECISION-019 for the three options under consideration (Option A: persist a `source_binding.mode: author_fixed` block with pinned page ref; Option B: bake pinned page IDs into `requires_extractions`; Option C: INGEST-time KB scoping).
-
-**This gap does NOT affect `ask_parameterized` skills**, which bind the source at request time via `source_binding.input_param` — that path is correct and fully implemented per ADR-032 §E.
+**`ask_parameterized` skills are unaffected** — that path was correct and fully implemented per ADR-032 §E.
 
 ---
 
