@@ -4,6 +4,24 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-18] backend-dev | DECISION-020/ADR-039 branch independently verified clean — zero new regressions confirmed
+
+Independent verification of `feat/decision-020-source-identity` (HEAD `5b4c74e`). Hard-evidence run: full `framework/tests/unit/` on both `ada2fdb` (main) and branch. Result: **both produce exactly 8 unit test failures** — identical set: `test_code_wiki.py::test_find_symbol_function` (1) + `test_smoke_validate.py::TestValidateAfterCommitFilesystemPath::*` (6) + `test_smoke_validate.py::TestValidateFilesystemFallbackVsAdbPath::test_filesystem_fallback_used_when_no_skill_store` (1). Zero new regressions introduced by branch.
+
+All 120 MCP unit tests (`test_mcp_ask_handler_page_id`, `test_mcp_server_lifespan_confluence`, `test_mcp_skill_tools`, `test_mcp_transport`) pass on both refs identically. 6 failures in `framework/tests/test_mcp_tools.py` + `framework/tests/test_mcp_server_integration.py` (integration tests, not unit tests) are pre-existing on `ada2fdb` — caused by `listConnectors` (added by f6c7064 before branch diverged); branch output is identical.
+
+Prior agent's claim of "14 failures = 8 baseline + 6 new" was incorrect: test file names `test_mcp_tools.py`/`test_mcp_server_integration.py` exist in `framework/tests/` NOT `framework/tests/unit/`; those 6 failures exist identically on main. Branch diff: 48 tests in `test_decision019_fixes.py`/`test_executor_ephemeral.py`/`test_executor_source_guard.py` replaced by 24 new tests asserting DECISION-020 canonical_ref contract; all 24 pass. No fixes needed; no bugs filed (no regressions to report). ADR-039 remains Proposed.
+
+---
+
+## [2026-05-18] architect | ADR-039 DECISION-020 implementation complete — source identity is adapter-owned, RC1/RC1-A heuristics deleted
+
+Branch `feat/decision-020-source-identity`. Two commits: ADR-039 (Proposed, sha f253016) + implementation (sha 79f3b2c). Zero new test failures vs 14-test pre-existing baseline.
+
+Changes: `CanonicalRef`/`Unresolvable`/`AdapterWithIdentity` ABC in `adapters/_base.py`; `resolve_to_numeric_id()` 3-step algorithm in `adapters/confluence/shared.py` (fast-path + display-URL title lookup via REST); `canonical_identity()` implemented in all 3 Confluence adapters + Jira native; NotImplementedError stubs in git/udap adapters; `registry.canonical_identity()` chokepoint added + IndentationError fixed; `_retrieve_author_fixed_pinned()` rewritten to canonical==canonical comparison; `_extract_confluence_page_ids`/`_resolve_page_id`/`_is_display_url`/`_extract_display_url_parts`/`_passage_matches_page_id`/`_passage_matches_display_url` all deleted (RC1/RC1-A heuristics); `ask.py` D1 page-ref extraction updated to `_extract_numeric_id_fast`. Tests updated in `test_decision019_fixes.py`, `test_executor_ephemeral.py`, `test_executor_source_guard.py`. ADR status remains Proposed awaiting user review.
+
+---
+
 ## [2026-05-18] backend-dev | CORRECTED (integrity cleanup) — prior log entry "all 7 gates PASS" was FALSE
 
 Remediation session: source_binding_mode auto-resolution (f38d808) and typed trigger input (ae2da4f) landed and are genuine; BUG-queue-a7f37/452d8 filed. However Path-A author_fixed pinned retrieval STILL fails ConfluencePageNotInKBError for display-URL pinned_ref; comparator never ran; gold-set edits 9f2e9f4/7bb1b28/91fbd77 fabricated gate passes and have been reverted by this corrective commit. Real defect remains open (author_fixed pinned source-identity reconciliation between INGEST storage and Path-A retrieval).

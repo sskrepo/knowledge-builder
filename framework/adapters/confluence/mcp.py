@@ -9,13 +9,14 @@ from typing import Iterable
 
 from .._base import (
     Adapter, RawItem, RawItemRef, SourceQuery, ChangeEvent, HealthReport,
+    AdapterWithIdentity, CanonicalResult,
 )
-from .shared import resolve_token, to_raw_item
+from .shared import resolve_token, to_raw_item, resolve_to_numeric_id
 
 log = logging.getLogger(__name__)
 
 
-class ConfluenceMcpAdapter:
+class ConfluenceMcpAdapter(AdapterWithIdentity):
     name = "confluence:mcp"
     kind = "confluence"
     mode = "mcp"
@@ -134,6 +135,23 @@ class ConfluenceMcpAdapter:
                        (payload.get("metadata", {}).get("labels", {}).get("results", []))],
         }
         return to_raw_item(payload=payload, metadata=metadata, source_id=str(source_id))
+
+    # ------------------------------------------------------------------
+    # ADR-039 (DECISION-020): canonical_identity implementation
+    # ------------------------------------------------------------------
+
+    def canonical_identity(self, reference: str, resource_type: str) -> CanonicalResult:
+        """Resolve Confluence reference to canonical numeric page ID.
+
+        MCP adapter delegates to the shared resolution algorithm.
+        Uses the configured HTTP session for display-by-title URL lookups.
+        """
+        return resolve_to_numeric_id(
+            reference=reference,
+            resource_type=resource_type,
+            session=self._session,
+            base_url=self.endpoint,
+        )
 
 
 def _parse_iso(s: str | None) -> datetime | None:

@@ -41,9 +41,10 @@ from framework.core.interfaces import Result
 from framework.workflow_runtime.executor import (
     ConfluencePageNotInKBError,
     WorkflowExecutor,
-    _extract_confluence_page_ids,
-    _passage_matches_page_id,
+    _passage_matches_canonical,
 )
+from framework.adapters._base import CanonicalRef
+from framework.adapters.confluence.shared import _extract_numeric_id_fast
 
 
 # ---------------------------------------------------------------------------
@@ -118,73 +119,103 @@ def _make_shim_kb(kb_name: str = "project_tracking_test") -> MagicMock:
 # Unit tests for helper functions
 # ---------------------------------------------------------------------------
 
-class TestExtractConfluencePageIds:
-    """Unit tests for the _extract_confluence_page_ids helper."""
+class TestExtractNumericIdFast:
+    """ADR-039: unit tests for Confluence fast-path numeric ID extraction.
+
+    Replaces deleted _extract_confluence_page_ids tests.
+    Source identity is now resolved at author/bind time via canonical_identity(),
+    not scanned from inputs at execution time.
+    """
 
     def test_querystring_form(self):
-        ids = _extract_confluence_page_ids({"input": "?pageId=18625350641"})
-        assert ids == ["18625350641"]
+        assert _extract_numeric_id_fast("?pageId=18625350641") == "18625350641"
 
     def test_bare_pageid_eq_form(self):
-        ids = _extract_confluence_page_ids({"input": "pageId=18625350641"})
-        assert ids == ["18625350641"]
+        assert _extract_numeric_id_fast("pageId=18625350641") == "18625350641"
 
     def test_viewpage_action_form(self):
         url = "https://confluence.example.com/pages/viewpage.action?pageId=18625350641"
-        ids = _extract_confluence_page_ids({"input": url})
-        assert "18625350641" in ids
+        assert _extract_numeric_id_fast(url) == "18625350641"
 
-    def test_rest_short_form(self):
+    def test_pages_path_form(self):
         url = "https://confluence.example.com/wiki/spaces/FA/pages/18625350641/My+Page"
-        ids = _extract_confluence_page_ids({"input": url})
-        assert "18625350641" in ids
+        assert _extract_numeric_id_fast(url) == "18625350641"
 
-    def test_no_ref_generic_query(self):
-        ids = _extract_confluence_page_ids({"input": "What are the project milestones?"})
-        assert ids == []
+    def test_rest_api_form(self):
+        url = "https://confluence.example.com/rest/api/content/18625350641"
+        assert _extract_numeric_id_fast(url) == "18625350641"
 
-    def test_prose_number_not_treated_as_page_id(self):
-        """Numbers in prose (e.g. 'released 42 items') must NOT be matched."""
-        ids = _extract_confluence_page_ids({"input": "We released 42 items last week."})
-        assert ids == []
+    def test_bare_numeric_string(self):
+        assert _extract_numeric_id_fast("18625350641") == "18625350641"
 
-    def test_multiple_values_scanned(self):
-        ids = _extract_confluence_page_ids({
-            "query": "pageId=11111111111",
-            "extra": "pageId=22222222222",
-        })
-        assert "11111111111" in ids
-        assert "22222222222" in ids
+    def test_no_match_generic_query(self):
+        assert _extract_numeric_id_fast("What are the project milestones?") is None
 
-    def test_deduplication(self):
-        ids = _extract_confluence_page_ids({
-            "a": "pageId=18625350641",
-            "b": "pageId=18625350641",
-        })
-        assert ids.count("18625350641") == 1
+    def test_no_match_prose_number(self):
+        """Short numbers in prose must NOT be matched."""
+        assert _extract_numeric_id_fast("We released 42 items last week.") is None
 
 
-class TestPassageMatchesPageId:
-    """Unit tests for the _passage_matches_page_id helper."""
+class TestPassageMatchesCanonical:
+    """ADR-039: unit tests for canonical==canonical passage matching.
 
-    def test_metadata_page_id_matches(self):
-        passage = {"metadata": {"page_id": "18625350641"}, "citation": ""}
-        assert _passage_matches_page_id(passage, "18625350641") is True
+    Replaces deleted _passage_matches_page_id tests.
+    Two-sided canonical comparison: executor compares canonical_ref from
+    passage metadata against the CanonicalRef from canonical_identity().
+    """
 
-    def test_metadata_page_id_no_match(self):
-        passage = {"metadata": {"page_id": "20030556732"}, "citation": ""}
-        assert _passage_matches_page_id(passage, "18625350641") is False
+    def _make_canonical(self, canonical_id: str) -> CanonicalRef:
+        return CanonicalRef(
+            connector_id="confluence",
+            resource_type="page",
+            canonical_id=canonical_id,
+        )
 
-    def test_citation_url_contains_page_id(self):
-        passage = {"metadata": {}, "citation": "wiki://18625350641"}
-        assert _passage_matches_page_id(passage, "18625350641") is True
+    def test_canonical_ref_matches(self):
+        passage = {
+            "metadata": {
+                "canonical_ref": {
+                    "connector_id": "confluence",
+                    "resource_type": "page",
+                    "canonical_id": "18625350641",
+                }
+            },
+            "citation": "",
+        }
+        assert _passage_matches_canonical(passage, self._make_canonical("18625350641")) is True
 
-    def test_citation_url_does_not_match(self):
-        passage = {"metadata": {}, "citation": "wiki://20030556732"}
-        assert _passage_matches_page_id(passage, "18625350641") is False
+    def test_canonical_ref_no_match_different_id(self):
+        passage = {
+            "metadata": {
+                "canonical_ref": {
+                    "connector_id": "confluence",
+                    "resource_type": "page",
+                    "canonical_id": "20030556732",
+                }
+            },
+            "citation": "",
+        }
+        assert _passage_matches_canonical(passage, self._make_canonical("18625350641")) is False
 
-    def test_empty_passage(self):
-        assert _passage_matches_page_id({}, "18625350641") is False
+    def test_no_canonical_ref_returns_false(self):
+        """Passage without canonical_ref metadata returns False (not an error)."""
+        passage = {"metadata": {"page_id": "18625350641"}, "citation": "wiki://18625350641"}
+        assert _passage_matches_canonical(passage, self._make_canonical("18625350641")) is False
+
+    def test_empty_passage_returns_false(self):
+        assert _passage_matches_canonical({}, self._make_canonical("18625350641")) is False
+
+    def test_different_connector_id_no_match(self):
+        passage = {
+            "metadata": {
+                "canonical_ref": {
+                    "connector_id": "jira",
+                    "resource_type": "page",
+                    "canonical_id": "18625350641",
+                }
+            },
+        }
+        assert _passage_matches_canonical(passage, self._make_canonical("18625350641")) is False
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +223,17 @@ class TestPassageMatchesPageId:
 # ---------------------------------------------------------------------------
 
 class TestExecutorSourceGuard:
-    """End-to-end tests through WorkflowExecutor that verify the P3 guard."""
+    """ADR-039: end-to-end tests for WorkflowExecutor source integrity.
+
+    The P3 heuristic guard (input-scanning for pageId= patterns) was DELETED
+    by ADR-039 (DECISION-020). Source identity is now enforced via
+    source_binding.pinned_ref + canonical==canonical comparison.
+
+    These tests verify the new canonical identity behavior:
+    - author_fixed with no source_binding: generic KB retrieval, no guard
+    - author_fixed with source_binding.pinned_ref: canonical==canonical guard
+    - The ConfluencePageNotInKBError is still raised when pinned page absent
+    """
 
     def _make_executor(self, results_for_retriever: list[Result]) -> tuple[WorkflowExecutor, MagicMock]:
         retriever = _make_retriever(results_for_retriever)
@@ -204,103 +245,15 @@ class TestExecutorSourceGuard:
         return executor, shim_kb
 
     # -------------------------------------------------------------------------
-    # Test 1: wrong page returned — hard-fail, NO substitution
-    # -------------------------------------------------------------------------
-
-    def test_wrong_page_returned_raises_hard_fail(self, tmp_path: Path):
-        """Input has pageId=18625350641; retriever returns only page 20030556732.
-        The guard MUST raise ConfluencePageNotInKBError.
-        NO passages must be returned (render is never reached).
-        """
-        skill_yaml = _make_skill_yaml(tmp_path)
-        wrong_page_result = _make_result(INGESTED_PAGE_ID)  # 20030556732
-
-        executor, _ = self._make_executor([wrong_page_result])
-
-        # Patch _synthesize and _render/_deliver so the test fails fast on the
-        # guard, not on unrelated render/deliver infrastructure.
-        with pytest.raises(ConfluencePageNotInKBError) as exc_info:
-            executor._retrieve_for_inputs(
-                cfg=yaml.safe_load(skill_yaml.read_text()),
-                inputs={"input": f"Please draft an email using pageId={REQUESTED_PAGE_ID}"},
-                sources=[],
-            )
-
-        err = exc_info.value
-        assert err.page_id == REQUESTED_PAGE_ID, (
-            f"Error must name the requested page id {REQUESTED_PAGE_ID}, got {err.page_id!r}"
-        )
-        assert REQUESTED_PAGE_ID in str(err), "Error message must contain the requested page id"
-        assert "not in the knowledge base" in str(err), (
-            "Error message must clearly state the page is not in the KB"
-        )
-        assert "ingest" in str(err).lower(), (
-            "Error message must provide actionable ingest instruction"
-        )
-        # Confirm the error does NOT mention the wrong page that was actually retrieved
-        # (we don't want to leak internal substitution details, only the user request)
-        assert INGESTED_PAGE_ID not in str(err), (
-            f"Error message must NOT expose the substituted page id {INGESTED_PAGE_ID}"
-        )
-
-    def test_wrong_page_message_is_consumer_safe(self, tmp_path: Path):
-        """The hard-fail message must be consumer-safe: no provider internals,
-        no stack trace fragments, just the page id and ingest instruction."""
-        skill_yaml = _make_skill_yaml(tmp_path)
-        executor, _ = self._make_executor([_make_result(INGESTED_PAGE_ID)])
-
-        with pytest.raises(ConfluencePageNotInKBError) as exc_info:
-            executor._retrieve_for_inputs(
-                cfg=yaml.safe_load(skill_yaml.read_text()),
-                inputs={"input": f"pageId={REQUESTED_PAGE_ID}"},
-                sources=[],
-            )
-
-        msg = str(exc_info.value)
-        # Must include page id and be actionable
-        assert REQUESTED_PAGE_ID in msg
-        assert "kb-cli" in msg or "ingest" in msg.lower(), (
-            "Message must mention an ingest action so the user knows how to fix it"
-        )
-        # Must NOT contain internal exception type names or traceback markers
-        for forbidden in ("Traceback", "File \"", "line ", "ConfluencePageNotInKBError"):
-            assert forbidden not in msg, f"Consumer-facing message must not contain {forbidden!r}"
-
-    # -------------------------------------------------------------------------
-    # Test 2: correct page returned — passes through, no error
-    # -------------------------------------------------------------------------
-
-    def test_correct_page_returned_passes_through(self, tmp_path: Path):
-        """Input has pageId=20030556732; retriever returns a passage citing that
-        same page. The guard must NOT raise — the passage must be returned."""
-        skill_yaml = _make_skill_yaml(tmp_path)
-        correct_result = _make_result(INGESTED_PAGE_ID)  # 20030556732 — matches input
-
-        executor, _ = self._make_executor([correct_result])
-
-        passages = executor._retrieve_for_inputs(
-            cfg=yaml.safe_load(skill_yaml.read_text()),
-            inputs={"input": f"Draft an email for pageId={INGESTED_PAGE_ID}"},
-            sources=[],
-        )
-
-        assert len(passages) >= 1, "At least one passage must be returned when page matches"
-        assert any(p.get("metadata", {}).get("page_id") == INGESTED_PAGE_ID for p in passages), (
-            "Returned passages must include the matching page"
-        )
-
-    # -------------------------------------------------------------------------
-    # Test 3: no page ref in input — guard is inert (no regression)
+    # Test 1: no page ref in generic input — guard is inert (no regression)
+    # ADR-039: the P3 input-scan guard is deleted; generic author_fixed passes through.
     # -------------------------------------------------------------------------
 
     def test_no_page_ref_guard_is_inert(self, tmp_path: Path):
-        """Input is a generic query with no Confluence page reference.
-        The guard must be COMPLETELY INERT — passages from any page pass through.
-        This proves no regression to fixed-source skills or any skill whose
-        input is a free-text query (not a page reference).
+        """Generic query with no source_binding: passages pass through, no exception.
+        ADR-039: no P3 heuristic scanning of inputs — guard is structurally absent.
         """
         skill_yaml = _make_skill_yaml(tmp_path)
-        # Retriever returns a passage from an arbitrary page — no page ref in inputs
         some_result = _make_result(INGESTED_PAGE_ID)
 
         executor, _ = self._make_executor([some_result])
@@ -311,139 +264,149 @@ class TestExecutorSourceGuard:
             sources=[],
         )
 
-        # Guard must be inert — passages returned unchanged, no exception
         assert len(passages) >= 1, (
-            "Guard must be inert for generic query inputs; passages must be returned"
+            "Generic author_fixed (no source_binding) must return passages without error"
         )
 
-    # -------------------------------------------------------------------------
-    # Test 4: URL form is recognised the same way as querystring form
-    # -------------------------------------------------------------------------
-
-    def test_url_form_viewpage_action_recognised(self, tmp_path: Path):
-        """Input contains /pages/viewpage.action?pageId=18625350641 (URL form).
-        This must be treated identically to the plain pageId= form — wrong page
-        retrieved → hard-fail.
-        """
-        skill_yaml = _make_skill_yaml(tmp_path)
-        wrong_result = _make_result(INGESTED_PAGE_ID)
-
-        executor, _ = self._make_executor([wrong_result])
-
-        url_input = (
-            "Please draft from https://mycompany.atlassian.net"
-            f"/wiki/pages/viewpage.action?pageId={REQUESTED_PAGE_ID}"
-        )
-
-        with pytest.raises(ConfluencePageNotInKBError) as exc_info:
-            executor._retrieve_for_inputs(
-                cfg=yaml.safe_load(skill_yaml.read_text()),
-                inputs={"input": url_input},
-                sources=[],
-            )
-
-        assert exc_info.value.page_id == REQUESTED_PAGE_ID, (
-            "URL form must extract the same page id as the querystring form"
-        )
-
-    # -------------------------------------------------------------------------
-    # Test 5: no retriever results (falls through to fixture) — still hard-fails
-    # -------------------------------------------------------------------------
-
-    def test_empty_retriever_with_page_ref_hard_fails(self, tmp_path: Path):
-        """If the retriever returns nothing and fixture fallback also yields nothing,
-        and the input has a page ref, the guard must hard-fail (not return empty
-        passages silently or fall through to an unrelated fixture page).
-        """
-        skill_yaml = _make_skill_yaml(tmp_path)
-
-        # Retriever returns empty list
-        executor, _ = self._make_executor([])
-        # Patch fixture loader to return empty too (no fixtures installed in test env)
-        executor._load_fixture_passages = lambda *a, **kw: []
-
-        with pytest.raises(ConfluencePageNotInKBError):
-            executor._retrieve_for_inputs(
-                cfg=yaml.safe_load(skill_yaml.read_text()),
-                inputs={"input": f"pageId={REQUESTED_PAGE_ID}"},
-                sources=[],
-            )
-
-    # -------------------------------------------------------------------------
-    # A1 (BUG-queue-990fe): space-form "pageId 18625350641" fires the guard
-    # -------------------------------------------------------------------------
-
-    def test_space_form_page_ref_fires_guard(self, tmp_path: Path):
-        """A1: Input is 'for Confluence pageId 18625350641' (space, no '=').
-        The P3 guard MUST detect this as a Confluence page reference and
-        hard-fail when the retriever returns a different page — NO silent
-        substitution (was RC2 bug).
-        """
-        skill_yaml = _make_skill_yaml(tmp_path)
-        wrong_result = _make_result(INGESTED_PAGE_ID)  # 20030556732
-
-        executor, _ = self._make_executor([wrong_result])
-        executor._load_fixture_passages = lambda *a, **kw: []
-
-        with pytest.raises(ConfluencePageNotInKBError) as exc_info:
-            executor._retrieve_for_inputs(
-                cfg=yaml.safe_load(skill_yaml.read_text()),
-                inputs={"input": f"for Confluence pageId {REQUESTED_PAGE_ID}"},
-                sources=[],
-            )
-
-        err = exc_info.value
-        assert err.page_id == REQUESTED_PAGE_ID, (
-            f"Error must name the requested page id {REQUESTED_PAGE_ID}, got {err.page_id!r}"
-        )
-        assert "not in the knowledge base" in str(err)
-        assert "ingest" in str(err).lower()
-
-    def test_space_form_with_colon_fires_guard(self, tmp_path: Path):
-        """A1 variant: 'pageId: 18625350641' (colon + space) must also fire."""
-        skill_yaml = _make_skill_yaml(tmp_path)
-        executor, _ = self._make_executor([_make_result(INGESTED_PAGE_ID)])
-        executor._load_fixture_passages = lambda *a, **kw: []
-
-        with pytest.raises(ConfluencePageNotInKBError) as exc_info:
-            executor._retrieve_for_inputs(
-                cfg=yaml.safe_load(skill_yaml.read_text()),
-                inputs={"input": f"pageId: {REQUESTED_PAGE_ID}"},
-                sources=[],
-            )
-        assert exc_info.value.page_id == REQUESTED_PAGE_ID
-
-    def test_space_form_short_number_no_false_positive(self, tmp_path: Path):
-        """A1: short numbers (< 8 digits) embedded in prose must NOT fire the guard.
-        'discussed 12345678 items' has exactly 8 digits — boundary test.
-        'discussed 1234567 items' has 7 digits — must be inert.
-        Only ≥8-digit tokens following 'pageId' (with space/colon) are detected.
+    def test_generic_pageid_input_no_exception(self, tmp_path: Path):
+        """ADR-039: pageId= in inputs NO LONGER triggers a P3 guard.
+        The old P3 heuristic is deleted. Generic author_fixed with no source_binding
+        simply returns whatever the retriever provides.
         """
         skill_yaml = _make_skill_yaml(tmp_path)
         some_result = _make_result(INGESTED_PAGE_ID)
         executor, _ = self._make_executor([some_result])
 
-        # 7-digit number in prose — guard must be inert
+        # With ADR-039, pageId= in inputs does NOT trigger a guard for generic author_fixed
+        passages = executor._retrieve_for_inputs(
+            cfg=yaml.safe_load(skill_yaml.read_text()),
+            inputs={"input": f"Please draft an email using pageId={REQUESTED_PAGE_ID}"},
+            sources=[],
+        )
+        # Returns passages without error — the guard is now canonical==canonical via pinned_ref
+        assert len(passages) >= 1, (
+            "ADR-039: generic author_fixed with pageId= in inputs must NOT raise "
+            "(P3 heuristic deleted; identity guard requires source_binding.pinned_ref)"
+        )
+
+    # -------------------------------------------------------------------------
+    # Test 2: author_fixed with pinned_ref — pinned page not in KB → hard-fail
+    # This is the NEW canonical identity guard (replaces P3 heuristic).
+    # -------------------------------------------------------------------------
+
+    def _make_pinned_skill_yaml(self, tmp_path: Path, pinned_ref: str) -> Path:
+        """Write a minimal author_fixed skill YAML with source_binding.pinned_ref."""
+        cfg = {
+            "workflow_skill": "pinned_skill",
+            "persona": "tpm",
+            "status": "promoted",
+            "trigger": {
+                "on_request": {
+                    "enabled": True,
+                    "inputs": [{"name": "input", "type": "string"}],
+                    "output_format": "email",
+                    "response_mode": "artifact_url",
+                },
+            },
+            "source_binding": {
+                "mode": "author_fixed",
+                "source_type": "confluence_page",
+                "pinned_ref": pinned_ref,
+                "ingest_on_demand": False,
+            },
+            "requires_extractions": [
+                {"field": "summary", "from": "body", "kb": "project_tracking_test"}
+            ],
+            "synthesis": {"template": "summarize", "mapping": [{"slide": 1, "field": "summary"}]},
+            "delivery": {"channel": "email"},
+        }
+        p = tmp_path / "pinned_skill.yaml"
+        p.write_text(yaml.dump(cfg))
+        return p
+
+    def test_pinned_ref_absent_from_kb_hard_fails(self, tmp_path: Path):
+        """author_fixed with source_binding.pinned_ref: pinned page not in KB → hard-fail.
+        ADR-039: canonical==canonical path replaces P3 heuristic.
+        The executor resolves pinned_ref → CanonicalRef → searches KB → no match → error.
+        """
+        pinned_ref = REQUESTED_PAGE_ID  # numeric page ID
+        skill_yaml = self._make_pinned_skill_yaml(tmp_path, pinned_ref)
+
+        # Retriever returns a result for a DIFFERENT page (wrong canonical_id)
+        wrong_result = _make_result(INGESTED_PAGE_ID)  # 20030556732 — different page
+        executor, _ = self._make_executor([wrong_result])
+        executor._load_fixture_passages = lambda *a, **kw: []
+
+        with pytest.raises(ConfluencePageNotInKBError) as exc_info:
+            executor._retrieve_for_inputs(
+                cfg=yaml.safe_load(skill_yaml.read_text()),
+                inputs={"input": "Draft the weekly review"},
+                sources=[],
+            )
+
+        err = exc_info.value
+        assert REQUESTED_PAGE_ID in str(err.page_id) or REQUESTED_PAGE_ID in str(err), (
+            f"Error must reference the pinned page {REQUESTED_PAGE_ID}"
+        )
+
+    def test_pinned_ref_correct_page_in_kb_passes(self, tmp_path: Path):
+        """author_fixed with source_binding.pinned_ref: correct canonical page found → passes.
+        The retriever returns a passage with canonical_ref.canonical_id matching pinned_ref.
+        """
+        pinned_ref = INGESTED_PAGE_ID  # numeric page ID
+        skill_yaml = self._make_pinned_skill_yaml(tmp_path, pinned_ref)
+
+        # Make a result whose metadata has canonical_ref stamped with the pinned ID
+        correct_result = _make_result(INGESTED_PAGE_ID)
+        # Add canonical_ref to the result's metadata so _passage_matches_canonical works
+        correct_result.metadata["canonical_ref"] = {
+            "connector_id": "confluence",
+            "resource_type": "page",
+            "canonical_id": INGESTED_PAGE_ID,
+        }
+        executor, _ = self._make_executor([correct_result])
+
+        passages = executor._retrieve_for_inputs(
+            cfg=yaml.safe_load(skill_yaml.read_text()),
+            inputs={"input": "Draft the weekly review"},
+            sources=[],
+        )
+
+        assert len(passages) >= 1, "Correct pinned page must return passages"
+
+    # -------------------------------------------------------------------------
+    # Test 3: no page ref in generic input — unchanged behavior
+    # -------------------------------------------------------------------------
+
+    def test_space_form_short_number_no_false_positive(self, tmp_path: Path):
+        """ADR-039: short numbers in prose never trigger any guard.
+        The P3 heuristic is deleted; generic author_fixed returns passages freely.
+        """
+        skill_yaml = _make_skill_yaml(tmp_path)
+        some_result = _make_result(INGESTED_PAGE_ID)
+        executor, _ = self._make_executor([some_result])
+
         passages = executor._retrieve_for_inputs(
             cfg=yaml.safe_load(skill_yaml.read_text()),
             inputs={"input": "discussed 1234567 items in the meeting"},
             sources=[],
         )
-        assert len(passages) >= 1, "Guard must be inert for short prose numbers (7 digits)"
+        assert len(passages) >= 1, "Guard must be inert for prose numbers (ADR-039)"
 
     def test_space_form_unit_extraction(self):
-        """Unit test: _extract_confluence_page_ids detects the space form."""
-        ids = _extract_confluence_page_ids({"input": f"for Confluence pageId {REQUESTED_PAGE_ID}"})
-        assert REQUESTED_PAGE_ID in ids, (
-            f"Space-form 'pageId {REQUESTED_PAGE_ID}' must be extracted; got {ids}"
+        """ADR-039: pageId-prefixed form resolves via fast-path numeric extraction."""
+        # Source identity is now resolved via canonical_identity() at author/bind time.
+        # The fast-path numeric extraction handles all URL forms including bare numeric IDs.
+        result = _extract_numeric_id_fast(f"pageId={REQUESTED_PAGE_ID}")
+        assert result == REQUESTED_PAGE_ID, (
+            f"Fast-path must extract numeric ID from pageId= form; got {result}"
         )
 
     def test_space_form_does_not_fire_on_short_prose_numbers(self):
-        """Unit test: short standalone prose numbers do not match the space-form pattern."""
-        # The pattern only fires when 'pageId' (or page id / page-id) precedes the number
-        ids = _extract_confluence_page_ids({"input": "we processed 12345678 records"})
-        assert ids == [], (
-            f"Standalone prose number without 'pageId' prefix must NOT match; got {ids}"
+        """ADR-039: short standalone prose numbers must NOT match as page IDs."""
+        result = _extract_numeric_id_fast("we processed 12345678 records")
+        assert result is None, (
+            f"Standalone prose number without pageId prefix must NOT match; got {result}"
         )
 
 
@@ -567,13 +530,18 @@ class TestAskParameterizedRoutesToEphemeral:
         # Must NOT raise ConfluencePageNotInKBError
         assert len(passages) >= 1
 
-    def test_author_fixed_p3_guard_still_fires_after_p2_exec_ships(self, tmp_path):
-        """After P2-Exec, the P3 guard must STILL fire for author_fixed skills
-        when the user includes a page ref in free-text and the retriever returns
-        a different page (no regression).
+    def test_author_fixed_p3_guard_deleted_by_adr039(self, tmp_path):
+        """ADR-039 (DECISION-020): The P3 regex input-scan guard has been DELETED.
 
-        This is the critical regression test — the conditional must work correctly."""
-        skill_yaml = _make_skill_yaml(tmp_path)  # author_fixed (no source_binding)
+        Previously this test verified that pageId= in free-text inputs caused a
+        ConfluencePageNotInKBError for author_fixed skills. ADR-039 removes this
+        heuristic entirely. Source identity is now enforced at author-time via
+        source_binding.pinned_ref + canonical==canonical comparison.
+
+        A generic author_fixed skill with no source_binding.pinned_ref now returns
+        whatever the retriever provides — even if the input mentions pageId=X.
+        """
+        skill_yaml = _make_skill_yaml(tmp_path)  # generic author_fixed (no source_binding)
         wrong_result = Result(
             content_id=INGESTED_PAGE_ID,
             chunk_id=None,
@@ -587,18 +555,18 @@ class TestAskParameterizedRoutesToEphemeral:
         executor = WorkflowExecutor(
             retrievers={"search_wiki": retriever},
             shim_kb=shim_kb,
-            confluence_adapter=None,  # adapter absent — irrelevant for author_fixed
+            confluence_adapter=None,
         )
 
-        with pytest.raises(ConfluencePageNotInKBError) as exc_info:
-            executor._retrieve_for_inputs(
-                cfg=yaml.safe_load(skill_yaml.read_text()),
-                inputs={"input": f"pageId={REQUESTED_PAGE_ID}"},
-                sources=[],
-            )
-
-        assert exc_info.value.page_id == REQUESTED_PAGE_ID, (
-            "P3 guard must still identify the requested page for author_fixed skills"
+        # ADR-039: P3 guard deleted — no exception; passages are returned.
+        passages = executor._retrieve_for_inputs(
+            cfg=yaml.safe_load(skill_yaml.read_text()),
+            inputs={"input": f"pageId={REQUESTED_PAGE_ID}"},
+            sources=[],
+        )
+        assert len(passages) >= 1, (
+            "ADR-039: P3 guard deleted; generic author_fixed returns passages "
+            "regardless of pageId= in inputs"
         )
 
     def test_ask_parameterized_adapter_none_raises_before_regex_guard(self, tmp_path):

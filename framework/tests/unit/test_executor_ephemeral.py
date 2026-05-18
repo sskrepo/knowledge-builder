@@ -48,10 +48,10 @@ from framework.workflow_runtime.executor import (
     WorkflowExecutor,
     _EphemeralCache,
     _ephemeral_cache,
-    _resolve_page_id,
     _extract_space_key_from_url,
     _any_promoted_skill_requires_ephemeral,
 )
+from framework.adapters.confluence.shared import _extract_numeric_id_fast
 
 
 # ---------------------------------------------------------------------------
@@ -578,13 +578,21 @@ class TestAuthorFixedUnchanged:
         confluence_adapter.fetch.assert_not_called()
         assert len(passages) >= 1
 
-    def test_author_fixed_skill_p3_guard_still_fires_on_mismatch(self, tmp_path):
-        """For author_fixed skills, the P3 regex guard must still hard-fail when
-        the user supplies a page ref in free-text input but the retriever returns
-        a different page (no regression to pre-ADR-032 behavior)."""
+    def test_author_fixed_skill_p3_guard_deleted_by_adr039(self, tmp_path):
+        """ADR-039 (DECISION-020): the P3 regex guard has been DELETED for author_fixed skills.
+
+        Previously, a pageId= reference in free-text inputs would trigger a guard that
+        hard-failed if the retriever returned a different page. ADR-039 replaces this with
+        canonical==canonical matching via source_binding.pinned_ref.
+
+        A generic author_fixed skill with no source_binding.pinned_ref now returns
+        whatever the retriever provides — even if the input contains pageId= text.
+        Source identity is enforced at author-time (synthesize_workflow stamps pinned_ref),
+        not at execution-time via input scanning.
+        """
         skill_yaml = _make_author_fixed_skill_yaml(tmp_path)
 
-        # Retriever returns a DIFFERENT page than the one referenced in input
+        # Retriever returns a page DIFFERENT from the one mentioned in inputs
         wrong_result = self._make_result(OTHER_PAGE_ID)
         retriever = MagicMock(return_value=[wrong_result])
         shim_kb = MagicMock()
@@ -596,15 +604,16 @@ class TestAuthorFixedUnchanged:
 
         executor = _make_executor(retrievers={"search_wiki": retriever}, shim_kb=shim_kb)
 
-        with pytest.raises(ConfluencePageNotInKBError) as exc_info:
-            executor._retrieve_for_inputs(
-                cfg=yaml.safe_load(skill_yaml.read_text()),
-                inputs={"input": f"Please use pageId={PAGE_ID}"},  # PAGE_ID not in results
-                sources=[],
-            )
-
-        assert exc_info.value.page_id == PAGE_ID, (
-            f"P3 guard must report the requested page_id {PAGE_ID}, got {exc_info.value.page_id!r}"
+        # ADR-039: P3 guard deleted — no exception raised.
+        # Generic author_fixed (no pinned_ref) passes through without any page-identity check.
+        passages = executor._retrieve_for_inputs(
+            cfg=yaml.safe_load(skill_yaml.read_text()),
+            inputs={"input": f"Please use pageId={PAGE_ID}"},
+            sources=[],
+        )
+        assert len(passages) >= 1, (
+            "ADR-039: P3 guard is deleted; generic author_fixed must return passages "
+            "regardless of pageId= text in inputs (identity guard is now pinned_ref-based)"
         )
 
     def test_author_fixed_skill_p3_guard_inert_for_generic_query(self, tmp_path):
@@ -769,31 +778,36 @@ class TestEphemeralCache:
 
 
 # ---------------------------------------------------------------------------
-# Test 16: _resolve_page_id helper
+# Test 16: _extract_numeric_id_fast helper (ADR-039 replaces _resolve_page_id)
 # ---------------------------------------------------------------------------
 
-class TestResolvePageId:
+class TestExtractNumericIdFast:
+    """ADR-039 (DECISION-020): _resolve_page_id has been DELETED.
+    The fast-path numeric extraction is now in _extract_numeric_id_fast()
+    (framework/adapters/confluence/shared.py). This class replaces TestResolvePageId.
+    """
 
     def test_bare_numeric_id(self):
-        assert _resolve_page_id("18625350641") == "18625350641"
+        assert _extract_numeric_id_fast("18625350641") == "18625350641"
 
     def test_querystring_form(self):
-        assert _resolve_page_id("?pageId=18625350641") == "18625350641"
+        assert _extract_numeric_id_fast("?pageId=18625350641") == "18625350641"
 
     def test_viewpage_action_form(self):
         url = "https://conf.example.com/pages/viewpage.action?pageId=18625350641"
-        assert _resolve_page_id(url) == "18625350641"
+        assert _extract_numeric_id_fast(url) == "18625350641"
 
     def test_rest_path_form(self):
         url = "https://conf.example.com/wiki/spaces/FA/pages/18625350641/My+Page"
-        assert _resolve_page_id(url) == "18625350641"
+        assert _extract_numeric_id_fast(url) == "18625350641"
 
     def test_bare_pageid_eq_form(self):
-        assert _resolve_page_id("pageId=18625350641") == "18625350641"
+        assert _extract_numeric_id_fast("pageId=18625350641") == "18625350641"
 
-    def test_unrecognised_ref_returned_unchanged(self):
+    def test_unrecognised_ref_returns_none(self):
+        """ADR-039: unlike _resolve_page_id, unrecognised refs return None (not the ref unchanged)."""
         ref = "some-unrecognised-reference"
-        assert _resolve_page_id(ref) == ref
+        assert _extract_numeric_id_fast(ref) is None
 
 
 # ---------------------------------------------------------------------------

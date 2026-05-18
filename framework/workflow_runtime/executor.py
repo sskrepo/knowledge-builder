@@ -7,10 +7,12 @@ Laptop-mode friendly: uses FilestoreContentStore + filesystem deliverer when no
 ADB/Vault/OCI configured.
 
 ADR-032 P2-Exec: ask_parameterized skills fetch the user-supplied Confluence page
-ephemerally (never written to any persistent store).  Author_fixed skills are
-unchanged.  The P3 regex heuristic guard is retained ONLY for author_fixed skills
-to prevent silent wrong-page substitution; it is not applied to ask_parameterized
-skills (which use the schema-driven source_binding.input_param path instead).
+ephemerally (never written to any persistent store).
+
+ADR-039 (DECISION-020): RC1/RC1-A heuristic reconcilers DELETED. Source identity
+is now an adapter-owned contract (canonical_identity()). The executor compares
+canonical_id == canonical_id. No regex, no URL string matching, no pass-through
+on no-match. See _retrieve_author_fixed_pinned() below.
 """
 from __future__ import annotations
 import hashlib
@@ -32,143 +34,105 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# ADR-032 P3 guard — Confluence page-reference detection + source-match assertion
+# ADR-039 (DECISION-020): SourceIdentityUnresolvableError
 #
-# This heuristic detects whether the skill invocation carries an explicit
-# Confluence page reference in the user-supplied inputs and hard-fails if the
-# retrieved passages do not match the requested page.
-#
-# TEMPORARY: this regex-on-input heuristic will be replaced by the
-# source_binding.input_param schema field once ADR-032 P1 ships. See
-# ADR-032 §C and §D.3 for the full design. DECISION-012 options A/B/C remain
-# open and are NOT pre-empted by this guard.
+# Raised at author time and at execution time when canonical_identity()
+# returns an Unresolvable result. Carries the typed Unresolvable so error
+# messages can distinguish transient failures (retry) from permanent
+# failures (fix the source).
 # ---------------------------------------------------------------------------
 
-# Patterns for recognising a Confluence page reference in a free-text input.
-# Ordered most-specific first. All groups capture the numeric page id.
-_CONFLUENCE_PAGE_REF_PATTERNS = [
-    # querystring form: pageId=18625350641
-    re.compile(r"[?&]pageId=(\d+)", re.IGNORECASE),
-    # viewpage.action form: /pages/viewpage.action?pageId=<id>
-    re.compile(r"/pages/viewpage\.action\?pageId=(\d+)", re.IGNORECASE),
-    # REST short-form: /pages/<id>  (must NOT match /pages/viewpage — covered above)
-    re.compile(r"/pages/(\d+)(?:[/?#]|$)"),
-    # bare all-digit token presented as an explicit pageId= key-value pair
-    # in the raw input string (e.g. "pageId=18625350641" without leading ?)
-    re.compile(r"\bpageId=(\d+)\b", re.IGNORECASE),
-    # A1 (BUG-queue-990fe): space-separated / natural-language form, e.g.
-    # "for Confluence pageId 18625350641" or "page id: 18625350641".
-    # The LENGTH CONSTRAINT (≥8 digits) avoids false-positives on short prose
-    # numbers; Confluence pageIds in this env are ~11 digits (e.g. 18625350641).
-    # RETIRED when ADR-032 P2-Exec ships (P1 source_binding.input_param
-    # replaces all regex heuristics — see ADR-032 §E.4).
-    re.compile(r"(?i)\bpage[\s_-]?id\b[\s:]+(\d{8,})"),
-]
+class SourceIdentityUnresolvableError(Exception):
+    """Raised when canonical_identity() returns an Unresolvable result.
 
-# RC1-A fix (DECISION-019): display-by-title URL pattern — captures (SPACE, title_slug).
-# Form: https://.../confluence/display/{SPACE}/{Title+With+Pluses_or_underscores}
-# Does NOT yield a numeric pageId — used by _is_display_url() and
-# _passage_matches_display_url() to match passages by space+title slug.
-_DISPLAY_URL_PATTERN = re.compile(
-    r"/display/([A-Z0-9_\-]+)/([^/?#]+)",
-    re.IGNORECASE,
-)
+    This replaces the silent-degradation path in the old _resolve_page_id()
+    function (which returned the original string unchanged on no-match).
 
-
-def _is_display_url(ref: str) -> bool:
-    """Return True if ref is a Confluence display-by-title URL (/display/SPACE/Title).
-
-    RC1-A: These URLs are NOT parseable by _resolve_page_id() because they
-    encode SPACE+Title, not a numeric pageId.  When _resolve_page_id returns the
-    original URL unchanged (non-numeric), callers use this check to switch to
-    the space+title matching path instead of the pageId matching path.
+    Per DECISION-020 §6: typed, actionable, retryable failure.
     """
-    return bool(_DISPLAY_URL_PATTERN.search(ref))
+
+    def __init__(self, unresolvable):
+        from framework.adapters._base import Unresolvable
+        self.unresolvable = unresolvable
+        if isinstance(unresolvable, Unresolvable) and unresolvable.retryable:
+            msg = (
+                f"Transient failure resolving {unresolvable.connector_id} "
+                f"{unresolvable.resource_type} {unresolvable.reference!r}: "
+                f"{unresolvable.detail}. "
+                "This is a temporary outage. Retry when access is restored."
+            )
+        elif isinstance(unresolvable, Unresolvable):
+            msg = (
+                f"Cannot resolve {unresolvable.connector_id} "
+                f"{unresolvable.resource_type} {unresolvable.reference!r}: "
+                f"{unresolvable.reason} — {unresolvable.detail}. "
+                "Fix the source reference and re-author."
+            )
+        else:
+            msg = f"Source identity unresolvable: {unresolvable}"
+        super().__init__(msg)
+
+
+def _passage_matches_canonical(passage: dict, canonical) -> bool:
+    """Return True if a passage's canonical_ref matches the given CanonicalRef.
+
+    ADR-039 §8: two-sided canonical==canonical comparison. No regex, no URL
+    string matching, no heuristics. The canonical_ref was stamped by
+    normalize() at INGEST time; we compare connector_id + resource_type +
+    canonical_id.
+
+    Returns False (never raises) if the passage lacks canonical_ref metadata.
+    """
+    from framework.adapters._base import CanonicalRef
+    if not isinstance(canonical, CanonicalRef):
+        return False
+    meta = passage.get("metadata") or {}
+    cref = meta.get("canonical_ref")
+    if not isinstance(cref, dict):
+        return False
+    return (
+        cref.get("connector_id") == canonical.connector_id
+        and cref.get("resource_type") == canonical.resource_type
+        and cref.get("canonical_id") == canonical.canonical_id
+    )
+
+
+# NOTE: _resolve_page_id, _passage_matches_page_id, _passage_matches_display_url,
+# _is_display_url, _extract_display_url_parts, _extract_confluence_page_ids,
+# _CONFLUENCE_PAGE_REF_PATTERNS, _DISPLAY_URL_PATTERN
+# — ALL DELETED per ADR-039 (DECISION-020).
+# These were the RC1/RC1-A heuristic reconcilers that caused 7 iterations of
+# URL-form-specific patching. Replaced by canonical_identity() + canonical==canonical.
+
+
+# Stub for backward compatibility in tests that reference _resolve_page_id.
+# DELETE this once all test imports are updated.
+def _resolve_page_id(page_ref: str) -> str:  # noqa: D103
+    """DELETED by ADR-039. Use registry.canonical_identity() instead.
+
+    This stub raises RuntimeError so any remaining callers fail loudly rather
+    than silently degrading.
+    """
+    raise RuntimeError(
+        "_resolve_page_id() has been deleted by ADR-039 (DECISION-020). "
+        "Use registry.canonical_identity(connector_id, reference, resource_type) instead."
+    )
 
 
 def _extract_display_url_parts(ref: str) -> tuple[str, str] | None:
-    """Extract (space_key, title_slug) from a Confluence /display/SPACE/Title URL.
-
-    Returns (space_key.upper(), url-decoded title slug) or None if the URL
-    does not match the display-by-title form.
-
-    RC1-A fix: title slugs in Confluence display URLs use + for spaces and
-    are otherwise URL-encoded.  We normalise + → space and %XX → char so
-    that 'FAaaS+Kiwi+Project' matches 'FAaaS Kiwi Project' in passage metadata.
-    """
-    m = _DISPLAY_URL_PATTERN.search(ref)
-    if not m:
-        return None
-    space_key = m.group(1).upper()
-    title_slug = m.group(2).replace("+", " ").replace("_", " ").strip()
-    # URL-decode percent-encoded chars
-    try:
-        from urllib.parse import unquote
-        title_slug = unquote(title_slug)
-    except Exception:
-        pass
-    return space_key, title_slug
+    """DELETED by ADR-039. Use registry.canonical_identity() instead."""
+    raise RuntimeError(
+        "_extract_display_url_parts() has been deleted by ADR-039 (DECISION-020). "
+        "Use registry.canonical_identity(connector_id, reference, resource_type) instead."
+    )
 
 
-def _passage_matches_display_url(passage: dict, space_key: str, title_slug: str) -> bool:
-    """Return True if a passage corresponds to a Confluence page identified by
-    space_key + title_slug (the display-by-title URL form).
-
-    RC1-A fix: when the pinned_ref is a /display/SPACE/Title URL that _resolve_page_id
-    could not convert to a numeric pageId, we fall back to matching by space+title
-    in the passage metadata/citation.
-
-    Checks (in priority order):
-      1. passage["metadata"]["space"] == space_key AND
-         passage["metadata"]["title"] contains title_slug (case-insensitive)
-      2. passage["citation"] contains the original space_key AND title_slug
-         tokens (URL-encoded or plain, best-effort).
-
-    The no-silent-substitution guard (ADR-031) is maintained because we only
-    match when BOTH space AND title agree — a different-space or different-title
-    page will never match.
-    """
-    meta = passage.get("metadata") or {}
-
-    # Check 1: structured metadata space + title
-    meta_space = str(meta.get("space", "")).strip().upper()
-    meta_title = str(meta.get("title", "")).strip()
-    if meta_space and meta_title:
-        if meta_space == space_key and title_slug.lower() in meta_title.lower():
-            return True
-
-    # Check 2: metadata page_id is a display URL containing space+title
-    # WikiMetadataStore stores the display URL as page_id when the ingestor
-    # receives a display-URL input (SearchWikiRetriever puts page_id in metadata).
-    meta_page_id = str(meta.get("page_id", "")).strip()
-    if meta_page_id and _is_display_url(meta_page_id):
-        pid_lower = meta_page_id.lower()
-        if (space_key.lower() in pid_lower
-                and title_slug.replace(" ", "+").lower() in pid_lower):
-            return True
-        # Also check URL-decoded form (spaces → %20 or +)
-        import urllib.parse
-        pid_decoded = urllib.parse.unquote(meta_page_id).lower()
-        if (space_key.lower() in pid_decoded
-                and title_slug.lower() in pid_decoded):
-            return True
-
-    # Check 3: citation URL contains both space key and title slug tokens
-    citation = str(passage.get("citation", "")).strip()
-    if citation:
-        citation_lower = citation.lower()
-        # The citation might be a /display/ URL itself, a /pages/<id>?pageId= URL,
-        # or a wiki:// URI. We check if the citation contains the space key AND
-        # at least the first significant word of the title slug (to avoid
-        # false matches on single short words).
-        space_in_citation = space_key.lower() in citation_lower
-        title_words = [w for w in title_slug.lower().split() if len(w) > 3]
-        if title_words and space_in_citation:
-            words_matched = sum(1 for w in title_words if w in citation_lower)
-            if words_matched >= min(2, len(title_words)):
-                return True
-
-    return False
+def _is_display_url(ref: str) -> bool:
+    """DELETED by ADR-039. Use confluence adapter's canonical_identity() instead."""
+    raise RuntimeError(
+        "_is_display_url() has been deleted by ADR-039 (DECISION-020). "
+        "Use ConfluenceNativeAdapter.canonical_identity(reference, 'page') instead."
+    )
 
 
 class ConfluencePageNotInKBError(Exception):
@@ -208,67 +172,6 @@ class ConfluencePageNotInKBError(Exception):
             )
         super().__init__(msg)
 
-
-def _extract_confluence_page_ids(inputs: dict) -> list[str]:
-    """Extract Confluence page IDs referenced in the skill inputs.
-
-    Scans every string value in `inputs` against known Confluence URL/id
-    patterns. Returns a deduplicated list of numeric page-id strings, or an
-    empty list if no explicit page reference is found.
-
-    Conservative: only all-digit tokens that match an explicit Confluence URL
-    pattern or a bare `pageId=<digits>` key-value are treated as page refs.
-    Arbitrary numbers embedded in prose are NOT matched.
-
-    ADR-032 P3 — heuristic guard; replaced by source_binding.input_param in P1.
-    """
-    found: list[str] = []
-    seen: set[str] = set()
-    for v in inputs.values():
-        if not isinstance(v, str):
-            continue
-        for pattern in _CONFLUENCE_PAGE_REF_PATTERNS:
-            for m in pattern.finditer(v):
-                pid = m.group(1)
-                if pid not in seen:
-                    seen.add(pid)
-                    found.append(pid)
-    return found
-
-
-def _passage_matches_page_id(passage: dict, requested_page_id: str) -> bool:
-    """Return True if the passage's citation/metadata corresponds to the requested
-    Confluence page id.
-
-    Checks (in order):
-      1. RC1-A: if requested_page_id is a display-by-title URL (/display/SPACE/Title),
-         delegate to _passage_matches_display_url() for space+title matching — because
-         _resolve_page_id() cannot extract a numeric pageId from this URL form, so the
-         caller passes the original URL string and we must match by space+title instead.
-      2. passage["metadata"]["page_id"] — set by SearchWikiRetriever and
-         ReadWikiPageRetriever on every Result object.
-      3. requested_page_id appears anywhere in passage["citation"] — covers
-         Confluence URLs (https://.../wiki/...?pageId=<id>), wiki:// URIs
-         (wiki://<page_id>), and fixture paths.
-
-    ADR-032 P3 — bound to the real field names in Result + retriever metadata.
-    RC1-A fix (DECISION-019): display-by-title URL support added.
-    """
-    # RC1-A: display-by-title URL form — _resolve_page_id returned the URL unchanged,
-    # so requested_page_id IS the display URL.  Delegate to space+title matcher.
-    if _is_display_url(requested_page_id):
-        parts = _extract_display_url_parts(requested_page_id)
-        if parts:
-            return _passage_matches_display_url(passage, parts[0], parts[1])
-
-    meta = passage.get("metadata") or {}
-    meta_page_id = str(meta.get("page_id", "")).strip()
-    if meta_page_id and meta_page_id == requested_page_id:
-        return True
-    citation = str(passage.get("citation", "")).strip()
-    if citation and requested_page_id in citation:
-        return True
-    return False
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _TELEMETRY_DIR = Path.home() / ".kbf" / "telemetry"
@@ -382,34 +285,6 @@ class _EphemeralCache:
 # Module-level singleton — shared across all WorkflowExecutor instances in this
 # process.  Each uvicorn worker has its own copy (separate memory space).
 _ephemeral_cache = _EphemeralCache()
-
-
-def _resolve_page_id(page_ref: str) -> str:
-    """Extract a numeric Confluence page ID from a page reference string.
-
-    Handles the following forms (in order of specificity):
-      - Full Confluence URL with ?pageId= query param
-      - /pages/viewpage.action?pageId=<id> REST form
-      - /wiki/spaces/.../pages/<id>/ path form
-      - Bare pageId=<digits> key-value form (with or without leading ?)
-      - Natural-language "pageId 18625350641" or "pageId: 18625350641" form
-      - Bare all-digit string (passed directly as the page_id input value)
-
-    Returns the numeric string on match, or the original string unchanged if
-    no pattern matches (e.g., caller passed an unrecognised reference — the
-    upstream trust check will reject it as unusable).
-
-    ADR-032 P2-Exec: used for structural input_param resolution (not regex
-    heuristic scanning over free-form prose).
-    """
-    for pattern in _CONFLUENCE_PAGE_REF_PATTERNS:
-        m = pattern.search(page_ref)
-        if m:
-            return m.group(1)
-    # Bare all-digit string — consumer passed the page ID directly (e.g., "18625350641")
-    if page_ref.strip().isdigit():
-        return page_ref.strip()
-    return page_ref
 
 
 def _extract_space_key_from_url(page_ref: str) -> str | None:
@@ -809,39 +684,11 @@ class WorkflowExecutor:
             )
             passages = self._load_fixture_passages(inputs, cfg=cfg)
 
-        # ------------------------------------------------------------------
-        # ADR-032 P3 guard — no-silent-substitution assertion (author_fixed only).
-        #
-        # If the user supplied an explicit Confluence page reference in inputs
-        # for an AUTHOR_FIXED skill, verify that at least one retrieved passage
-        # actually corresponds to that page.  Hard-fail if not.
-        #
-        # This guard is CONDITIONAL: it applies only to author_fixed skills.
-        # ask_parameterized skills do NOT reach this block — they returned
-        # earlier via _retrieve_ask_parameterized which enforces correctness
-        # through the schema-driven source_binding.input_param path
-        # (ADR-032 §E.4 — structural retirement of regex heuristic for
-        # parameterized skills; regex retained for author_fixed).
-        # ------------------------------------------------------------------
-        requested_page_ids = _extract_confluence_page_ids(inputs)
-        if requested_page_ids:
-            skill_name = cfg.get("workflow_skill", "")
-            for requested_pid in requested_page_ids:
-                matching = [
-                    p for p in passages
-                    if _passage_matches_page_id(p, requested_pid)
-                ]
-                if not matching:
-                    log.error(
-                        "executor P3 guard (author_fixed): requested Confluence page %s not "
-                        "found in retrieved passages (skill=%s). Hard-failing — retrieved %d "
-                        "passage(s) from different page(s); substitution is forbidden.",
-                        requested_pid, skill_name, len(passages),
-                    )
-                    raise ConfluencePageNotInKBError(
-                        page_id=requested_pid, skill_name=skill_name
-                    )
-
+        # ADR-039 (DECISION-020): P3 heuristic guard DELETED.
+        # Source identity is enforced via source_binding.pinned_ref + canonical==canonical
+        # comparison in _retrieve_author_fixed_pinned. The P3 input-scanning heuristic
+        # (_extract_confluence_page_ids + _passage_matches_page_id) is removed entirely.
+        # Generic author_fixed (no pinned_ref) returns whatever the retriever provides.
         return passages
 
     # ------------------------------------------------------------------
@@ -900,7 +747,10 @@ class WorkflowExecutor:
         skill_name = cfg.get("workflow_skill", "")
         input_param = source_binding.get("input_param", "")
         page_ref = str(inputs.get(input_param, "")).strip()
-        page_id = _resolve_page_id(page_ref)
+        # ADR-039: use canonical fast-path extraction for the structural input_param.
+        # For ask_parameterized, the page_ref is a structured input (not free-text scan).
+        from framework.adapters.confluence.shared import _extract_numeric_id_fast
+        page_id = _extract_numeric_id_fast(page_ref) or page_ref
         ingest_on_demand = source_binding.get("ingest_on_demand", False)
         space_allow_list: list[str] = source_binding.get("space_allow_list") or []
         ttl = int(source_binding.get("ephemeral_ttl_seconds", 300))
@@ -1179,29 +1029,45 @@ class WorkflowExecutor:
         ingest_on_demand = source_binding.get("ingest_on_demand", False)
 
         log.info(
-            "RC1 pinned-source resolution: skill=%s pinned_ref=%r ingest_on_demand=%s",
+            "ADR-039 pinned-source resolution: skill=%s pinned_ref=%r ingest_on_demand=%s",
             skill_name, pinned_ref, ingest_on_demand,
         )
 
-        # Resolve a numeric page_id from the pinned_ref (URL or bare ID).
-        pinned_page_id = _resolve_page_id(pinned_ref)
+        # ADR-039 (DECISION-020): resolve pinned_ref → CanonicalRef via adapter's
+        # canonical_identity().  No regex, no URL string matching.
+        # session=None: fast-path only (no live REST call at retrieval time).
+        from framework.adapters.confluence.shared import resolve_to_numeric_id
+        from framework.adapters._base import Unresolvable, CanonicalRef
+        canonical = resolve_to_numeric_id(
+            reference=pinned_ref,
+            resource_type="page",
+            session=None,
+            base_url="",
+        )
 
-        # RC1-A: if _resolve_page_id returned the original ref unchanged, it may be a
-        # display-by-title URL (/display/SPACE/Title) which contains no numeric pageId.
-        # In that case _passage_matches_page_id will automatically delegate to
-        # _passage_matches_display_url() via the _is_display_url() branch.
-        # We log this case explicitly so operators can identify display-URL pinned refs.
-        if pinned_page_id == pinned_ref and _is_display_url(pinned_ref):
-            log.info(
-                "RC1-A display-URL pinned_ref: %r — numeric pageId not resolvable from "
-                "URL form; will match passages by space+title slug instead (DECISION-019).",
-                pinned_ref,
+        if isinstance(canonical, Unresolvable):
+            raise ConfluencePageNotInKBError(
+                page_id=pinned_ref,
+                skill_name=skill_name,
+                reason=(
+                    f"Cannot resolve pinned page reference {pinned_ref!r}: "
+                    f"{canonical.reason} — {canonical.detail}. "
+                    "Fix the pinned_ref in the skill's source_binding and re-author."
+                ),
             )
 
+        # Use fast-path canonical_id for error messages and strategy 3.
+        pinned_page_id = canonical.canonical_id
+
+        log.info(
+            "ADR-039 pinned-source: resolved %r → canonical_id=%r",
+            pinned_ref, pinned_page_id,
+        )
+
         # --- Strategy 1: KB retriever lookup scoped to the pinned page -------
-        # Attempt to retrieve passages from the KB that match the pinned page.
-        # We use the existing retrievers but then filter to only passages that
-        # match the pinned page ID or URL.  If none match, move to strategy 2.
+        # Retrieve passages from the KB and filter to only those whose
+        # canonical_ref.canonical_id matches the pinned canonical ID.
+        # ADR-039: canonical==canonical comparison; no regex, no URL matching.
         passages: list[dict] = []
         query_text = " ".join(str(v) for v in inputs.values() if v)
 
@@ -1224,7 +1090,7 @@ class WorkflowExecutor:
                     except TypeError:
                         results = retriever(query=query_text)
                     except Exception as exc:
-                        log.error("RC1 pinned retriever %s raised: %s", tool_name, exc)
+                        log.error("ADR-039 pinned retriever %s raised: %s", tool_name, exc)
                         continue
                     for r in results or []:
                         p = {
@@ -1233,22 +1099,22 @@ class WorkflowExecutor:
                             "metadata": getattr(r, "metadata", {}) or {},
                             "kb": kb_full_name,
                         }
-                        # Only keep passages that match the pinned page.
-                        if _passage_matches_page_id(p, pinned_page_id):
+                        # ADR-039: canonical==canonical match only.
+                        if _passage_matches_canonical(p, canonical):
                             passages.append(p)
 
         if passages:
             log.info(
-                "RC1 pinned-source: resolved %d passage(s) for skill=%s pinned_ref=%r "
-                "via KB retriever (pinned page found in KB).",
-                len(passages), skill_name, pinned_ref,
+                "ADR-039 pinned-source: resolved %d passage(s) for skill=%s pinned_ref=%r "
+                "(canonical_id=%r) via KB retriever (pinned page found in KB).",
+                len(passages), skill_name, pinned_ref, pinned_page_id,
             )
             return passages
 
         # --- Strategy 2: on-demand fetch (if ingest_on_demand: true) ---------
         if ingest_on_demand and self.confluence_adapter is not None:
             log.info(
-                "RC1 pinned-source: pinned page %r not in KB for skill=%s — "
+                "ADR-039 pinned-source: pinned page %r not in KB for skill=%s — "
                 "ingest_on_demand=True, attempting adapter fetch.",
                 pinned_ref, skill_name,
             )
@@ -1282,33 +1148,19 @@ class WorkflowExecutor:
         # The pinned page is not in the KB and ingest_on_demand is False (or no
         # adapter).  We MUST NOT fall through to generic KB retrieval — that
         # would reproduce the original RC1 bug.
+        # ADR-039: canonical_id is already resolved; use it directly in the message.
+        # No RC1-A display-URL special-casing needed — resolve_to_numeric_id() handled
+        # display URL → numeric canonical_id resolution above.
         reason_parts = [
-            f"Pinned Confluence page {pinned_ref!r} (from source_binding.pinned_ref) "
-            "is not found in the knowledge base via KB retrieval. "
+            f"Pinned Confluence page {pinned_ref!r} (canonical page ID: {pinned_page_id}, "
+            "from source_binding.pinned_ref) is not found in the knowledge base via "
+            "KB retrieval. "
         ]
-        # RC1-A: display-URL pinned_ref gives actionable guidance referencing the URL form.
-        is_display = _is_display_url(pinned_ref) and pinned_page_id == pinned_ref
         if not ingest_on_demand:
-            if is_display:
-                parts = _extract_display_url_parts(pinned_ref)
-                display_hint = ""
-                if parts:
-                    display_hint = (
-                        f" (display-by-title URL: space={parts[0]!r}, title={parts[1]!r})"
-                    )
-                reason_parts.append(
-                    f"The pinned_ref is a display-by-title URL{display_hint}. "
-                    "Run: kb-cli ingest --space-key {parts[0]} --title {parts[1]!r} --persona tpm "
-                    "to ingest the page, or re-author the skill with ingest_on_demand: true."
-                    if parts else
-                    "Run: kb-cli ingest to ingest the page, or re-author the skill with "
-                    "ingest_on_demand: true."
-                )
-            else:
-                reason_parts.append(
-                    f"Run: kb-cli ingest --page-id {pinned_page_id} --persona tpm "
-                    "to ingest the page, or re-author the skill with ingest_on_demand: true."
-                )
+            reason_parts.append(
+                f"Run: kb-cli ingest --page-id {pinned_page_id} --persona tpm "
+                "to ingest the page, or re-author the skill with ingest_on_demand: true."
+            )
         elif self.confluence_adapter is None:
             reason_parts.append(
                 "ingest_on_demand: true is set but the Confluence adapter is not "

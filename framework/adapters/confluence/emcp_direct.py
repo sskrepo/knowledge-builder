@@ -16,13 +16,15 @@ from datetime import datetime
 from typing import Any, Iterable
 
 from .._base import (
+    AdapterWithIdentity,
+    CanonicalResult,
     ChangeEvent,
     HealthReport,
     RawItem,
     RawItemRef,
     SourceQuery,
 )
-from .shared import to_raw_item
+from .shared import to_raw_item, resolve_to_numeric_id
 from ...core.emcp_runtime import EmcpAuthError, EmcpError, EmcpRuntime
 
 log = logging.getLogger(__name__)
@@ -39,7 +41,7 @@ def _parse_iso(s: str | None) -> datetime | None:
         return None
 
 
-class ConfluenceEmcpDirectAdapter:
+class ConfluenceEmcpDirectAdapter(AdapterWithIdentity):
     """Confluence adapter using direct HTTPS+OAuth to the emcp MCP server."""
 
     name = "confluence:emcp_direct"
@@ -325,6 +327,31 @@ class ConfluenceEmcpDirectAdapter:
             "url": meta.get("url"),
         }
         return to_raw_item(payload=flat_payload, metadata=meta_dict, source_id=source_id)
+
+    # ------------------------------------------------------------------
+    # ADR-039 (DECISION-020): canonical_identity implementation
+    # ------------------------------------------------------------------
+
+    def canonical_identity(self, reference: str, resource_type: str) -> CanonicalResult:
+        """Resolve any Confluence reference to a CanonicalRef with numeric page ID.
+
+        emcp_direct mode: canonical_identity uses the same shared resolution
+        algorithm as native.py (resolve_to_numeric_id). However, emcp_direct
+        accesses Confluence via the MCP server, not a direct REST session.
+
+        For the identity-resolution call specifically, we use the fast-path
+        numeric extraction (no MCP round-trip required when reference contains
+        a numeric ID). For display-by-title URLs, we must defer to
+        Unresolvable(TRANSIENT) because we have no direct REST session available
+        in emcp_direct mode. This is an accepted limitation: authors using
+        emcp_direct should use numeric IDs or ?pageId= URL forms when authoring.
+        """
+        return resolve_to_numeric_id(
+            reference=reference,
+            resource_type=resource_type,
+            session=None,   # No direct REST session in emcp_direct mode.
+            base_url="",    # Not used when session=None.
+        )
 
     def close(self) -> None:
         self.runtime.close()
