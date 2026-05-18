@@ -4,6 +4,24 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-18] architect | DECISION-020/ADR-039 bind-side canonicalization gap closed — BUG-queue-43ac1 filed
+
+Gap: `derive_pinned_source()` stored raw display URLs in `source_binding.pinned_ref` without calling `canonical_identity()`. Executor read path (session=None) returned `Unresolvable(TRANSIENT)` for display-by-title URLs, surfacing as `ConfluencePageNotInKBError` at EVAL. Evidence: session `synth-tpm-58a9780c` artifact confirmed in ADB.
+
+Fix: `canonicalize_pinned_source(pinned_source, canonicalize_fn)` added to `synthesize_workflow.py`. Called in `conversation._synthesize_preview()` immediately after `derive_pinned_source()` returns non-None, using the live Confluence adapter. On `CanonicalRef`: stores numeric `canonical_id` in `pinned_ref`, serializes full `CanonicalRef` as `canonical_ref`, retains raw URL as `original_ref`. On `Unresolvable`: raises `PinnedSourceCanonicalizationError` — HARD-FAIL per DECISION-020 §4, raw URL NOT stored. `PinnedSourceCanonicalizationError` distinguishes retryable (transient) vs permanent per §6.
+
+INGEST side (native.py normalize) was already correct — no changes needed there.
+
+Tests: 13 new tests in `test_decision020_bind_canonicalization.py` (all pass). Updated 4 tests in `test_phase_a_source_binding_fix.py` to mock `_build_confluence_adapter` (behavior changed: adapter now called at synthesis). Full suite: exactly 8 failures = same baseline, zero new.
+
+Bug: `BUG-queue-43ac1` filed in ADB `KBF_BUG_REPORTS` (COUNT=1 confirmed). ADR-039 addendum note added.
+
+Parked session `synth-tpm-58a9780c` will NOT auto-heal — user must re-author to get canonical artifact.
+
+Merged fix to `main` from branch `fix/decision-020-bind-canonicalization`.
+
+---
+
 ## [2026-05-18] backend-dev | DECISION-020/ADR-039 branch independently verified clean — zero new regressions confirmed
 
 Independent verification of `feat/decision-020-source-identity` (HEAD `5b4c74e`). Hard-evidence run: full `framework/tests/unit/` on both `ada2fdb` (main) and branch. Result: **both produce exactly 8 unit test failures** — identical set: `test_code_wiki.py::test_find_symbol_function` (1) + `test_smoke_validate.py::TestValidateAfterCommitFilesystemPath::*` (6) + `test_smoke_validate.py::TestValidateFilesystemFallbackVsAdbPath::test_filesystem_fallback_used_when_no_skill_store` (1). Zero new regressions introduced by branch.

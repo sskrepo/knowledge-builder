@@ -6250,6 +6250,8 @@ class SkillBuilderConversation:
             synthesize_workflow_skill,
             derive_space_allow_list,
             derive_pinned_source,
+            canonicalize_pinned_source,
+            PinnedSourceCanonicalizationError,
         )
         from .gold_seed import seed_gold_set, seed_workflow_gold
 
@@ -6382,12 +6384,48 @@ class SkillBuilderConversation:
                 source_samples=self._data.source_samples,
             )
             if derived_pinned_source is not None:
+                raw_pinned_ref = derived_pinned_source.get("pinned_ref", "")
                 log.info(
                     "_synthesize_preview: author_fixed skill=%s derived pinned_source=%r "
-                    "(DECISION-019 RC1 — pinned source binding will be emitted in artifact)",
+                    "(DECISION-019 RC1 — attempting bind-side canonicalization per ADR-039 §3)",
                     skill_name,
-                    derived_pinned_source.get("pinned_ref", ""),
+                    raw_pinned_ref,
                 )
+                # ADR-039 / DECISION-020 §4 bind-side canonicalization (gap-closure):
+                # Replace the raw URL in pinned_ref with the numeric canonical_id.
+                # A live Confluence session is available at author time (INSPECT_SOURCES
+                # already performed live fetches in this session).
+                # HARD-FAIL on Unresolvable per DECISION-020 §4 — do NOT store raw URL.
+                import os as _os
+                kbf_env = _os.environ.get("KBF_ENV", "laptop")
+                _confluence_adapter = _build_confluence_adapter(kbf_env, REPO_ROOT)
+                if _confluence_adapter is None:
+                    raise PinnedSourceCanonicalizationError(
+                        reference=raw_pinned_ref,
+                        reason="ERROR_TRANSIENT",
+                        detail=(
+                            "No Confluence adapter is configured for this environment "
+                            f"(KBF_ENV={kbf_env!r}). Cannot canonicalize the pinned source "
+                            f"{raw_pinned_ref!r} at author time. "
+                            "Configure the Confluence adapter (framework/config/adapters/"
+                            "confluence.yaml) and retry authoring."
+                        ),
+                        retryable=True,
+                    )
+                try:
+                    derived_pinned_source = canonicalize_pinned_source(
+                        pinned_source=derived_pinned_source,
+                        canonicalize_fn=_confluence_adapter.canonical_identity,
+                    )
+                    log.info(
+                        "_synthesize_preview: ADR-039 bind-side canonicalization succeeded: "
+                        "skill=%s raw_ref=%r -> canonical_id=%r",
+                        skill_name,
+                        raw_pinned_ref,
+                        derived_pinned_source.get("pinned_ref", ""),
+                    )
+                except PinnedSourceCanonicalizationError:
+                    raise  # Re-raise as-is — HARD-FAIL per DECISION-020 §4
             else:
                 log.debug(
                     "_synthesize_preview: author_fixed skill=%s has no external fixed source "

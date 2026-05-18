@@ -17,11 +17,135 @@ a pinned_ref derived from source_samples.  This allows the runtime executor to
 resolve the exact page the skill was authored against, preventing silent wrong-
 page retrieval.  Skills with no external fixed source (pure in-KB) continue to
 emit NO source_binding block — unchanged pre-ADR-032 behavior.
+
+ADR-039 / DECISION-020 bind-side gap closure (2026-05-18):
+The bind path (CONFIGURE_SOURCES -> author_fixed commit) previously stored raw
+author URLs in pinned_ref without calling canonical_identity.  The executor
+read path (session=None) could not resolve display-by-title URLs, causing
+ConfluencePageNotInKBError at EVAL time.  canonicalize_pinned_source() closes
+this gap: callers must invoke it at author time (live session available) to
+replace the raw URL with the numeric canonical_id before committing the
+artifact.  On Unresolvable, authoring HARD-FAILs immediately per §4.
 """
 from __future__ import annotations
 
 import re
 from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# ADR-039 / DECISION-020: bind-side canonicalization (gap-closure 2026-05-18)
+# ---------------------------------------------------------------------------
+
+class PinnedSourceCanonicalizationError(ValueError):
+    """Raised at author/bind time when canonical_identity returns Unresolvable.
+
+    Per DECISION-020 §4: HARD-FAIL at authoring if canonical_identity cannot
+    resolve the pinned ref at author time.  Do NOT store the raw URL and defer
+    to EVAL.  The author must fix the source reference or restore access before
+    the skill can be committed.
+
+    Attributes:
+        reference:  the original raw reference that could not be resolved.
+        reason:     one of the UNRESOLVABLE_* constants from adapters._base.
+        detail:     human-readable detail for an actionable error message.
+        retryable:  True = transient failure (retry later); False = permanent.
+    """
+
+    def __init__(self, reference: str, reason: str, detail: str, retryable: bool):
+        self.reference = reference
+        self.reason = reason
+        self.detail = detail
+        self.retryable = retryable
+        if retryable:
+            msg = (
+                f"Transient failure canonicalizing pinned Confluence source "
+                f"{reference!r}: {detail}. "
+                "This is a temporary outage. Restore access and re-author."
+            )
+        else:
+            msg = (
+                f"Cannot canonicalize pinned Confluence source {reference!r}: "
+                f"{reason} — {detail}. "
+                "Fix the source reference or credentials and re-author. "
+                "Per DECISION-020 §4, raw URLs are NEVER stored — "
+                "canonicalization must succeed at author time."
+            )
+        super().__init__(msg)
+
+
+def canonicalize_pinned_source(
+    pinned_source: dict,
+    canonicalize_fn,
+) -> dict:
+    """Resolve the raw pinned_ref to a canonical numeric ID at author time.
+
+    ADR-039 §3 (two-sided write): the committed source_binding.pinned_ref MUST
+    carry the numeric canonical_id (e.g. "18625350641"), NOT the raw display URL
+    that the author typed.  This function enforces that invariant.
+
+    Called at CONFIGURE_SOURCES / _synthesize_preview (author time) when a live
+    Confluence session is available — the same session that INSPECT_SOURCES used
+    for live fetches.
+
+    Parameters
+    ----------
+    pinned_source:
+        Dict returned by derive_pinned_source():
+          { "pinned_ref": <raw URL or numeric id>,
+            "source_type": "confluence_page",
+            "space_allow_list": [...] }
+
+    canonicalize_fn:
+        Callable(reference: str, resource_type: str) -> CanonicalResult.
+        Typically the Confluence adapter's canonical_identity method, or
+        registry.canonical_identity("confluence", ref, "page").
+        Must return CanonicalRef on success or Unresolvable on failure.
+
+    Returns
+    -------
+    dict
+        A NEW dict (does not mutate the input) with:
+          - "pinned_ref":    numeric canonical_id (str)  — replaces raw URL
+          - "canonical_ref": serialized CanonicalRef dict — for executor use
+          - "original_ref":  the original raw URL kept as non-authoritative
+                             display hint (NEVER used for identity comparison)
+          - "source_type":   passed through from input
+          - "space_allow_list": passed through from input
+
+    Raises
+    ------
+    PinnedSourceCanonicalizationError
+        If canonicalize_fn returns Unresolvable.  Per DECISION-020 §4, the
+        caller must NOT fall back to storing the raw URL.
+    """
+    from ..adapters._base import CanonicalRef, Unresolvable, canonical_ref_to_dict
+
+    raw_ref: str = pinned_source.get("pinned_ref", "")
+    source_type: str = pinned_source.get("source_type", "confluence_page")
+    space_allow_list: list = list(pinned_source.get("space_allow_list") or [])
+
+    # resource_type is "page" for confluence_page source_type
+    resource_type = "page" if source_type == "confluence_page" else source_type
+
+    result = canonicalize_fn(raw_ref, resource_type)
+
+    if isinstance(result, Unresolvable):
+        raise PinnedSourceCanonicalizationError(
+            reference=raw_ref,
+            reason=result.reason,
+            detail=result.detail,
+            retryable=result.retryable,
+        )
+
+    # result is CanonicalRef — success path
+    return {
+        "pinned_ref": result.canonical_id,        # numeric canonical id
+        "canonical_ref": canonical_ref_to_dict(result),  # for executor comparison
+        "original_ref": raw_ref,                  # non-authoritative display hint
+        "source_type": source_type,
+        "space_allow_list": space_allow_list,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -370,17 +494,30 @@ def synthesize_workflow_skill(
             "ephemeral_ttl_seconds": ephemeral_ttl_seconds,
         }
     elif source_binding_mode == "author_fixed" and pinned_source is not None:
-        # DECISION-019 RC1: pinned source binding for author_fixed with
-        # an external fixed source (Confluence page identified at author time).
+        # DECISION-019 RC1 / ADR-039 bind-side gap closure: pinned source binding
+        # for author_fixed with an external fixed source (Confluence page identified
+        # at author time).
+        # pinned_ref MUST carry the numeric canonical_id after canonicalize_pinned_source()
+        # is called by conversation._synthesize_preview.  canonical_ref (if present)
+        # is also emitted so the executor can compare canonical_id == canonical_id
+        # without re-resolving.  original_ref (if present) is kept as display hint only.
         # ingest_on_demand defaults False: executor looks up the pinned page
         # from the KB (already ingested at authorSkill time).
-        result["source_binding"] = {
+        sb: dict = {
             "mode": "author_fixed",
             "source_type": pinned_source.get("source_type", "confluence_page"),
             "pinned_ref": pinned_source["pinned_ref"],
             "space_allow_list": list(pinned_source.get("space_allow_list") or []),
             "ingest_on_demand": False,
         }
+        # ADR-039 §3 two-sided write: emit canonical_ref when available
+        # (set by canonicalize_pinned_source; absent for legacy pre-fix paths).
+        if pinned_source.get("canonical_ref"):
+            sb["canonical_ref"] = pinned_source["canonical_ref"]
+        # original_ref kept as non-authoritative display hint (never used for matching)
+        if pinned_source.get("original_ref"):
+            sb["original_ref"] = pinned_source["original_ref"]
+        result["source_binding"] = sb
 
     return result
 
