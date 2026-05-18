@@ -59,12 +59,48 @@ from ..renderers.layout_catalog import catalog_for_prompt as _layout_catalog_for
 # Aliased to avoid shadowing prompt_registry.get_registry imported above.
 from ..connectors.registry import (  # noqa: E402
     get_registry as _get_connector_registry,
+    format_supported_connectors_block as _format_supported_connectors_block,
     HARD_STOP as _CONNECTOR_HARD_STOP,
 )
 
 
 # ADR-030 C1: All prompt constants moved to framework/config/prompts/skill_builder.yaml.
 # Use get_registry().get_prompt(prompt_id, ...) at each call site.
+
+
+# ---------------------------------------------------------------------------
+# ADR-036 discoverability: proactive supported-connector block helper
+# ---------------------------------------------------------------------------
+
+def _build_proactive_connector_block() -> str:
+    """Return the proactive 'Supported source connectors' block for CONFIGURE_SOURCES.
+
+    This is shown to the skill author at the TOP of the CONFIGURE_SOURCES prompt
+    BEFORE they specify any sources, so they see what connectors are available
+    without first having to guess-and-fail.
+
+    Rendering is delegated to format_supported_connectors_block() in the
+    connector registry module — the SAME helper that renders the supported-
+    connector list in the hard-stop rejection message.  Both surfaces share
+    a single code path, so they can never drift from each other.
+
+    Returns:
+        Multi-line string suitable for prepending to the CONFIGURE_SOURCES prompt.
+    """
+    try:
+        registry = _get_connector_registry()
+        lines = _format_supported_connectors_block(registry.list_connectors())
+        return (
+            "Supported source connectors:\n"
+            f"{lines}\n"
+        )
+    except Exception as exc:
+        log.warning(
+            "_build_proactive_connector_block: could not load registry (%s) — "
+            "skipping proactive connector list",
+            exc,
+        )
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -1513,10 +1549,12 @@ class SkillBuilderConversation:
                 existing_pages.add(p)
 
         if not self._data.sources:
+            connector_block = _build_proactive_connector_block()
             return ConversationTurn(
                 state="CONFIGURE_SOURCES",
                 message=(
-                    "I could not find specific source references in your intent.\n\n"
+                    (connector_block + "\n" if connector_block else "")
+                    + "I could not find specific source references in your intent.\n\n"
                     "Please provide at least one source:\n"
                     "  • Paste a Confluence page URL or page ID\n"
                     "  • Confluence space: 'confluence SPACE_KEY'\n"
@@ -3952,10 +3990,12 @@ class SkillBuilderConversation:
                     options=["done", "add another source"],
                 )
 
+        connector_block = _build_proactive_connector_block()
         return ConversationTurn(
             state="CONFIGURE_SOURCES",
             message=(
-                "Where does the source data live?\n"
+                (connector_block + "\n" if connector_block else "")
+                + "Where does the source data live?\n"
                 "Describe one or more sources (you can add multiple):\n\n"
                 "  • Confluence specific page (recommended when you have a link):\n"
                 "      paste the page URL, e.g.\n"

@@ -90,6 +90,74 @@ class GatingResult:
 
 
 # ---------------------------------------------------------------------------
+# Shared formatting helpers (used by both hard-stop message AND proactive block)
+# ---------------------------------------------------------------------------
+
+# User-facing field names exposed via listConnectors MCP tool and the proactive
+# CONFIGURE_SOURCES block.  Internal fields (access_probe_hook, granularity_filters)
+# are deliberately excluded — they are implementation details, not author metadata.
+_USER_FACING_FIELDS = (
+    "connector_id",
+    "display_name",
+    "description",
+    "resource_types",
+    "supported_operations",
+    "auth_model",
+)
+
+
+def manifest_to_user_facing(manifest: "ConnectorManifest") -> dict:
+    """Extract the six user-facing fields from a ConnectorManifest.
+
+    Strips internal fields (access_probe_hook, granularity_filters) that
+    should not be exposed to skill authors or MCP callers.
+
+    This is the canonical projection used by:
+      - listConnectors MCP tool (ADR-036 discoverability)
+      - The proactive CONFIGURE_SOURCES supported-connectors block
+
+    Both surfaces call this function so they can never drift from each other.
+    """
+    return {
+        "connector_id":         manifest.connector_id,
+        "display_name":         manifest.display_name,
+        "description":          manifest.description,
+        "resource_types":       list(manifest.resource_types),
+        "supported_operations": list(manifest.supported_operations),
+        "auth_model":           manifest.auth_model,
+    }
+
+
+def format_supported_connectors_block(manifests: "list[ConnectorManifest]") -> str:
+    """Format a human-readable 'Supported source connectors' block.
+
+    Used by both:
+      (a) The hard-stop rejection message in _build_unsupported_connector_message()
+      (b) The proactive CONFIGURE_SOURCES entry prompt in conversation.py
+
+    Rendering once here means both surfaces stay identical when the registry
+    changes — the drift-prevention guarantee required by ADR-036 discoverability.
+
+    Args:
+        manifests: List of ConnectorManifest objects (typically from list_connectors()).
+
+    Returns:
+        Multi-line string, one connector per line:
+          - confluence      (Confluence — page, space, attachment)
+          - jira            (Jira — issue, epic, sprint)
+    """
+    lines = []
+    for m in manifests:
+        types_preview = ", ".join(m.resource_types[:3])
+        if len(m.resource_types) > 3:
+            types_preview += "..."
+        lines.append(
+            f"  - {m.connector_id:<16}({m.display_name} — {types_preview})"
+        )
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -248,12 +316,30 @@ class ConnectorRegistry:
     # Message builders (ADR-036 §D.2 — verbatim pattern)
     # ------------------------------------------------------------------
 
+    def get_connector_user_facing(self, connector_id: str) -> Optional[dict]:
+        """Return the user-facing fields of a manifest, or None if not found.
+
+        User-facing fields are a strict subset of ConnectorManifest — the six
+        fields that a skill author or MCP caller should see.  Internal fields
+        (access_probe_hook, granularity_filters) are NOT included.
+
+        Used by listConnectors MCP tool (ADR-036 discoverability).
+        """
+        manifest = self.get_connector(connector_id)
+        if manifest is None:
+            return None
+        return manifest_to_user_facing(manifest)
+
+    def list_connectors_user_facing(self) -> list[dict]:
+        """Return user-facing dicts for all registered connectors (sorted by id).
+
+        Used by listConnectors MCP tool and the proactive CONFIGURE_SOURCES block.
+        See manifest_to_user_facing() for the exact field set.
+        """
+        return [manifest_to_user_facing(m) for m in self.list_connectors()]
+
     def _build_unsupported_connector_message(self, connector_id: str) -> str:
-        supported_lines = "\n".join(
-            f"  - {m.connector_id:<16}({m.display_name} — "
-            f"{', '.join(m.resource_types[:3])}{'...' if len(m.resource_types) > 3 else ''})"
-            for m in self.list_connectors()
-        )
+        supported_lines = format_supported_connectors_block(self.list_connectors())
         return (
             f'CONFIGURE_SOURCES failed: unsupported connector type "{connector_id}".\n'
             "\n"
