@@ -688,6 +688,32 @@ remains a KBF developer task, informed by the demand signal from the
 
 ---
 
+## O. Amendment 4 — UDAP intentionally excluded from the registry (2026-05-17)
+
+UDAP is **not registered** in the Connector Registry. The connector manifests directory
+(`framework/connectors/manifests/`) contains exactly three manifests: Confluence, Jira,
+Git. No `udap.yaml` exists or should be added until the UDAP adapter's production JDBC
+path is implemented.
+
+**Rationale**: `framework/adapters/udap_adapter.py` raises `NotImplementedError` for all
+production `list`/`fetch`/`discover` operations. It only works in filestore/dev mode
+against `_dev_fixtures/fleet/*.json`. Registering an adapter whose production path is
+unimplemented would be exactly the capability-dishonesty this ADR was created to
+eliminate — skill authors would see "udap" in the supported connector list, attempt to
+build fleet-data skills, and get `NotImplementedError` at runtime. The hard stop must
+happen here, not there.
+
+Any `source_type: "udap"` or `source_type: "fleet"` at CONFIGURE_SOURCES hits the
+honest hard-stop (Section D.2) and logs a `CONNECTOR-REQ-…` demand record per
+Amendment 1 (Section L). This is the correct behavior — the demand signal accumulates
+until the production JDBC path is implemented and UDAP passes the conformance harness
+(Amendment 2, Section M), at which point its manifest is registered.
+
+This is a scope decision, not a defect. See DECISION-016 Amendment (2026-05-17) for
+the full rationale.
+
+---
+
 ## References
 
 - `framework/adapters/` — existing ad-hoc adapter implementations (migration target)

@@ -4,6 +4,10 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-17] backend-dev | fix(adr-036): defer UDAP — not registered until prod JDBC implemented (3 connectors: confluence/jira/git)
+
+Removed `framework/connectors/manifests/udap.yaml` and `framework/adapters/udap_probe.py`. Registry now exposes exactly 3 connectors (confluence, jira, git). Requesting `udap` or `fleet` as a source now hits the honest CONFIGURE_SOURCES hard-stop with demand-capture logging. Test suite updated: 4-connector assertions → 3-connector; `test_udap_manifest_fields` removed; `test_udap_read_pass` flipped to `test_udap_read_hard_stops`; new `TestUdapDeferred` class (7 tests asserting non-registration + hard-stop behavior); `TestProbeHooks::test_udap_probe_not_in_registry` replaces the two deleted udap-probe tests. 52 ADR-036 tests pass; full suite = 8 pre-existing failures, 0 new. DECISION-016 + ADR-036 amendment notes added. ADR-036 status NOT flipped. Branch only — awaiting user review.
+
 ## [2026-05-17] backend-dev | ADR-036 Connector Registry (read-only) — branch feat/adr-036-connector-registry
 
 Implemented ADR-036 per DECISION-016. Modules: `framework/connectors/registry.py` + `__init__.py` (singleton registry, ConnectorManifest dataclass, GatingResult, PASS/HARD_STOP); 4 YAML manifests in `framework/connectors/manifests/` (confluence, jira, git, udap); 4 probe stubs (`framework/adapters/confluence/probe.py`, `jira/probe.py`, `git_probe.py`, `udap_probe.py`). CONFIGURE_SOURCES gating wired into `conversation._handle_configure_sources_response` via `_gate_source_connector()` + `_log_connector_request()` (Amendment 1 demand-capture). `kb-cli export-bugs --kind connector_request` flag added (Amendment 1 §L.4). 46 new tests, 0 new failures (8 pre-existing = baseline). BUG-queue-1f3eb filed + ADB-verified (SELECT COUNT → 1); export-bugs regenerated. ADR-036 status left as-is (not flipped — awaiting user review of branch).

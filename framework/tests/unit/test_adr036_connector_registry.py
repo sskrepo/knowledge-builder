@@ -1,13 +1,18 @@
 """ADR-036 — Connector Registry: read-only capability manifest catalog.
 
 Tests per ADR-036 §H (test strategy) and implementation spec:
-  (a) Registry exposes all 4 connector manifests with the full 8-field schema.
+  (a) Registry exposes all 3 connector manifests with the full 8-field schema.
+      (UDAP intentionally NOT registered — adapter raises NotImplementedError in
+      prod; dev-fixtures-only. Registering an unimplemented connector violates the
+      capability-honesty principle this ADR exists to enforce.)
   (b) A supported (connector, op) (e.g. confluence read) validates OK → PASS.
   (c) An unsupported connector (e.g. "lumberjack") triggers HARD_STOP with the
       ADR-036 §D.2 verbatim message pattern and does NOT proceed to DESIGN.
   (d) A write op is rejected (read-only phase constraint).
   (e) CONFIGURE_SOURCES still works for normal supported flows (no regression).
   (f) Registry is the single source of truth.
+  (g) UDAP/fleet source triggers the honest hard-stop (same path as any other
+      unregistered connector) — capability honesty for the unimplemented connector.
 
 No live LLM / ADB calls — all tests use mocks.
 """
@@ -35,7 +40,11 @@ from framework.connectors.registry import (
 
 MANIFESTS_DIR = Path(__file__).resolve().parents[2] / "connectors" / "manifests"
 
-EXPECTED_CONNECTORS = {"confluence", "jira", "git", "udap"}
+EXPECTED_CONNECTORS = {"confluence", "jira", "git"}
+# UDAP is intentionally NOT registered: udap_adapter raises NotImplementedError in
+# production (dev-fixtures-only). Registering an unimplemented connector would
+# violate the capability-honesty principle ADR-036 exists to enforce.
+DEFERRED_CONNECTORS = {"udap"}
 
 
 # ---------------------------------------------------------------------------
@@ -49,12 +58,22 @@ class TestRegistryCatalog:
         # Use a fresh registry from the real manifests directory
         self.registry = ConnectorRegistry(manifests_dir=MANIFESTS_DIR)
 
-    def test_list_connectors_returns_all_four(self):
+    def test_list_connectors_returns_exactly_three(self):
         manifests = self.registry.list_connectors()
         ids = {m.connector_id for m in manifests}
         assert ids == EXPECTED_CONNECTORS, (
             f"Registry must expose exactly {EXPECTED_CONNECTORS}; got {ids}"
         )
+
+    def test_udap_is_not_registered(self):
+        """UDAP must NOT be in the registry — deferred until prod JDBC is implemented."""
+        assert self.registry.get_connector("udap") is None, (
+            "UDAP must not be registered: udap_adapter raises NotImplementedError in "
+            "production (dev-fixtures-only). Registering it would violate ADR-036 "
+            "capability-honesty."
+        )
+        ids = {m.connector_id for m in self.registry.list_connectors()}
+        assert "udap" not in ids
 
     def test_manifest_schema_all_fields_present(self):
         """Every manifest must have all 8 required fields per ADR-036 §C.1."""
@@ -97,15 +116,6 @@ class TestRegistryCatalog:
         assert m.auth_model == "env_service_account"
         assert "path_prefix" in m.granularity_filters
 
-    def test_udap_manifest_fields(self):
-        m = self.registry.get_connector("udap")
-        assert m is not None
-        assert "UDAP" in m.display_name
-        assert "instance" in m.resource_types
-        assert "query" in m.supported_operations
-        assert m.auth_model == "internal_db"
-        assert "tenancy_id" in m.granularity_filters
-
     def test_get_connector_unknown_returns_none(self):
         assert self.registry.get_connector("lumberjack_logs") is None
         assert self.registry.get_connector("") is None
@@ -146,9 +156,14 @@ class TestGatingSupportedConnectors:
         result = self.registry.gate_connector_type("git", "list")
         assert result.status == PASS
 
-    def test_udap_read_pass(self):
+    def test_udap_read_hard_stops(self):
+        """UDAP is not registered — any operation on it must produce HARD_STOP."""
         result = self.registry.gate_connector_type("udap", "read")
-        assert result.status == PASS
+        assert result.status == HARD_STOP, (
+            "UDAP is not registered in the connector registry (deferred: prod JDBC "
+            "unimplemented). Requesting it must hit the honest hard-stop."
+        )
+        assert "udap" in result.message
 
     def test_connector_type_check_only_no_operation(self):
         """When operation is None, only the connector type is checked."""
@@ -213,6 +228,74 @@ class TestGatingUnsupportedConnector:
         assert result.status == HARD_STOP
         # No manifest returned — no probe hook to call
         assert self.registry.get_connector("nonexistent_source") is None
+
+
+# ---------------------------------------------------------------------------
+# (g) UDAP / fleet source triggers the honest hard-stop
+# ---------------------------------------------------------------------------
+
+class TestUdapDeferred:
+    """UDAP is not registered in the connector registry (capability-honesty).
+
+    udap_adapter.py raises NotImplementedError for all production list/fetch/discover
+    calls.  It only works in filestore/dev mode against _dev_fixtures/fleet/*.json.
+    Registering an unimplemented connector is exactly the capability-dishonesty
+    ADR-036 exists to prevent.  UDAP is deferred until its production JDBC path
+    is implemented.
+    """
+
+    def setup_method(self):
+        self.registry = ConnectorRegistry(manifests_dir=MANIFESTS_DIR)
+
+    def test_udap_not_registered(self):
+        """UDAP must not appear in the registry catalog."""
+        assert self.registry.get_connector("udap") is None
+
+    def test_fleet_request_hard_stops(self):
+        """Requesting 'udap' (fleet) as a source triggers the honest hard-stop."""
+        result = self.registry.gate_connector_type("udap")
+        assert result.status == HARD_STOP, (
+            "Requesting 'udap' must produce HARD_STOP — it is not registered "
+            "because udap_adapter raises NotImplementedError in production."
+        )
+
+    def test_udap_hard_stop_message_names_connector(self):
+        result = self.registry.gate_connector_type("udap", "query")
+        assert result.status == HARD_STOP
+        assert '"udap"' in result.message
+
+    def test_udap_hard_stop_message_starts_with_configure_sources_failed(self):
+        result = self.registry.gate_connector_type("udap", "read")
+        assert result.message.startswith("CONFIGURE_SOURCES failed:")
+
+    def test_udap_hard_stop_lists_only_implemented_connectors(self):
+        """The hard-stop message must list the THREE implemented connectors, not UDAP."""
+        result = self.registry.gate_connector_type("udap")
+        for cid in EXPECTED_CONNECTORS:
+            assert cid in result.message, (
+                f"Hard-stop message must list supported connector '{cid}'"
+            )
+        # UDAP must not appear in the supported list in the message
+        # (it is the unsupported connector being rejected)
+        # The message names udap as the rejected one, not as supported
+        supported_section_start = result.message.find("Supported connector types")
+        if supported_section_start != -1:
+            supported_section = result.message[supported_section_start:]
+            # The supported section lists only confluence, jira, git
+            for cid in EXPECTED_CONNECTORS:
+                assert cid in supported_section
+
+    def test_udap_no_manifest_file(self):
+        """No udap.yaml must exist in the manifests directory."""
+        udap_manifest = MANIFESTS_DIR / "udap.yaml"
+        assert not udap_manifest.exists(), (
+            f"udap.yaml must not exist in {MANIFESTS_DIR} — UDAP is deferred."
+        )
+
+    def test_fleet_alias_also_hard_stops(self):
+        """'fleet' (common alias for UDAP) is also not registered."""
+        result = self.registry.gate_connector_type("fleet")
+        assert result.status == HARD_STOP
 
 
 # ---------------------------------------------------------------------------
@@ -359,11 +442,12 @@ class TestRegistrySingleSourceOfTruth:
         ids = {m.connector_id for m in self.registry.list_connectors()}
         assert ids == EXPECTED_CONNECTORS
 
-    def test_manifests_dir_contains_exactly_four_yaml_files(self):
+    def test_manifests_dir_contains_exactly_three_yaml_files(self):
         yaml_files = list(MANIFESTS_DIR.glob("*.yaml"))
-        assert len(yaml_files) == 4, (
-            f"Expected exactly 4 manifest YAML files; found {len(yaml_files)}: "
-            f"{[f.name for f in yaml_files]}"
+        assert len(yaml_files) == 3, (
+            f"Expected exactly 3 manifest YAML files (confluence, jira, git); "
+            f"found {len(yaml_files)}: {[f.name for f in yaml_files]}. "
+            f"UDAP is intentionally excluded — deferred until prod JDBC is implemented."
         )
 
     def test_each_manifest_filename_matches_connector_id(self):
@@ -392,7 +476,7 @@ class TestRegistrySingleSourceOfTruth:
 # ---------------------------------------------------------------------------
 
 class TestProbeHooks:
-    """access_probe_hook dotted paths must be importable and callable."""
+    """access_probe_hook dotted paths for registered connectors must be importable."""
 
     def test_confluence_probe_importable(self):
         from framework.adapters.confluence.probe import verify_access
@@ -406,9 +490,19 @@ class TestProbeHooks:
         from framework.adapters.git_probe import verify_access
         assert callable(verify_access)
 
-    def test_udap_probe_importable(self):
-        from framework.adapters.udap_probe import verify_access
-        assert callable(verify_access)
+    def test_udap_probe_not_in_registry(self):
+        """udap_probe exists as dev-fixture code but must NOT appear in registry manifests.
+
+        The probe itself is not deleted (the adapter may be used internally in
+        dev/filestore mode), but no manifest references it — UDAP is not a
+        registered connector until its production JDBC path is implemented.
+        """
+        registry = ConnectorRegistry(manifests_dir=MANIFESTS_DIR)
+        manifest = registry.get_connector("udap")
+        assert manifest is None, (
+            "UDAP manifest must not exist in the registry. "
+            "udap_adapter raises NotImplementedError in production."
+        )
 
     def test_confluence_probe_returns_dict_with_required_keys(self, tmp_path):
         """Probe returns a dict with reachable, connector_id, reference, mode, notes."""
@@ -424,13 +518,6 @@ class TestProbeHooks:
         result = verify_access(reference="org/repo", env="laptop")
         assert isinstance(result, dict)
         assert result["connector_id"] == "git"
-
-    def test_udap_probe_filestore_mode_reachable(self, monkeypatch):
-        monkeypatch.setenv("KBF_STORE_BACKEND", "filestore")
-        from framework.adapters.udap_probe import verify_access
-        result = verify_access(reference="tenancy-001")
-        assert result["reachable"] is True
-        assert result["mode"] == "filestore"
 
 
 # ---------------------------------------------------------------------------
