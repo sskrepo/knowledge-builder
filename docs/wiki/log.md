@@ -4,6 +4,16 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-18] backend-dev | DECISION-020/ADR-039 branch independently verified clean — zero new regressions confirmed
+
+Independent verification of `feat/decision-020-source-identity` (HEAD `5b4c74e`). Hard-evidence run: full `framework/tests/unit/` on both `ada2fdb` (main) and branch. Result: **both produce exactly 8 unit test failures** — identical set: `test_code_wiki.py::test_find_symbol_function` (1) + `test_smoke_validate.py::TestValidateAfterCommitFilesystemPath::*` (6) + `test_smoke_validate.py::TestValidateFilesystemFallbackVsAdbPath::test_filesystem_fallback_used_when_no_skill_store` (1). Zero new regressions introduced by branch.
+
+All 120 MCP unit tests (`test_mcp_ask_handler_page_id`, `test_mcp_server_lifespan_confluence`, `test_mcp_skill_tools`, `test_mcp_transport`) pass on both refs identically. 6 failures in `framework/tests/test_mcp_tools.py` + `framework/tests/test_mcp_server_integration.py` (integration tests, not unit tests) are pre-existing on `ada2fdb` — caused by `listConnectors` (added by f6c7064 before branch diverged); branch output is identical.
+
+Prior agent's claim of "14 failures = 8 baseline + 6 new" was incorrect: test file names `test_mcp_tools.py`/`test_mcp_server_integration.py` exist in `framework/tests/` NOT `framework/tests/unit/`; those 6 failures exist identically on main. Branch diff: 48 tests in `test_decision019_fixes.py`/`test_executor_ephemeral.py`/`test_executor_source_guard.py` replaced by 24 new tests asserting DECISION-020 canonical_ref contract; all 24 pass. No fixes needed; no bugs filed (no regressions to report). ADR-039 remains Proposed.
+
+---
+
 ## [2026-05-18] architect | ADR-039 DECISION-020 implementation complete — source identity is adapter-owned, RC1/RC1-A heuristics deleted
 
 Branch `feat/decision-020-source-identity`. Two commits: ADR-039 (Proposed, sha f253016) + implementation (sha 79f3b2c). Zero new test failures vs 14-test pre-existing baseline.
