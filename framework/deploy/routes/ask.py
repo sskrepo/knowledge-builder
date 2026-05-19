@@ -413,14 +413,44 @@ def maybe_render_artifact(app_state, result: dict, question: str,
     # lied — answer="(no relevant context found)" next to a valid
     # artifact_path.
     #
-    # Fix: when the upstream answer is empty / the no-answer sentinel,
-    # replace it with a truthful summary + the real source citations
-    # from the executor's rendered_data. Skills whose tier-1 synthesis
-    # DID produce a real answer (author_fixed skills with ingested KB
-    # content) keep it untouched — we only backfill the empty case.
+    # Fix (BUG-016 original): when the upstream answer is empty / the
+    # no-answer sentinel, replace it with a truthful summary + the real
+    # source citations from the executor's rendered_data.
+    #
+    # Fix (BUG-017): the empty/sentinel heuristic is insufficient. The
+    # tier-1 synthesizer is handed the page text + a question like
+    # "Generate a PPTX…" and, acting as a text Q&A synthesizer, emits a
+    # confident REFUSAL ("I cannot generate a PPTX…") — which matches
+    # neither "empty" nor the sentinel, so the misleading refusal was
+    # surfaced next to a valid artifact_path (internally contradictory
+    # response). When an artifact WAS delivered, a synthesizer refusal /
+    # inability statement is definitively wrong (the artifact exists) and
+    # must be replaced. A GENUINE synthesized summary, by contrast, is
+    # still preserved (see test_real_upstream_answer_is_preserved) — we
+    # only override the refusal class, not real content.
     _ans = result.get("answer")
+    rendered = exec_result.get("rendered_data") or {}
+    art_path = (result["delivery"].get("path")
+                or result["delivery"].get("url") or "")
+    _artifact_delivered = bool(art_path)
+    _ans_text = (
+        str(_ans.get("Answer", "")) if isinstance(_ans, dict)
+        else str(_ans or "")
+    ).strip().lower()
+    # Refusal/inability lead-ins an LLM emits when asked to "generate" an
+    # artifact it (as a text synthesizer) cannot itself produce. These do
+    # not occur at the head of a genuine content summary.
+    _REFUSAL_MARKERS = (
+        "i cannot", "i can't", "i am unable", "i'm unable",
+        "i am not able", "i'm not able", "i do not have the ability",
+        "i don't have the ability", "unable to generate",
+        "unable to create", "unable to provide", "cannot generate",
+        "cannot create", "cannot provide",
+    )
+    _is_refusal = any(m in _ans_text[:200] for m in _REFUSAL_MARKERS)
     _needs_backfill = (
-        not _ans
+        (_artifact_delivered and _is_refusal)
+        or not _ans
         or (isinstance(_ans, dict)
             and "no relevant context found"
                 in str(_ans.get("Answer", "")).strip().lower())
@@ -430,9 +460,6 @@ def maybe_render_artifact(app_state, result: dict, question: str,
             and _ans.strip().lower() in ("", "(no relevant context found)"))
     )
     if _needs_backfill:
-        rendered = exec_result.get("rendered_data") or {}
-        art_path = (result["delivery"].get("path")
-                    or result["delivery"].get("url") or "")
         _title = rendered.get("title") or skill_name
         _cites = [c for c in (rendered.get("citations") or []) if c]
         _pid = result.get("source_fetched_page_id", "")
@@ -453,9 +480,10 @@ def maybe_render_artifact(app_state, result: dict, question: str,
             ]
         log.info(
             "render: backfilled inline answer/citations from executor "
-            "output (skill=%s.%s cites=%d) — upstream tier-1 answer was "
-            "empty/no-answer for an artifact_url skill",
-            persona, skill_name, len(_cites),
+            "output (skill=%s.%s cites=%d artifact_delivered=%s) — "
+            "executor outcome is authoritative for an artifact_url skill "
+            "(upstream tier-1 text answer superseded)",
+            persona, skill_name, len(_cites), _artifact_delivered,
         )
 
 

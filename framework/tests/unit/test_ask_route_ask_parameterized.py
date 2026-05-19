@@ -624,3 +624,37 @@ class TestAnswerBackfill:
         with _patch_skill_yaml(skill_yaml):
             maybe_render_artifact(app_state, result, f"pageId={PAGE_ID}")
         assert result["answer"]["Answer"] == "Here is the real synthesized exec summary..."
+
+    def test_synthesizer_refusal_with_artifact_is_backfilled(self, tmp_path):
+        """BUG-017: when the tier-1 synthesizer emits a confident REFUSAL
+        ("I cannot generate a PPTX…") but the executor DID deliver an
+        artifact, the contradictory refusal must be replaced with the
+        truthful artifact summary — NOT surfaced next to a valid
+        artifact_path."""
+        rendered_with_artifact = {
+            "rendered_data": {
+                "title": "RODS Support for Dynamic Tables Replication",
+                "citations": ["wiki://18625350641"],
+            },
+            "delivery": {"path": "/Users/x/.kbf/outputs/rods.pptx"},
+        }
+        skill_yaml = _write_skill_yaml(tmp_path)
+        app_state = _make_app_state(tmp_path, skill_yaml,
+                                    executor_result=rendered_with_artifact)
+        result = _make_tier1_result()
+        result["answer"] = {
+            "Answer": ("I cannot generate or provide a project tracking "
+                       "PPTX file for the FAaaS Kiwi Project based on the "
+                       "provided information. You may need to manually "
+                       "create the presentation."),
+            "Citations": "(no support in retrieved context)",
+        }
+        with _patch_skill_yaml(skill_yaml):
+            maybe_render_artifact(app_state, result, f"pageId={PAGE_ID}")
+        ans = result["answer"]["Answer"].lower()
+        assert "i cannot generate" not in ans, (
+            "BUG-017: synthesizer refusal must not survive next to a "
+            "delivered artifact"
+        )
+        assert "rods support for dynamic tables replication" in ans
+        assert result["delivery"]["path"] == "/Users/x/.kbf/outputs/rods.pptx"
