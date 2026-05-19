@@ -5101,6 +5101,23 @@ class SkillBuilderConversation:
 
         # Path B routing self-test: use routing_queries from the design_skill_card.
         # These are curated consumer queries from the author's review at DESIGN_SKILL.
+        #
+        # DECISION-021 / ADR-038 §B.5 amendment (2026-05-18):
+        # Path-B now uses IntentClassifier — the SAME production routing mechanism
+        # that /api/v1/ask uses — instead of ShimWorkflows.resolve_only token-overlap.
+        # Rationale: token-overlap cannot distinguish shared-vocabulary cases
+        # (Mango vs. Kiwi project names; single-fact vs. agenda-email queries).
+        # IntentClassifier(_classify_llm for oci_genai/openai_direct, _classify_stub
+        # otherwise) is the mechanism that decides production routing, so EVAL Path-B
+        # must certify against it. DECISION-017's public-flag rejection is satisfied:
+        # IntentClassifier is constructed internally; no new HTTP surface.
+        #
+        # Stub note: when self._llm.provider is not oci_genai/openai_direct,
+        # IntentClassifier._classify_stub runs — the same stub behavior production
+        # uses in that LLM config. This is correct parity, not hidden degradation.
+        #
+        # ShimWorkflows.resolve_only is retained in shim_workflows.py (for its own
+        # tests) but is no longer called by _run_eval.
         routing_results: list[dict] = []
         routing_self_test_passed: bool = True  # default true; set False on any failure
 
@@ -5109,31 +5126,64 @@ class SkillBuilderConversation:
         positive_queries = rq.get("positive") or []
         negative_queries = rq.get("negative") or []
 
-        # Load the ShimWorkflows for resolve-only routing
+        # Load ShimWorkflows (for candidate card enumeration only) and build
+        # the IntentClassifier mirroring context_builder.py:143 construction.
+        _shim: object | None = None
+        _path_b_classifier: object | None = None
+        _ingest_plus_cards: list[dict] = []
         try:
             from ..orchestrator.shim_workflows import ShimWorkflows
+            from ..orchestrator.intent_classifier import IntentClassifier
+            from ..orchestrator.shim_faaas import ShimFaaas
             wf_dir = REPO_ROOT / "framework" / "workflow_skills"
             _shim = ShimWorkflows(wf_dir, skill_store=self._skill_store)
+            # INGEST+ candidate set: all_cards_including_draft() includes the
+            # in-authoring skill (not yet promoted to all_cards()).
+            _ingest_plus_cards = _shim.all_cards_including_draft()
+            # ShimFaaas loaded from same path context_builder uses at startup.
+            _faaas_path = REPO_ROOT / "framework" / "config" / "shim_faaas.yaml"
+            _shim_faaas = ShimFaaas(_faaas_path)
+            # Construct IntentClassifier mirroring ContextBuilder.__init__
+            # (context_builder.py line 143: self.classifier = IntentClassifier(llm, shim_faaas))
+            _path_b_classifier = IntentClassifier(self._llm, _shim_faaas)
+            log.info(
+                "_run_eval: Path-B using IntentClassifier (DECISION-021) "
+                "stub_mode=%s ingest_plus_cards=%d persona=%s skill=%s",
+                _path_b_classifier._stub_mode(),  # type: ignore[attr-defined]
+                len(_ingest_plus_cards),
+                persona, skill_name,
+            )
         except Exception as exc:
-            log.warning("_run_eval: could not load ShimWorkflows for Path-B: %s", exc)
+            log.warning("_run_eval: could not build IntentClassifier for Path-B: %s", exc)
             _shim = None
+            _path_b_classifier = None
 
         this_skill_id = f"{persona}.{skill_name}"
 
-        if _shim and positive_queries:
+        if _path_b_classifier is not None and positive_queries:
             log.info(
                 "_run_eval: Path-B routing self-test — %d positive, %d negative queries. "
                 "persona=%s skill=%s",
                 len(positive_queries), len(negative_queries), persona, skill_name,
             )
             for q in positive_queries:
-                resolved = _shim.resolve_only(q, scope="ingest_or_later")
-                resolved_id = resolved.get("skill_id")
-                resolved_name = resolved.get("skill_name")
+                # DECISION-021: use production IntentClassifier; INGEST+ candidate set.
+                # Positive pass condition: tier==1 AND workflow_skill==skill_name.
+                classification = _path_b_classifier.classify(  # type: ignore[union-attr]
+                    q,
+                    persona=persona,
+                    available_workflows=_ingest_plus_cards,
+                    available_kbs=[],
+                )
+                resolved_skill = classification.workflow_skill
+                resolved_id = (
+                    f"{classification.persona}.{resolved_skill}"
+                    if classification.persona and resolved_skill
+                    else None
+                )
                 passed = (
-                    resolved.get("matched")
-                    and resolved.get("tier") == 1
-                    and resolved_id == this_skill_id
+                    classification.tier == 1
+                    and resolved_skill == skill_name
                 )
                 if not passed:
                     routing_self_test_passed = False
@@ -5142,18 +5192,31 @@ class SkillBuilderConversation:
                     "query": q,
                     "passed": passed,
                     "resolved_skill_id": resolved_id,
-                    "resolved_skill_name": resolved_name,
-                    "tier": resolved.get("tier"),
+                    "resolved_skill_name": resolved_skill,
+                    "tier": classification.tier,
+                    "confidence": round(classification.confidence, 3),
                 })
                 log.info(
-                    "_run_eval: Path-B positive q=%r → %s tier=%s pass=%s",
-                    q, resolved_id, resolved.get("tier"), passed,
+                    "_run_eval: Path-B positive q=%r → skill=%s tier=%s pass=%s (classifier)",
+                    q, resolved_skill, classification.tier, passed,
                 )
             for q in negative_queries:
-                resolved = _shim.resolve_only(q, scope="ingest_or_later")
-                resolved_id = resolved.get("skill_id")
-                # Negative: should NOT route to this skill
-                passed = (not resolved.get("matched")) or (resolved_id != this_skill_id)
+                # DECISION-021: use production IntentClassifier; INGEST+ candidate set.
+                # Negative pass condition: tier!=1 OR workflow_skill!=skill_name.
+                classification = _path_b_classifier.classify(  # type: ignore[union-attr]
+                    q,
+                    persona=persona,
+                    available_workflows=_ingest_plus_cards,
+                    available_kbs=[],
+                )
+                resolved_skill = classification.workflow_skill
+                resolved_id = (
+                    f"{classification.persona}.{resolved_skill}"
+                    if classification.persona and resolved_skill
+                    else None
+                )
+                # Negative: should NOT route to this skill at tier 1
+                passed = classification.tier != 1 or resolved_skill != skill_name
                 if not passed:
                     routing_self_test_passed = False
                 routing_results.append({
@@ -5161,12 +5224,13 @@ class SkillBuilderConversation:
                     "query": q,
                     "passed": passed,
                     "resolved_skill_id": resolved_id,
-                    "resolved_skill_name": resolved.get("skill_name"),
-                    "tier": resolved.get("tier"),
+                    "resolved_skill_name": resolved_skill,
+                    "tier": classification.tier,
+                    "confidence": round(classification.confidence, 3),
                 })
                 log.info(
-                    "_run_eval: Path-B negative q=%r → %s tier=%s pass=%s",
-                    q, resolved_id, resolved.get("tier"), passed,
+                    "_run_eval: Path-B negative q=%r → skill=%s tier=%s pass=%s (classifier)",
+                    q, resolved_skill, classification.tier, passed,
                 )
         elif not positive_queries:
             log.info(
@@ -5176,7 +5240,7 @@ class SkillBuilderConversation:
                 persona, skill_name,
             )
         else:
-            log.warning("_run_eval: Path-B skipped — ShimWorkflows failed to load.")
+            log.warning("_run_eval: Path-B skipped — IntentClassifier failed to build.")
 
         # Store routing self-test result on session
         self._data.routing_self_test_passed = routing_self_test_passed
