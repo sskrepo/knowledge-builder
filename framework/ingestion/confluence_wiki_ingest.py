@@ -283,10 +283,19 @@ class ConfluenceWikiIngestor:
                 "title":              title,
                 "path":               str(md_path),
                 "persona":            effective_persona,
+                "space":              space,
+                "source_url":         source_url,
+                "citation_url":       source_url,
                 "tags":               _raw.get("labels", []),
                 "last_modified":      _raw.get("updated_at"),
                 "content_hash":       content_hash,
                 "extraction_version": self.PARSER_VERSION,
+                "schema_version":     self.SCHEMA_VERSION,
+                # DECISION-022: include full markdown content so ADB-backed store
+                # (AdbWikiMetadataStore) stores it in the content CLOB column.
+                # Consuming hosts retrieve it from ADB without needing a local
+                # filesystem copy of the page — enables portability of promoted skills.
+                "content":            frontmatter + markdown,
             }
             if _canonical_ref is not None:
                 upsert_dict["canonical_ref"] = _canonical_ref

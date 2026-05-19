@@ -1,4 +1,11 @@
-"""search_wiki MCP retriever — lexical search over WikiMetadataStore."""
+"""search_wiki MCP retriever — lexical search over WikiMetadataStore.
+
+DECISION-022: when the store is ADB-backed (AdbWikiMetadataStore), page content
+is stored in the record's `content` field (CLOB) and no filesystem path is
+required.  When `path` is empty or the file is not found, content falls back to
+`rec["content"]` — enabling retrieval from any host without a local filesystem
+copy of the ingested page.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -40,11 +47,17 @@ class SearchWikiRetriever:
         for rec in records[:max_results]:
             body = ""
             path = rec.get("path", "")
+            # Primary: read from filesystem path (filestore-backed path).
             if path:
                 try:
                     body = Path(path).read_text(encoding="utf-8")
                 except OSError:
                     body = ""
+            # Fallback / ADB-backed: use content field stored in the record.
+            # DECISION-022: AdbWikiMetadataStore stores full markdown in `content`
+            # CLOB so consuming hosts do not need a local filesystem copy.
+            if not body:
+                body = rec.get("content", "") or ""
 
             page_id = rec.get("page_id", "")
             passage_meta: dict = {
@@ -64,7 +77,7 @@ class SearchWikiRetriever:
                 chunk_id=None,
                 text=body,
                 score=1.0,
-                citation_url=rec.get("source_url") or f"wiki://{page_id}",
+                citation_url=rec.get("source_url") or rec.get("citation_url") or f"wiki://{page_id}",
                 metadata=passage_meta,
             ))
         return results

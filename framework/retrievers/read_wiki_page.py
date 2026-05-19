@@ -1,4 +1,11 @@
-"""read_wiki_page MCP retriever — fetch a single wiki page by path or page_id."""
+"""read_wiki_page MCP retriever — fetch a single wiki page by path or page_id.
+
+DECISION-022: when the store is ADB-backed (AdbWikiMetadataStore), page content
+is stored in the record's `content` field (CLOB) and no filesystem path is
+required.  When `path` is empty or the file is not found, content falls back to
+`rec["content"]` — enabling retrieval from any host without a local filesystem
+copy of the ingested page.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -16,8 +23,12 @@ class ReadWikiPageRetriever:
     def __call__(self, path: str) -> Result | None:
         """Fetch a single wiki page by file path or page_id.
 
-        Tries the argument first as a filesystem path, then falls back to a
-        WikiMetadataStore lookup so callers can pass either a page_id or a path.
+        Resolution order:
+        1. Try argument as an absolute filesystem path.
+        2. Try argument relative to wiki_root (if set).
+        3. Try WikiMetadataStore.get_page(path) for metadata + content field.
+           DECISION-022: ADB-backed store returns full content in record["content"];
+           no filesystem access needed on the consuming host.
 
         Args:
             path: A file path (absolute or relative to wiki_root) or a page_id.
@@ -39,6 +50,12 @@ class ReadWikiPageRetriever:
 
         # Try WikiMetadataStore lookup by page_id for metadata
         rec = self.store.get_page(path) or {}
+
+        # Fallback / ADB-backed: use content field stored in the record.
+        # DECISION-022: AdbWikiMetadataStore stores full markdown in `content`
+        # CLOB so consuming hosts do not need a local filesystem copy.
+        if not body and rec:
+            body = rec.get("content", "") or ""
 
         # If neither body nor metadata was found, return None
         if not body and not rec:
@@ -62,6 +79,6 @@ class ReadWikiPageRetriever:
             chunk_id=None,
             text=body,
             score=1.0,
-            citation_url=rec.get("source_url") or f"wiki://{path}",
+            citation_url=rec.get("source_url") or rec.get("citation_url") or f"wiki://{path}",
             metadata=passage_meta,
         )

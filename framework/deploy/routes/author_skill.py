@@ -78,6 +78,7 @@ async def author_skill_start_or_continue(req: Request):
         llm=getattr(req.app.state, "llm", None),
         artifact_store=getattr(req.app.state, "artifact_store", None),
         skill_store=getattr(req.app.state, "skill_store", None),
+        adb_pool=getattr(req.app.state, "adb_pool", None),
         user_id=consumer.user_id,
         synth_id=None,
         user_input=None,
@@ -195,6 +196,7 @@ def _start_or_continue_session(
     persona: str = "",
     intent_description: str = "",
     artifact_store=None,
+    adb_pool=None,
 ) -> dict:
     """Start a new authoring session or advance an existing one.
 
@@ -213,6 +215,8 @@ def _start_or_continue_session(
                             so the ANALYZE_ARTIFACT state can resolve uploaded artifacts.
         skill_store:        SkillStore or None. Threaded into SkillBuilderConversation
                             so _write_artifacts writes to ADB in addition to filesystem.
+        adb_pool:           oracledb pool for wiki store (DECISION-022). None → filestore
+                            fallback (logged at WARNING; not suitable for promoted skills).
 
     Returns:
         A dict envelope with synth_id, state, message, data, options,
@@ -243,7 +247,8 @@ def _start_or_continue_session(
             }
 
         conversation = SkillBuilderConversation.from_dict(
-            session, llm=llm, artifact_store=artifact_store, skill_store=skill_store
+            session, llm=llm, artifact_store=artifact_store, skill_store=skill_store,
+            adb_pool=adb_pool,
         )
         turn = conversation.respond(user_input or "")
     else:
@@ -254,6 +259,7 @@ def _start_or_continue_session(
             llm=llm,
             artifact_store=artifact_store,
             skill_store=skill_store,
+            adb_pool=adb_pool,
         )
         turn = conversation.start(intent_description=intent_description)
         synth_id = turn.synth_id  # always stamped by _turn()
@@ -307,6 +313,7 @@ async def _handle_continue(req: Request, consumer, synth_id: str, user_input: st
         llm=getattr(req.app.state, "llm", None),
         artifact_store=getattr(req.app.state, "artifact_store", None),
         skill_store=getattr(req.app.state, "skill_store", None),
+        adb_pool=getattr(req.app.state, "adb_pool", None),
         user_id=consumer.user_id,
         synth_id=synth_id,
         user_input=user_input,

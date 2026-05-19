@@ -4,6 +4,35 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-18] architect | feat/adb-backed-wiki-kb: DECISION-022 — ADB-backed wiki/page KB store
+
+DECISION-022 filed and accepted. Root cause: `WikiMetadataStore` was filestore-only (`~/.kbf/store/wiki_metadata/`). Promoted `author_fixed` skills pinned to Confluence pages stored only on the authoring laptop — not portable across hosts, violating ADR-023 (ADB-always for promoted artifacts).
+
+Implementation:
+- `framework/stores/wiki_metadata_store.py`: added `AdbWikiMetadataStore` (DECISION-022) backed by `KB_SHIM.KBF_WIKI_PAGES` (created via idempotent DDL). Stores full markdown `content` CLOB + `canonical_ref` JSON CLOB. CLOB binding via `setinputsizes` (same pattern as `AdbErrorStore`/`AdbSkillStore`). Factory `build_wiki_store(pool, env)` selects ADB or filestore — NEVER silent: WARNING logged on filestore fallback. `WikiMetadataStore` retained as explicit laptop/no-ADB fallback only.
+- `framework/ingestion/confluence_wiki_ingest.py`: passes `content` (full markdown), `source_url`, `citation_url`, `space`, `schema_version` to `upsert_page()` so ADB store captures the full content CLOB.
+- `framework/retrievers/search_wiki.py`: falls back to `rec["content"]` when path is empty (ADB-backed records have no local filesystem path).
+- `framework/retrievers/read_wiki_page.py`: same ADB-content fallback.
+- `framework/deploy/mcp_server.py`: uses `build_wiki_store(pool=adb_pool)` instead of `WikiMetadataStore()`.
+- `framework/skill_builder/conversation.py`: `__init__` + `from_dict` accept `adb_pool`; `_run_ingest` + `_run_eval` use `build_wiki_store(pool=self._adb_pool)`.
+- `framework/deploy/routes/author_skill.py`: `_start_or_continue_session` accepts + threads `adb_pool`; both call sites pass `adb_pool=getattr(req.app.state, "adb_pool", None)`.
+- `framework/tests/unit/test_adb_wiki_store.py`: 18 new unit tests (factory selection, round-trip, canonical match, idempotency, CLOB LOB materialisation, DDL idempotency, hard-fail/no-silent-fallback).
+
+REAL ADB round-trip proof (page 20382503622, FAaaS Kiwi Project, persona=tpm):
+- Ingested into `KB_SHIM.KBF_WIKI_PAGES` via `AdbWikiMetadataStore.upsert_page()`.
+- `SELECT page_id, title, persona, content_hash, canonical_ref FROM KB_SHIM.KBF_WIKI_PAGES WHERE page_id='20382503622'` returned literal row: `canonical_ref={"connector_id":"confluence","resource_type":"page","canonical_id":"20382503622"}`, `content_hash=6a74f33e...`, 4132 chars content.
+- `search_wiki` retriever (via `AdbWikiMetadataStore`) returned result with `canonical_ref` in passage metadata.
+- `_passage_matches_canonical(passage, CanonicalRef(..., canonical_id="20382503622"))` returned `True`.
+
+Bug work:
+- `BUG-queue-ae642` filed in `KB_SHIM.KBF_BUG_REPORTS` (DECISION-013 wiki KB portability). `SELECT COUNT(*) = 1` verified.
+- `BUG-queue-f7d90` remediated to ADB (was JSONL-only from prior session without ADB access). `SELECT COUNT(*) = 1` verified.
+- `kb-cli export-bugs --env laptop --out-dir pmo/bugs`: 97 bugs exported.
+
+Unit suite post-change: exactly 8 baseline failures (test_code_wiki + 7 test_smoke_validate), 0 new, 1766 passed.
+
+---
+
 ## [2026-05-18] backend-dev | fix/author-fixed-real-ingest-roundtrip: Issue-1a executor Strategy 1b + canonical_ref hard-fail
 
 Issue-1a root cause traced and fixed. The prior fix (602b0df / BUG-queue-13e25) was defective: INGEST correctly wrote page 20382503622 to `~/.kbf/store/wiki_metadata/20382503622.json` with `canonical_ref` stamped, BUT the EVAL `WorkflowExecutor` in `_run_eval` was constructed with `retrievers={}` (falsy in Python) and `shim_kb=None`. This caused `_retrieve_author_fixed_pinned` Strategy 1 to be entirely skipped (`if self.retrievers and self.shim_kb:` was False), falling through to Strategy 3 (`ConfluencePageNotInKBError`) every time. The false `ingest_result:success` came because INGEST succeeded; EVAL is where it failed.

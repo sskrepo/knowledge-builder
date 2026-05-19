@@ -108,7 +108,7 @@ def _load_app():
     from ..retrievers.find_symbol import FindSymbolRetriever
     from ..retrievers.read_code_page import ReadCodePageRetriever
     from ..retrievers.search_wiki import SearchWikiRetriever
-    from ..stores.wiki_metadata_store import WikiMetadataStore
+    from ..stores.wiki_metadata_store import build_wiki_store
     from ..adapters.udap_adapter import UdapAdapter
     from ..retrievers.tools import register_v1_tools
     from ..workflow_runtime.skill_registry import register_workflow_skills_as_mcp_tools
@@ -228,11 +228,10 @@ def _load_app():
         udap_adapter = UdapAdapter(udap_cfg)
         state["udap_adapter"] = udap_adapter
 
-        # Shared WikiMetadataStore: the same default root (~/.kbf/store/wiki_metadata)
-        # used by ConfluenceWikiIngestor in skill_builder.conversation._run_ingest
-        # and ingestion_worker. Both processes write into it; this server reads
-        # from it via search_wiki. Persistence is per-machine, fine for laptop.
-        wiki_store = WikiMetadataStore()
+        # Wiki store — DECISION-022: ADB-backed when ADB pool is available so
+        # promoted skills are portable across hosts.  build_wiki_store() logs
+        # the selection explicitly (never silent: WARNING if filestore fallback).
+        wiki_store = build_wiki_store(pool=adb_pool, env=kbf_env)
         state["wiki_store"] = wiki_store
 
         retrievers = {
