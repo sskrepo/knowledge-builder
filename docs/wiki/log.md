@@ -10,7 +10,7 @@ FIX 1 (`conversation.py`): `_run_eval` now injects `exec_inputs[input_param]` fr
 
 FIX 2 (`skill_builder.yaml` prompt v1.0 → v1.1): `design_skill_card` prompt updated to require `do_not_invoke_if_phrases` (concrete phrase-fragment veto list). The Tier-1 token-overlap classifier already has hard-phrase exclusion logic (`resolve_only`); the prompt gap was the only reason cards omitted these phrases. Future-authored cards will carry discriminative veto phrases so single-fact queries don't over-trigger email-agenda skills. Already-committed cards (including stuck sessions `synth-tpm-8cb2adf7`/`synth-tpm-afcacfc5`) are NOT retroactively rewritten — user must re-design those skills in a fresh session. `test_adr038_card_routing_eval.py::TestPromptRegistry::test_design_skill_card_prompt_loads` updated (max_tokens assertion relaxed, new assertion on `do_not_invoke_if_phrases` in template).
 
-DECISION-013 bugs: BUG-queue-<uuid1> (HIGH, ask_parameterized empty page) and BUG-queue-<uuid2> (MEDIUM, routing over-trigger) filed in `KB_SHIM.KBF_BUG_REPORTS` via ADB pool. Full suite: exactly 8 pre-existing failures, 0 new.
+DECISION-013 bugs: BUG-queue-2b6e1 (HIGH, ask_parameterized empty page) and BUG-queue-6b7a0 (MEDIUM, routing over-trigger) filed in `KB_SHIM.KBF_BUG_REPORTS` via ADB pool (COUNT=1 each confirmed). Exported to `pmo/bugs/`. Branch SHA: 2bfe2f4. Merge SHA: b0dee07. Full suite: exactly 8 pre-existing failures, 0 new.
 
 ---
 
