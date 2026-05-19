@@ -5396,10 +5396,16 @@ class SkillBuilderConversation:
                 exec_result = _executor.execute_from_config(wf_cfg, exec_inputs)
                 ask_latency_ms = int((time.monotonic() - t0) * 1000)
                 execution_status = "success"
+                # BUG-queue-b39f9b01: executor returns delivery sub-dict; check
+                # top-level keys first for forward-compat, then delivery sub-dict.
+                _delivery = exec_result.get("delivery") or {}
                 wf_artifact_url = (
                     exec_result.get("artifact_url")
                     or exec_result.get("artifact_path")
                     or exec_result.get("output_path")
+                    or _delivery.get("url")
+                    or _delivery.get("path")
+                    or _delivery.get("archive")
                 )
                 log.info(
                     "_run_eval: Path-A execution SUCCESS latency_ms=%d artifact_url=%s",
