@@ -4,6 +4,18 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-18] backend-dev | mcp_server chicken-and-egg fix + BUG trail remediation (ADB)
+
+STEP A: merged `fix/emcp-direct-canonical-via-runtime` (292f1a0) → main (83d6bb8). Post-merge: exactly 8 baseline failures, 0 new.
+
+STEP B: `fix/executor-confluence-adapter-unconditional` (b1c48d5) — removed `_any_promoted_skill_requires_ephemeral` gate from mcp_server.py lifespan Confluence adapter construction. Adapter now built unconditionally; `build_confluence_adapter` returns None safely when unconfigured. `_any_promoted_skill_requires_ephemeral` function kept. `_retrieve_ask_parameterized` trust checks unchanged. 8 new unit tests in `test_mcp_server_adapter_unconditional.py` (all pass). Branch baseline: exactly 8 failures, 0 new.
+
+STEP C: Filed BUG-queue-081dc (chicken-and-egg root cause, status=fixed, fix_commit=b1c48d5) → ADB COUNT=1 verified. Re-filed BUG-queue-20071 (emcp_direct structural gap, was JSONL-only) → ADB COUNT=1 verified. `kb-cli export-bugs` ran: 90 records exported to pmo/bugs/.
+
+STEP D: (in progress) merge fix/executor-confluence-adapter-unconditional → main.
+
+---
+
 ## [2026-05-18] backend-dev | DECISION-013: emcp_direct canonical_identity structural gap fixed — BUG-queue-20071
 
 Gap: `emcp_direct.canonical_identity()` called `resolve_to_numeric_id(session=None)`, which always returns `Unresolvable(TRANSIENT)` for `/display/SPACE/Title` URLs (can't do REST title lookup without a session). This was a STRUCTURAL gap in laptop mode. The prior keychain-retry RCA (BUG-queue-98ca0, session synth-tpm-fbaafad2) was a mis-diagnosis.
