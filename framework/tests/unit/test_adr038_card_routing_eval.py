@@ -1164,3 +1164,124 @@ class TestDoNotInvokeIfPhrases:
         assert result.get("skill_name") == "status_email", (
             "Phrase exclusion on kiwi_pptx must not prevent status_email from routing"
         )
+
+
+# ---------------------------------------------------------------------------
+# BUG-queue-<new>: _run_eval must pass confluence_adapter to WorkflowExecutor
+# (the 3rd / EVAL-path executor construction site — missed by BUG-queue-081dc)
+# ---------------------------------------------------------------------------
+
+class TestRunEvalExecutorConfluenceAdapterWiring:
+    """Assert that _run_eval constructs WorkflowExecutor WITH confluence_adapter.
+
+    Root cause (DECISION-013 / BUG-queue-081dc follow-up): _run_eval built its
+    own WorkflowExecutor with no confluence_adapter argument.  The mcp_server
+    lifespan wired a separate executor for the consumption /ask path, but
+    _run_eval's executor was a third, independent construction site that was
+    overlooked. Fix: mirror conversation.py:4528 (INGEST) and :6401 (canonicalize)
+    by calling _build_confluence_adapter(kbf_env, REPO_ROOT) and forwarding the
+    result.
+    """
+
+    def _make_eval_ready_conv(self) -> SkillBuilderConversation:
+        conv = _make_conv()
+        conv._state = "EVAL"
+        conv._data.source_samples = {
+            "confluence:1": [
+                {
+                    "source_citation": "https://example.com/page1",
+                    "content": "RAG status: Green. Blockers: None.",
+                    "title": "Weekly Report",
+                }
+            ]
+        }
+        conv._skill_store.read_artifact.return_value = yaml.safe_dump({
+            "workflow_skill": "weekly_report",
+            "persona": "tpm",
+            "skill_card": {"summary": "Weekly deck."},
+            "trigger": {"on_request": {"enabled": True}},
+        })
+        conv._skill_store.write_artifacts.return_value = None
+        return conv
+
+    def test_workflow_executor_receives_confluence_adapter_when_configured(self, tmp_path):
+        """WorkflowExecutor must be constructed with confluence_adapter=<sentinel>
+        when _build_confluence_adapter returns a non-None adapter."""
+        conv = self._make_eval_ready_conv()
+
+        sentinel_adapter = MagicMock(name="sentinel_confluence_adapter")
+
+        def _llm_response(model, messages, **kwargs):
+            return {
+                "text": json.dumps(
+                    {"rag_status": "Green", "faithful": True, "confidence": "high", "reason": "ok"}
+                ),
+                "tokens_out": 50,
+            }
+
+        conv._llm = MagicMock()
+        conv._llm.chat.side_effect = _llm_response
+
+        with patch("framework.skill_builder.conversation._build_confluence_adapter",
+                   return_value=sentinel_adapter) as mock_build, \
+             patch("framework.skill_builder.conversation.REPO_ROOT", tmp_path), \
+             patch("framework.workflow_runtime.executor.WorkflowExecutor.__init__",
+                   return_value=None) as mock_executor_init, \
+             patch("framework.workflow_runtime.executor.WorkflowExecutor.execute_from_config",
+                   return_value={"artifact_url": str(tmp_path / "out.pptx"), "status": "success"}):
+            conv._run_eval()
+
+        # _build_confluence_adapter must have been called at least once from _run_eval
+        assert mock_build.called, "_build_confluence_adapter must be called in _run_eval"
+
+        # WorkflowExecutor.__init__ must have been invoked with confluence_adapter=sentinel_adapter
+        executor_calls = mock_executor_init.call_args_list
+        assert executor_calls, "WorkflowExecutor must be instantiated in _run_eval"
+        # The Path-A construction is the one that must carry the adapter
+        found = any(
+            call.kwargs.get("confluence_adapter") is sentinel_adapter
+            for call in executor_calls
+        )
+        assert found, (
+            "WorkflowExecutor must be constructed with confluence_adapter=<sentinel> "
+            "— _run_eval was missing this wiring (3rd executor site, ref BUG-queue-081dc)"
+        )
+
+    def test_workflow_executor_receives_none_adapter_when_not_configured(self, tmp_path):
+        """WorkflowExecutor must be constructed with confluence_adapter=None when
+        _build_confluence_adapter returns None (graceful path — no Confluence config)."""
+        conv = self._make_eval_ready_conv()
+
+        def _llm_response(model, messages, **kwargs):
+            return {
+                "text": json.dumps(
+                    {"rag_status": "Green", "faithful": True, "confidence": "high", "reason": "ok"}
+                ),
+                "tokens_out": 50,
+            }
+
+        conv._llm = MagicMock()
+        conv._llm.chat.side_effect = _llm_response
+
+        with patch("framework.skill_builder.conversation._build_confluence_adapter",
+                   return_value=None) as mock_build, \
+             patch("framework.skill_builder.conversation.REPO_ROOT", tmp_path), \
+             patch("framework.workflow_runtime.executor.WorkflowExecutor.__init__",
+                   return_value=None) as mock_executor_init, \
+             patch("framework.workflow_runtime.executor.WorkflowExecutor.execute_from_config",
+                   return_value={"artifact_url": str(tmp_path / "out.pptx"), "status": "success"}):
+            conv._run_eval()
+
+        assert mock_build.called, "_build_confluence_adapter must be called in _run_eval"
+
+        executor_calls = mock_executor_init.call_args_list
+        assert executor_calls, "WorkflowExecutor must be instantiated in _run_eval"
+        # When factory returns None, executor still receives confluence_adapter=None explicitly
+        found = any(
+            "confluence_adapter" in call.kwargs and call.kwargs["confluence_adapter"] is None
+            for call in executor_calls
+        )
+        assert found, (
+            "WorkflowExecutor must be constructed with confluence_adapter=None "
+            "when no Confluence config is present (graceful-None path)"
+        )

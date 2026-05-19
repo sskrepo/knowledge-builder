@@ -4,6 +4,12 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-18] backend-dev | fix _run_eval 3rd executor site — confluence_adapter wiring (ref BUG-queue-081dc, synth-tpm-8cb2adf7)
+
+`conversation.py _run_eval` was constructing `WorkflowExecutor(llm=self._llm)` with NO `confluence_adapter` — the 3rd and previously overlooked executor construction site. The mcp_server lifespan fix (BUG-queue-081dc) wired the consumption /ask path executor but left _run_eval's own executor adapter-less, causing EVAL Path-A to deterministically hard-fail with `ConfluencePageNotInKBError: Confluence adapter is not configured` for ask_parameterized skills. Fix: call `_build_confluence_adapter(kbf_env, REPO_ROOT)` (identical pattern to conversation.py:4528 / :6401) and pass it as `confluence_adapter` to `WorkflowExecutor`. Factory returns None safely when unconfigured — graceful path unchanged. 2 new unit tests in `TestRunEvalExecutorConfluenceAdapterWiring` (sentinel+None cases). Branch `fix/run-eval-executor-confluence-adapter` committed; post-merge: exactly 8 baseline failures, 0 new. BUG filed in ADB `KB_SHIM.KBF_BUG_REPORTS` (see STEP below).
+
+---
+
 ## [2026-05-18] backend-dev | mcp_server chicken-and-egg fix + BUG trail remediation (ADB)
 
 STEP A: merged `fix/emcp-direct-canonical-via-runtime` (292f1a0) → main (83d6bb8). Post-merge: exactly 8 baseline failures, 0 new.

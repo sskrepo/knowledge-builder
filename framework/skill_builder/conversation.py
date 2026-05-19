@@ -5036,7 +5036,19 @@ class SkillBuilderConversation:
                 canonical_question = f"What is the status of the {' '.join(domains)} project for this week?"
                 exec_inputs = {"input": canonical_question, "persona": persona}
                 t0 = time.monotonic()
-                _executor = WorkflowExecutor(llm=self._llm)
+                # Build Confluence adapter for EVAL Path-A executor — mirrors the
+                # identical pattern at conversation.py:4528 (INGEST) and :6401
+                # (canonicalize).  The factory returns None safely when no Confluence
+                # config is present; the executor's None-hard-fail path remains correct
+                # for truly unconfigured environments.
+                _eval_kbf_env = _os.environ.get("KBF_ENV", "laptop")
+                _eval_confluence_adapter = _build_confluence_adapter(_eval_kbf_env, REPO_ROOT)
+                _adapter_mode = "live" if _eval_confluence_adapter is not None else "None"
+                log.info(
+                    "_run_eval: Path-A constructing WorkflowExecutor confluence_adapter=%s",
+                    _adapter_mode,
+                )
+                _executor = WorkflowExecutor(llm=self._llm, confluence_adapter=_eval_confluence_adapter)
                 exec_result = _executor.execute_from_config(wf_cfg, exec_inputs)
                 ask_latency_ms = int((time.monotonic() - t0) * 1000)
                 execution_status = "success"
