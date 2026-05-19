@@ -580,7 +580,7 @@ class SkillBuilderConversation:
     enabling resume across client restarts.
     """
 
-    def __init__(self, persona: str = "", user_id: str = "", llm=None, artifact_store=None, skill_store=None):
+    def __init__(self, persona: str = "", user_id: str = "", llm=None, artifact_store=None, skill_store=None, adb_pool=None):
         # skill_store is REQUIRED. ADB is the source of truth — there is no
         # filesystem-only / stub-mode operating mode. Passing skill_store=None
         # silently dropped ADB writes in older code (see synth-tpm-14a54555 /
@@ -599,6 +599,9 @@ class SkillBuilderConversation:
         self._llm = llm
         self._artifact_store = artifact_store
         self._skill_store = skill_store
+        # DECISION-022: ADB pool for wiki store (AdbWikiMetadataStore).
+        # None = explicit no-ADB fallback (filestore); logged at WARNING.
+        self._adb_pool = adb_pool
         self._state = "IDENTIFY_PERSONA"
         now = _now_iso()
         synth_id = _make_synth_id(persona, now)
@@ -782,13 +785,14 @@ class SkillBuilderConversation:
         return d
 
     @classmethod
-    def from_dict(cls, d: dict, llm=None, artifact_store=None, skill_store=None) -> "SkillBuilderConversation":
+    def from_dict(cls, d: dict, llm=None, artifact_store=None, skill_store=None, adb_pool=None) -> "SkillBuilderConversation":
         """Restore a session from a persisted dict.
 
         skill_store is REQUIRED. See __init__ docstring for rationale.
         Restoring a session without skill_store would mean any subsequent
         COMMIT in this session would silently lose the ADB write — exactly
         the synth-tpm-14a54555 bug.
+        adb_pool: DECISION-022 wiki store pool. None = filestore fallback (logged).
         """
         if skill_store is None:
             raise ValueError(
@@ -801,6 +805,7 @@ class SkillBuilderConversation:
         obj._llm = llm
         obj._artifact_store = artifact_store
         obj._skill_store = skill_store
+        obj._adb_pool = adb_pool  # DECISION-022
         obj._state = d.get("state", "IDENTIFY_PERSONA")
         obj._data = _SessionData(
             intent_description=d.get("intent_description", ""),
@@ -4639,15 +4644,14 @@ class SkillBuilderConversation:
 
         confluence_adapter = _build_confluence_adapter(kbf_env, REPO_ROOT)
         mode = "live" if confluence_adapter is not None else "fixture"
-        # Wire WikiMetadataStore so ingest_page populates the index that
-        # search_wiki retriever queries. Without this, pages land on disk
-        # as markdown but the retrieval layer can't find them at query time
-        # — exactly the gap behind "no relevant context found" after the
-        # weekly_exec_review_26ai skill's INGEST in synth-tpm-bcbc739d.
-        # Default root (~/.kbf/store/wiki_metadata) is shared with the
-        # search_wiki retriever instance in the MCP server's lifespan.
-        from ..stores.wiki_metadata_store import WikiMetadataStore
-        wiki_store = WikiMetadataStore()
+        # DECISION-022: use ADB-backed wiki store when ADB pool is available so
+        # ingested pages are durable and portable across hosts.  build_wiki_store()
+        # logs the selection explicitly (WARNING if filestore fallback — never silent).
+        # The wiki_store is shared with the search_wiki retriever instance in the
+        # MCP server's lifespan (both use the same ADB table / same filestore root).
+        from ..stores.wiki_metadata_store import build_wiki_store
+        _adb_pool_for_wiki = getattr(self, "_adb_pool", None)
+        wiki_store = build_wiki_store(pool=_adb_pool_for_wiki, env=kbf_env)
         # A3 (BUG-queue-990fe): pass the session persona so pages ingested here
         # carry the correct persona in wiki_metadata (RC1 fix — raw wins, this
         # is the fallback for pages with no raw persona field).
@@ -5326,19 +5330,26 @@ class SkillBuilderConversation:
                 _eval_kbf_env = _os.environ.get("KBF_ENV", "laptop")
                 _eval_confluence_adapter = _build_confluence_adapter(_eval_kbf_env, REPO_ROOT)
                 _adapter_mode = "live" if _eval_confluence_adapter is not None else "None"
-                # Issue-1a fix (real-ingest-roundtrip): wire WikiMetadataStore into the
-                # EVAL executor so _retrieve_author_fixed_pinned Strategy 1b can find
-                # the page ingested at INGEST time directly by canonical_id.
-                # Without this, the EVAL executor had retrievers={} and shim_kb=None,
-                # so Strategy 1 was entirely skipped and the executor always fell through
-                # to Strategy 3 (ConfluencePageNotInKBError) even though the page was
-                # already correctly written to the wiki store by _run_ingest.
-                from ..stores.wiki_metadata_store import WikiMetadataStore as _WikiMetadataStore
-                _eval_wiki_store = _WikiMetadataStore()  # same default root as INGEST used
+                # DECISION-022 / Issue-1a fix: wire wiki_store into EVAL executor so
+                # _retrieve_author_fixed_pinned Strategy 1b can find the page ingested
+                # at INGEST time directly by canonical_id.  Use build_wiki_store() with
+                # the same ADB pool used by _run_ingest so Strategy 1b reads from ADB
+                # (not from the laptop's local filestore — which is the host-local
+                # portability defect DECISION-022 fixes).
+                from ..stores.wiki_metadata_store import build_wiki_store as _build_wiki_store
+                _eval_wiki_store = _build_wiki_store(
+                    pool=getattr(self, "_adb_pool", None),
+                    env=_eval_kbf_env,
+                )
+                _eval_wiki_store_desc = (
+                    "ADB(KB_SHIM.KBF_WIKI_PAGES)"
+                    if getattr(self, "_adb_pool", None) is not None
+                    else "filestore"
+                )
                 log.info(
                     "_run_eval: Path-A constructing WorkflowExecutor confluence_adapter=%s "
                     "wiki_store=%s (Strategy 1b direct lookup enabled)",
-                    _adapter_mode, _eval_wiki_store.root,
+                    _adapter_mode, _eval_wiki_store_desc,
                 )
                 _executor = WorkflowExecutor(
                     llm=self._llm,
