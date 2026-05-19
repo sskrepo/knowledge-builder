@@ -5233,14 +5233,19 @@ class SkillBuilderConversation:
                     available_kbs=[],
                 )
                 resolved_skill = classification.workflow_skill
+                # Normalise to lowercase: skill_names are slugs; the LLM
+                # may occasionally return mixed-case (e.g. "faaaS_..." instead
+                # of "faaas_..."). Case-insensitive comparison avoids false
+                # failures on LLM capitalisation drift. (BUG-queue routing-case)
+                resolved_skill_lower = resolved_skill.lower() if resolved_skill else resolved_skill
                 resolved_id = (
-                    f"{classification.persona}.{resolved_skill}"
-                    if classification.persona and resolved_skill
+                    f"{classification.persona}.{resolved_skill_lower}"
+                    if classification.persona and resolved_skill_lower
                     else None
                 )
                 passed = (
                     classification.tier == 1
-                    and resolved_skill == skill_name
+                    and resolved_skill_lower == skill_name
                 )
                 if not passed:
                     routing_self_test_passed = False
@@ -5249,13 +5254,13 @@ class SkillBuilderConversation:
                     "query": q,
                     "passed": passed,
                     "resolved_skill_id": resolved_id,
-                    "resolved_skill_name": resolved_skill,
+                    "resolved_skill_name": resolved_skill_lower,
                     "tier": classification.tier,
                     "confidence": round(classification.confidence, 3),
                 })
                 log.info(
                     "_run_eval: Path-B positive q=%r → skill=%s tier=%s pass=%s (classifier)",
-                    q, resolved_skill, classification.tier, passed,
+                    q, resolved_skill_lower, classification.tier, passed,
                 )
             for q in negative_queries:
                 # DECISION-021: use production IntentClassifier; INGEST+ candidate set.
@@ -5267,13 +5272,16 @@ class SkillBuilderConversation:
                     available_kbs=[],
                 )
                 resolved_skill = classification.workflow_skill
+                # Same normalisation as positive path: skill_names are slugs,
+                # LLM may return mixed-case. (BUG-queue routing-case)
+                resolved_skill_lower = resolved_skill.lower() if resolved_skill else resolved_skill
                 resolved_id = (
-                    f"{classification.persona}.{resolved_skill}"
-                    if classification.persona and resolved_skill
+                    f"{classification.persona}.{resolved_skill_lower}"
+                    if classification.persona and resolved_skill_lower
                     else None
                 )
                 # Negative: should NOT route to this skill at tier 1
-                passed = classification.tier != 1 or resolved_skill != skill_name
+                passed = classification.tier != 1 or resolved_skill_lower != skill_name
                 if not passed:
                     routing_self_test_passed = False
                 routing_results.append({
@@ -5281,13 +5289,13 @@ class SkillBuilderConversation:
                     "query": q,
                     "passed": passed,
                     "resolved_skill_id": resolved_id,
-                    "resolved_skill_name": resolved_skill,
+                    "resolved_skill_name": resolved_skill_lower,
                     "tier": classification.tier,
                     "confidence": round(classification.confidence, 3),
                 })
                 log.info(
                     "_run_eval: Path-B negative q=%r → skill=%s tier=%s pass=%s (classifier)",
-                    q, resolved_skill, classification.tier, passed,
+                    q, resolved_skill_lower, classification.tier, passed,
                 )
         elif not positive_queries:
             log.info(

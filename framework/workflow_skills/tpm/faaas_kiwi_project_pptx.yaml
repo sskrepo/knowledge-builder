@@ -13,96 +13,87 @@ trigger:
     output_format: pptx
     response_mode: artifact_url
 skill_card:
-  summary: Generates an exec-ready Kiwi Project LCM update slide deck (pptx) using
-    only the FAaaS Kiwi Project Confluence page as the source, formatted to match
-    the provided reference slide style.
-  use_when: Invoke this when you need an on-demand, presentation-ready Kiwi Project
-    status update (pptx) for execs that mirrors the established slide layout and includes
-    standard TPM fields (ORM status, RAG, schedule health, blockers, next steps, exec
-    asks).
+  summary: Generates an exec-ready Kiwi Project status slide in a new PPTX, populated
+    from the fixed FAaaS Kiwi Project Confluence page and formatted to match the reference
+    slide style.
+  use_when: Use when you need to generate a new PPTX status slide (composite exec
+    update) for the FAaaS Kiwi Project that includes orm_status, rag_summary, schedule_health,
+    blocking_issues, next_steps, and exec_asks in a reference-matching layout.
   example_invocations:
-  - Generate a Kiwi Project LCM update slide as a pptx for exec review, matching the
-    reference Kiwi slide layout and pulling content only from the FAaaS Kiwi Project
-    Confluence page.
-  - I need an exec-ready Kiwi Project status update pptx (ORM status, RAG summary,
-    schedule health, blockers, next steps, exec asks) sourced only from the FAaaS
-    Kiwi Project Confluence page—please format like the existing Kiwi slide.
+  - Generate a Kiwi Project LCM update slide as a pptx for exec review, using the
+    latest from the FAaaS Kiwi Project Confluence page.
+  - Create an exec-ready Kiwi Project status slide pptx (RAG, schedule health, blockers,
+    next steps, exec asks) in the same style as our standard Kiwi slide.
+  do_not_invoke_if_phrases:
+  - what is the current rag
+  - what is the schedule health
+  - give me a text summary
   routing_queries:
     positive:
-    - Create a pptx Kiwi Project LCM update slide for execs, matching the existing
-      Kiwi slide style and using only the FAaaS Kiwi Project Confluence page as content.
-    - Generate an exec status slide pptx for FAaaS Kiwi Project (include ORM status,
-      RAG summary, schedule health, blocking issues, next steps, exec asks) sourced
-      from the OCIFACP Confluence page.
-    - Produce a new Kiwi Project update pptx on demand, formatted like the reference
-      Kiwi slide, with content pulled strictly from the FAaaS Kiwi Project Confluence
-      page.
-    - Make a Kiwi Project LCM update pptx in the same layout as the standard Kiwi
-      slide and populate it from the FAaaS Kiwi Project Confluence page only.
-    - Build an exec-ready Kiwi Project status pptx (RAG, schedule health, blockers,
-      next steps, exec asks) using the FAaaS Kiwi Project Confluence page as the single
-      source of truth.
+    - Produce a new pptx with the Kiwi Project exec status slide (orm_status, rag_summary,
+      schedule_health, blockers, next steps, exec asks) sourced from the FAaaS Kiwi
+      Project Confluence page.
+    - Generate the Kiwi Project LCM update slide as a pptx in the standard reference
+      layout for an exec readout.
+    - Create an exec-ready Kiwi Project status slide pptx using the fixed Confluence
+      page as the source of truth.
+    - I need a PPTX slide for the FAaaS Kiwi Project update—include RAG summary, schedule
+      health, blocking issues, next steps, and exec asks.
+    - Build a new pptx containing the Kiwi Project update slide formatted like our
+      reference Kiwi slide for leadership.
     negative:
-    - Create a Q3 roadmap slide deck for OCI Networking and include competitive analysis.
-    - What is the current RAG status for the Kiwi Project?
-    - Write a one-page Kiwi Project LCM update as a Confluence page (not a pptx).
-  # do_not_invoke_if_phrases: case-insensitive substring list for hard phrase exclusion.
-  # The token-overlap classifier cannot zero out scores when shared vocabulary (Kiwi,
-  # Project, LCM) inflates positive overlap.  Phrases here are checked before scoring;
-  # any match skips this skill entirely.  Handles output-format rejection signals.
-  do_not_invoke_if_phrases:
-  - "not a pptx"
-  - "as a confluence page"
-  - "not pptx"
-  - "write as a page"
+    - What is the Kiwi Project schedule_health right now?
+    - Generate a pptx for the FAaaS Mango project update.
+    - Draft an email summary of the Kiwi Project status (no pptx).
 requires_extractions:
 - kb: tpm.faaas_kiwi_project_pptx
   required_fields:
+  - report_title
   - reporting_date
-  - project_name
   - project_purpose
   - rag_summary
-  - schedule_health
   - orm_status
-  - status_highlights
-  - workstreams
+  - schedule_health
+  - metrics_snapshot
+  - workstreams_summary
   - blocking_issues
   - next_steps
-  - key_metrics
-  - key_links
-- kb: tpm.tpm_weekly_ops
-  required_fields:
   - exec_asks
+  - decisions_needed
+  - key_links
+  - do_not_invoke_if_phrases
+  - capacity_constraints
+  - dependencies_external_teams
 synthesis:
   output_format: pptx
   template: synthesis/templates/faaas_kiwi_project_pptx.pptx
   slide_mapping: synthesis/mappings/faaas_kiwi_project_pptx.yaml
   layout: weekly_exec_review_v1
   field_mapping:
+    report_title:
+      section: Report Title
+      source_field: report_title
     reporting_date:
       section: Reporting Date
       source_field: reporting_date
-    project_name:
-      section: Project Name
-      source_field: project_name
     project_purpose:
       section: Project Purpose
       source_field: project_purpose
     rag_summary:
       section: Rag Summary
       source_field: rag_summary
-    schedule_health:
-      section: Schedule Health
-      source_field: schedule_health
     orm_status:
       section: Orm Status
       source_field: orm_status
-    status_highlights:
-      section: Status Highlights
-      source_field: status_highlights
-    workstreams:
-      section: Workstreams
-      source_field: workstreams
+    schedule_health:
+      section: Schedule Health
+      source_field: schedule_health
+    metrics_snapshot:
+      section: Metrics Snapshot
+      source_field: metrics_snapshot
+    workstreams_summary:
+      section: Workstreams Summary
+      source_field: workstreams_summary
     blocking_issues:
       section: Blocking Issues
       source_field: blocking_issues
@@ -112,12 +103,21 @@ synthesis:
     exec_asks:
       section: Exec Asks
       source_field: exec_asks
-    key_metrics:
-      section: Key Metrics
-      source_field: key_metrics
+    decisions_needed:
+      section: Decisions Needed
+      source_field: decisions_needed
     key_links:
       section: Key Links
       source_field: key_links
+    do_not_invoke_if_phrases:
+      section: Do Not Invoke If Phrases
+      source_field: do_not_invoke_if_phrases
+    capacity_constraints:
+      section: Capacity Constraints
+      source_field: capacity_constraints
+    dependencies_external_teams:
+      section: Dependencies External Teams
+      source_field: dependencies_external_teams
 delivery:
   kind: filesystem
   path: ~/.kbf/outputs/faaas_kiwi_project_pptx.pptx
@@ -129,7 +129,13 @@ eval:
 source_binding:
   mode: author_fixed
   source_type: confluence_page
-  pinned_ref: https://confluence.oraclecorp.com/confluence/display/OCIFACP/FAaaS+Kiwi+Project
+  pinned_ref: '20382503622'
   space_allow_list:
   - OCIFACP
   ingest_on_demand: false
+  canonical_ref:
+    connector_id: confluence
+    resource_type: page
+    canonical_id: '20382503622'
+    display_hint: FAaaS Kiwi Project
+  original_ref: https://confluence.oraclecorp.com/confluence/display/OCIFACP/FAaaS+Kiwi+Project
