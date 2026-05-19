@@ -326,6 +326,7 @@ def _load_app():
             retrievers=retrievers,
             shim_kb=state["shim_kb"],
             confluence_adapter=confluence_adapter,  # ADR-032 P2-Exec — may be None
+            wiki_store=wiki_store,  # Issue-1a fix: Strategy 1b direct lookup by canonical_id
         )
         # Expose on app.state so the ask route + MCP handler can call it from
         # within a request (see _maybe_render_artifact in routes/ask.py).

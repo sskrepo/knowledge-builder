@@ -131,8 +131,25 @@ class ConfluenceWikiIngestor:
         )
         return stats
 
-    def ingest_page(self, page_id: str, _raw: dict | None = None) -> dict:
+    def ingest_page(
+        self,
+        page_id: str,
+        _raw: dict | None = None,
+        require_canonical_ref: bool = False,
+    ) -> dict:
         """Ingest a single Confluence page.
+
+        Args:
+            page_id: Confluence page ID (numeric string) or URL reference.
+            _raw:    Pre-fetched raw page dict (skips adapter fetch when provided).
+            require_canonical_ref:
+                When True (set by _run_ingest for author_fixed pinned-page ingest),
+                a failure to stamp canonical_ref is a HARD FAIL rather than a
+                warning-and-continue.  Without canonical_ref the executor's
+                _passage_matches_canonical() can never match this page
+                (ADR-039 §8: canonical==canonical comparison requires both sides
+                to carry canonical_ref).  Silently skipping is the exact
+                anti-pattern that masked the Issue-1a bug.
 
         Returns: {"status": "new"|"updated"|"unchanged", "page_id": ..., "path": ...}
         """
@@ -211,10 +228,17 @@ class ConfluenceWikiIngestor:
         # _passage_matches_canonical() can match passages by canonical==canonical.
         # resolve_to_numeric_id() fast-path only (no live REST); if the page_id is
         # already numeric this is a zero-cost identity operation.
+        # Issue-1a fix: when require_canonical_ref=True (author_fixed pinned-page
+        # ingest), a failure to produce canonical_ref is a HARD FAIL — not a
+        # warning-and-continue.  Without canonical_ref the executor Strategy 1a
+        # can never match this page (ADR-039 §8), and Strategy 1b also relies on
+        # the canonical_ref being present in the store record.  Silent skip = the
+        # exact anti-pattern behind the false ingest_result:success in Issue-1a.
         _canonical_ref: dict | None = None
+        _cref_err: str | None = None
         try:
             from ..adapters.confluence.shared import resolve_to_numeric_id
-            from ..adapters._base import CanonicalRef
+            from ..adapters._base import CanonicalRef, Unresolvable
             _cref = resolve_to_numeric_id(
                 reference=page_id,
                 resource_type="page",
@@ -227,12 +251,32 @@ class ConfluenceWikiIngestor:
                     "resource_type": _cref.resource_type,
                     "canonical_id": _cref.canonical_id,
                 }
+            elif isinstance(_cref, Unresolvable):
+                _cref_err = (
+                    f"resolve_to_numeric_id returned Unresolvable for page_id={page_id!r}: "
+                    f"{_cref.reason} — {_cref.detail}"
+                )
         except Exception as _cref_exc:
-            log.warning(
-                "ingest_page %s: could not stamp canonical_ref (%s) — "
-                "executor canonical==canonical match will not work for this page",
-                page_id, _cref_exc,
-            )
+            _cref_err = f"{type(_cref_exc).__name__}: {_cref_exc}"
+
+        if _cref_err is not None:
+            if require_canonical_ref:
+                # HARD FAIL — do not let INGEST report success without canonical_ref.
+                # A page ingested without canonical_ref is permanently unreachable
+                # by _retrieve_author_fixed_pinned (both Strategy 1a and 1b require it).
+                raise RuntimeError(
+                    f"ingest_page {page_id!r}: could not stamp canonical_ref and "
+                    f"require_canonical_ref=True — INGEST must hard-fail here rather "
+                    f"than report false success. Cause: {_cref_err}. "
+                    f"Fix the Confluence adapter / page reference and retry."
+                )
+            else:
+                log.warning(
+                    "ingest_page %s: could not stamp canonical_ref (%s) — "
+                    "executor canonical==canonical match will not work for this page",
+                    page_id, _cref_err,
+                )
+
         if self._wiki_store is not None:
             upsert_dict: dict = {
                 "page_id":            page_id,
@@ -246,6 +290,14 @@ class ConfluenceWikiIngestor:
             }
             if _canonical_ref is not None:
                 upsert_dict["canonical_ref"] = _canonical_ref
+            elif require_canonical_ref:
+                # Extra guard: if canonical_ref is still None here despite no exception
+                # (e.g. resolve_to_numeric_id returned an unexpected None), hard-fail.
+                raise RuntimeError(
+                    f"ingest_page {page_id!r}: canonical_ref is None after successful "
+                    f"resolve (unexpected code path) and require_canonical_ref=True. "
+                    f"INGEST hard-fails to prevent false ingest_result:success."
+                )
             self._wiki_store.upsert_page(upsert_dict)
 
         log.info("ingest_page %s: status=%s path=%s", page_id, status, md_path)

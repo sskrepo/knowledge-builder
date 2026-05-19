@@ -4763,11 +4763,35 @@ class SkillBuilderConversation:
                         "author_fixed skill=%s persona=%s into persona KB",
                         _pinned_canonical_id, self._data.skill_name, self._data.persona,
                     )
-                    _pinned_result = ingestor.ingest_page(_pinned_canonical_id)
+                    # Issue-1a fix: pass require_canonical_ref=True so a failure to stamp
+                    # canonical_ref is a HARD FAIL at ingest time, not a silent skip.
+                    # Without canonical_ref the executor's _retrieve_author_fixed_pinned
+                    # (both Strategy 1a canonical==canonical and Strategy 1b direct lookup)
+                    # can never match this page — reporting ingest_result:success without
+                    # canonical_ref stamped is the false-success anti-pattern behind Issue-1a.
+                    _pinned_result = ingestor.ingest_page(
+                        _pinned_canonical_id,
+                        require_canonical_ref=True,
+                    )
                     _pinned_status = _pinned_result.get("status", "unknown")
+                    # Post-ingest verification: confirm the store record has canonical_ref.
+                    # This is a belt-and-suspenders check — if ingest_page succeeded with
+                    # require_canonical_ref=True the record MUST have canonical_ref.
+                    # Hard-fail if somehow it doesn't (defensive: catches future code drift).
+                    _verify_rec = wiki_store.get_page(_pinned_canonical_id)
+                    if _verify_rec is None or not _verify_rec.get("canonical_ref"):
+                        raise RuntimeError(
+                            f"Post-ingest verification failed: page {_pinned_canonical_id!r} "
+                            f"is absent or missing canonical_ref in wiki_metadata_store after "
+                            f"ingest_page reported status={_pinned_status!r}. "
+                            f"ingest_result MUST NOT report success for this page. "
+                            f"Re-run ingestion to fix."
+                        )
                     log.info(
-                        "_run_ingest: pinned page canonical_id=%r ingested status=%s",
+                        "_run_ingest: pinned page canonical_id=%r ingested status=%s "
+                        "canonical_ref=%s (post-ingest verification PASSED)",
                         _pinned_canonical_id, _pinned_status,
+                        _verify_rec.get("canonical_ref"),
                     )
                     if _pinned_status == "new":
                         total_new += 1
@@ -5302,11 +5326,25 @@ class SkillBuilderConversation:
                 _eval_kbf_env = _os.environ.get("KBF_ENV", "laptop")
                 _eval_confluence_adapter = _build_confluence_adapter(_eval_kbf_env, REPO_ROOT)
                 _adapter_mode = "live" if _eval_confluence_adapter is not None else "None"
+                # Issue-1a fix (real-ingest-roundtrip): wire WikiMetadataStore into the
+                # EVAL executor so _retrieve_author_fixed_pinned Strategy 1b can find
+                # the page ingested at INGEST time directly by canonical_id.
+                # Without this, the EVAL executor had retrievers={} and shim_kb=None,
+                # so Strategy 1 was entirely skipped and the executor always fell through
+                # to Strategy 3 (ConfluencePageNotInKBError) even though the page was
+                # already correctly written to the wiki store by _run_ingest.
+                from ..stores.wiki_metadata_store import WikiMetadataStore as _WikiMetadataStore
+                _eval_wiki_store = _WikiMetadataStore()  # same default root as INGEST used
                 log.info(
-                    "_run_eval: Path-A constructing WorkflowExecutor confluence_adapter=%s",
-                    _adapter_mode,
+                    "_run_eval: Path-A constructing WorkflowExecutor confluence_adapter=%s "
+                    "wiki_store=%s (Strategy 1b direct lookup enabled)",
+                    _adapter_mode, _eval_wiki_store.root,
                 )
-                _executor = WorkflowExecutor(llm=self._llm, confluence_adapter=_eval_confluence_adapter)
+                _executor = WorkflowExecutor(
+                    llm=self._llm,
+                    confluence_adapter=_eval_confluence_adapter,
+                    wiki_store=_eval_wiki_store,
+                )
                 exec_result = _executor.execute_from_config(wf_cfg, exec_inputs)
                 ask_latency_ms = int((time.monotonic() - t0) * 1000)
                 execution_status = "success"
