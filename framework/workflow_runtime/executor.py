@@ -1146,7 +1146,9 @@ class WorkflowExecutor:
                         and cref.get("resource_type") == canonical.resource_type
                         and cref.get("canonical_id") == canonical.canonical_id
                     ):
-                        # Found — read body from filesystem path.
+                        # Found — read body from filesystem path (filestore) or
+                        # from the record's `content` field (ADB-backed store,
+                        # DECISION-022: path="" + content=CLOB markdown body).
                         body = ""
                         file_path = rec.get("path", "")
                         if file_path:
@@ -1157,6 +1159,16 @@ class WorkflowExecutor:
                                     "ADR-039 Strategy 1b: could not read file %r for "
                                     "canonical_id=%r: %s",
                                     file_path, pinned_page_id, _read_err,
+                                )
+                        # ADB-backed path: path is "" but content is stored in record.
+                        if not body:
+                            inline_content = rec.get("content", "")
+                            if inline_content:
+                                body = inline_content
+                                log.info(
+                                    "ADR-039 Strategy 1b: using inline content from "
+                                    "ADB-backed store for canonical_id=%r (no filesystem path).",
+                                    pinned_page_id,
                                 )
                         if body:
                             kb_full_name = ""

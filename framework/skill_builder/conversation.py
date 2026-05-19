@@ -5165,9 +5165,38 @@ class SkillBuilderConversation:
             from ..orchestrator.shim_faaas import ShimFaaas
             wf_dir = REPO_ROOT / "framework" / "workflow_skills"
             _shim = ShimWorkflows(wf_dir, skill_store=self._skill_store)
-            # INGEST+ candidate set: all_cards_including_draft() includes the
-            # in-authoring skill (not yet promoted to all_cards()).
-            _ingest_plus_cards = _shim.all_cards_including_draft()
+            # INGEST+ candidate set: all_cards_including_draft() returns on-disk
+            # cards only.  The in-authoring skill may not yet have a committed disk
+            # YAML (it exists only as session data at EVAL time).  We must inject
+            # the draft card explicitly so the LLM classifier has a real candidate
+            # to route to.  Without this injection the classifier cannot route
+            # positive queries to the in-authoring skill (it's not in the candidate
+            # list) and Path-B always fails for skills that haven't been committed
+            # to disk yet.  We filter out any pre-existing disk card for the same
+            # skill_name to avoid duplicate candidates (re-run / re-author case).
+            _disk_cards_raw = _shim.all_cards_including_draft()
+            _ingest_plus_cards = [
+                c for c in _disk_cards_raw
+                if not (c.get("persona") == persona and c.get("name") == skill_name)
+            ]
+            # Build a synthetic card dict from the session's design_skill_card data.
+            _draft_card_data = self._data.design_skill_card or {}
+            _draft_card_for_classifier: dict = {
+                "name": skill_name,
+                "persona": persona,
+                "summary": _draft_card_data.get("summary", ""),
+                "use_when": _draft_card_data.get("use_when", ""),
+                "example_invocations": _draft_card_data.get("example_invocations", []),
+                "do_not_invoke_if_phrases": _draft_card_data.get("do_not_invoke_if_phrases", []),
+                "routing_queries": _draft_card_data.get("routing_queries", {}),
+                "on_request": True,
+                "status": "draft",
+                "_cfg": {
+                    "skill_card": _draft_card_data,
+                    "source_binding": {"mode": self._data.source_binding_mode or ""},
+                },
+            }
+            _ingest_plus_cards.append(_draft_card_for_classifier)
             # ShimFaaas loaded from same path context_builder uses at startup.
             _faaas_path = REPO_ROOT / "framework" / "config" / "shim_faaas.yaml"
             _shim_faaas = ShimFaaas(_faaas_path)
@@ -5176,7 +5205,7 @@ class SkillBuilderConversation:
             _path_b_classifier = IntentClassifier(self._llm, _shim_faaas)
             log.info(
                 "_run_eval: Path-B using IntentClassifier (DECISION-021) "
-                "stub_mode=%s ingest_plus_cards=%d persona=%s skill=%s",
+                "stub_mode=%s ingest_plus_cards=%d (incl draft card) persona=%s skill=%s",
                 _path_b_classifier._stub_mode(),  # type: ignore[attr-defined]
                 len(_ingest_plus_cards),
                 persona, skill_name,
