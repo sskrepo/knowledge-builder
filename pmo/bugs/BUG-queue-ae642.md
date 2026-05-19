@@ -3,12 +3,13 @@ queue_id: BUG-queue-ae642
 source: user_report
 tool: authorSkill
 filed_at: 2026-05-19T05:39:23
-status: open
+status: fixed
+fix_commit: 7351620
 ---
 
 # BUG-queue-ae642
 
-**Tool**: `authorSkill` | **Filed**: 2026-05-19 | **Status**: open
+**Tool**: `authorSkill` | **Filed**: 2026-05-19 | **Status**: fixed (7351620)
 
 DECISION-013 BUG (wiki KB portability): WikiMetadataStore was filestore-only (~/.kbf/store/wiki_meta…
 
