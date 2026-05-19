@@ -5,85 +5,103 @@
   "description": "Synthesized by skill_builder for persona=tpm, kb=faaas_kiwi_project_pptx. Refine before promoting.",
   "type": "object",
   "required": [
+    "report_title",
     "reporting_date",
-    "project_name",
     "project_purpose",
     "rag_summary",
-    "schedule_health",
     "orm_status",
-    "status_highlights",
-    "workstreams",
+    "schedule_health",
+    "metrics_snapshot",
+    "workstreams_summary",
     "blocking_issues",
     "next_steps",
     "exec_asks",
-    "key_metrics",
-    "key_links"
+    "decisions_needed",
+    "key_links",
+    "do_not_invoke_if_phrases",
+    "capacity_constraints",
+    "dependencies_external_teams"
   ],
   "properties": {
+    "report_title": {
+      "type": "string",
+      "description": "Provide the slide title in exec-safe language. Use the program name from the Confluence page and append 'Executive Update'.",
+      "maxLength": 120
+    },
     "reporting_date": {
       "type": "string",
-      "description": "Extract the most explicit 'as of' / last-updated date from the Confluence page; if none is stated, use the most recent dated event mentioned on the page (e.g., review/meeting date) and label it as 'As of <date> (inferred from latest dated update)'.",
-      "maxLength": 200
-    },
-    "project_name": {
-      "type": "string",
-      "description": "Extract the program/project name exactly as written in the Confluence page title or header.",
-      "maxLength": 200
+      "description": "Set the 'as of' date for this update. If the Confluence page explicitly states a last-updated/as-of date, use it; otherwise use today's date at generation time and label it 'As of <date>'.",
+      "maxLength": 60
     },
     "project_purpose": {
       "type": "string",
-      "description": "Extract the stated purpose/goal of the project in one exec-safe sentence; expand acronyms on first use if present in the source text.",
-      "maxLength": 500
+      "description": "Extract the one-sentence goal/purpose of the FAaaS Kiwi project from the Confluence page introduction/goal statement. Keep it exec-ready and avoid internal-only acronyms unless expanded.",
+      "maxLength": 300
     },
     "rag_summary": {
       "type": "string",
-      "description": "Derive a single overall RAG (Red/Amber/Green) for the program by summarising the Confluence workstreams (#1 security scanning, #2 fleet patching, #3 DB patching, #4 OS patching). Always include the RAG label plus exactly one sentence justification grounded in: completion metrics (e.g., scan % and counts), explicit capacity gaps (e.g., slots available vs needed), and any leadership decisions/dependencies called out.",
-      "maxLength": 500
-    },
-    "schedule_health": {
-      "type": "string",
-      "description": "Derive schedule health in 1\u20132 exec-safe sentences by combining: (a) security scanning completion (% complete and remaining repos), (b) any dated checkpoints (e.g., review date, working group meeting date), and (c) any stated constraints that could delay completion (e.g., patching capacity). Avoid passive voice.",
-      "maxLength": 500
+      "description": "Derive a single RAG status (Green/Amber/Red) plus a 1-sentence justification by summarising the Confluence page signals: progress metrics (scan coverage, completion counts), explicit leadership decisions needed, and stated capacity constraints. Format: '<RAG> \u2014 <justification>'.",
+      "maxLength": 220
     },
     "orm_status": {
       "type": "string",
-      "description": "If the Confluence page explicitly states an ORM status/label, extract it verbatim; otherwise return 'Not stated in source'. Do not infer ORM status.",
-      "maxLength": 200
+      "description": "Derive an ORM-style status label from the Confluence page risk/ask signals. If explicit ORM wording is absent, infer a concise status such as 'On track', 'At risk', or 'Off track' based on blockers/decisions/capacity constraints described on the page; do not fabricate numeric ORM scores.",
+      "maxLength": 80
     },
-    "status_highlights": {
-      "type": "array",
-      "description": "Derive 3\u20135 concise exec-facing status bullets by summarising the four workstreams on the Confluence page. Each bullet must include a concrete metric or named deliverable when available (e.g., '89% complete; 237/266 repos scanned').",
-      "maxLength": 2000
+    "schedule_health": {
+      "type": "string",
+      "description": "Derive schedule health ('On track'/'At risk'/'Off track') by combining any dated events (e.g., proposal review dates, meeting dates) with evidence of missing decisions/capacity constraints. If no milestones/baseline exist, state 'At risk \u2014 schedule baseline not stated; progress depends on <key dependency>'.",
+      "maxLength": 180
     },
-    "workstreams": {
+    "metrics_snapshot": {
       "type": "array",
-      "description": "Extract the list of workstreams from the Confluence page and summarise each in exec-safe language. For each workstream, include: name/number, current status (with key metric if present), and the most important dependency/decision if stated. Derive this by reading the four workstream sections (#1\u2013#4) and condensing each to 2\u20133 lines.",
-      "maxLength": 2000
+      "description": "Extract 3\u20136 exec-friendly numeric metrics from the Confluence page (e.g., scan coverage %, repos scanned/total, additional repos submitted, Ksplice completion counts). Return as short strings like 'Security scan coverage: 97% (259/266 repos)'.",
+      "maxLength": 1200
+    },
+    "workstreams_summary": {
+      "type": "array",
+      "description": "Summarise the four workstreams listed on the Confluence page (#1 security scanning, #2 fleet patching, #3 DB patching, #4 OS patching). For each, provide a single concise status sentence derived by summarising the corresponding workstream section text; do not list every sub-detail.",
+      "maxLength": 1600
     },
     "blocking_issues": {
       "type": "array",
-      "description": "Derive blockers by aggregating items in the Confluence page that indicate 'need clarity/decision', 'pending', 'only X slots available', 'ERs needed', or other explicit dependencies. For each blocker, include: description, owner (team or named individual if stated), target_resolution (date if stated; else 'TBD'), and critical_path (true if it gates scanning/patching completion; else false). If none, return an empty array.",
+      "description": "Derive blockers by aggregating statements on the Confluence page that indicate a dependency, decision needed, capacity constraint, or required ER/action that is preventing progress (e.g., leadership clarity on monthly DB patching; non-Ksplice capacity slots; ERs needed). For each blocker, output an object with: description, owner (team/person if stated), target_resolution (date if stated else 'TBD'), critical_path (true if it gates monthly patching/scanning completion). If none, return [].",
       "maxLength": 2000
     },
     "next_steps": {
       "type": "array",
-      "description": "Derive 3\u20136 time-bound next steps by combining action-oriented statements across the Confluence workstreams (e.g., file ERs, schedule/hold working group, complete remaining scans, decide patching cadence). Each item must include an explicit timeframe ('by <date>' if present, otherwise 'this sprint' or 'next 1\u20132 weeks') and an owner if stated; do not fabricate dates.",
-      "maxLength": 2000
+      "description": "Derive next steps by combining explicit action items and implied immediate actions from the Confluence page (e.g., finalize fleet patching proposal, file ERs, decide DB patching requirement/scope). Each item must be time-bound using a stated date from the page; if no date is stated, use 'this sprint' as the time bound. Keep each item to one line.",
+      "maxLength": 1500
     },
     "exec_asks": {
       "type": "array",
-      "description": "Derive executive asks by aggregating explicit leadership asks/decisions in the Confluence page (e.g., monthly full fleet patching proposal decision, clarity on DB patching requirement and patching types). Each ask must be a single sentence starting with an action verb and include why it matters in a short clause.",
-      "maxLength": 2000
+      "description": "Derive executive asks by aggregating explicit 'leadership ask' language and decision requests from the Confluence page (e.g., approve monthly fleet patching approach; clarify whether monthly DB patching is required; confirm patching scope). Each ask must be phrased as a decision or approval request and include why it matters in 6\u201312 words.",
+      "maxLength": 1200
     },
-    "key_metrics": {
+    "decisions_needed": {
       "type": "array",
-      "description": "Extract the most exec-relevant quantitative metrics from the Confluence page (scan completion %, repos scanned/total/remaining; DB ksplice completion for prod/non-prod/demo; patching capacity slots available vs needed). Represent each metric as a short label plus value; do not add metrics not present in the source.",
-      "maxLength": 2000
+      "description": "Extract and consolidate decision points from the Confluence page (e.g., whether DB patching every month is required; what patching scope types apply; ownership options under review). Return as short strings; avoid duplicates with exec_asks by keeping this list purely as decision statements.",
+      "maxLength": 1000
     },
     "key_links": {
       "type": "array",
-      "description": "Extract operational links from the Confluence page (PMO ticket, Jira dashboard/filter, security dashboard, repo list, Slack channels, DevOps code repository, supporting XLS, attachment image link). Provide as a list of {label, url} derived from the page content.",
-      "maxLength": 2000
+      "description": "Extract the most useful 4\u20138 links from the Confluence page for executives (PMO ticket, Jira dashboard, Jira filter, security dashboard, repo list, supporting materials/xls). Return as strings formatted 'Label \u2014 URL'.",
+      "maxLength": 1200
+    },
+    "do_not_invoke_if_phrases": {
+      "type": "array",
+      "description": "Phrases that indicate the request is not about the FAaaS Kiwi project; if any are present in the user request/context, do not invoke this skill and ask for clarification. Must include: 'mango project', 'not kiwi', 'different project'.",
+      "maxLength": 300
+    },
+    "capacity_constraints": {
+      "type": "array",
+      "description": "Extract 1\u20134 explicit capacity constraints from the Confluence page (e.g., non-Ksplice patching slots available vs needed). Format each as a short string like 'Non-Ksplice patching capacity: 2 slots/month available vs 5 needed (3 days each)'. If none stated, return [].",
+      "maxLength": 600
+    },
+    "dependencies_external_teams": {
+      "type": "array",
+      "description": "List key external teams/partners mentioned as dependencies or collaborators (e.g., SaaS Security POCs, Erna\u2019s team). Return 1\u20136 short strings; include why they matter in 4\u201310 words when stated/implied.",
+      "maxLength": 600
     }
   },
   "additionalProperties": false
