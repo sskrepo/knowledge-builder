@@ -4,6 +4,16 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-18] backend-dev | FIX 1+2: ask_parameterized EVAL Path-A representative page + routing precision (DECISION-013 bugs BUG-queue filed in ADB)
+
+FIX 1 (`conversation.py`): `_run_eval` now injects `exec_inputs[input_param]` from session `source_samples` (Priority 1) or `sources` (Priority 2) for `ask_parameterized` skills. `_resolve_representative_page()` helper added. `NoRepresentativePageError` typed loud-failure when no page is resolvable (DECISION-020 §4/§6). 18 new unit tests in `test_eval_ask_param_representative_page.py`.
+
+FIX 2 (`skill_builder.yaml` prompt v1.0 → v1.1): `design_skill_card` prompt updated to require `do_not_invoke_if_phrases` (concrete phrase-fragment veto list). The Tier-1 token-overlap classifier already has hard-phrase exclusion logic (`resolve_only`); the prompt gap was the only reason cards omitted these phrases. Future-authored cards will carry discriminative veto phrases so single-fact queries don't over-trigger email-agenda skills. Already-committed cards (including stuck sessions `synth-tpm-8cb2adf7`/`synth-tpm-afcacfc5`) are NOT retroactively rewritten — user must re-design those skills in a fresh session. `test_adr038_card_routing_eval.py::TestPromptRegistry::test_design_skill_card_prompt_loads` updated (max_tokens assertion relaxed, new assertion on `do_not_invoke_if_phrases` in template).
+
+DECISION-013 bugs: BUG-queue-<uuid1> (HIGH, ask_parameterized empty page) and BUG-queue-<uuid2> (MEDIUM, routing over-trigger) filed in `KB_SHIM.KBF_BUG_REPORTS` via ADB pool. Full suite: exactly 8 pre-existing failures, 0 new.
+
+---
+
 ## [2026-05-18] backend-dev | fix _run_eval 3rd executor site — confluence_adapter wiring (ref BUG-queue-081dc, synth-tpm-8cb2adf7)
 
 `conversation.py _run_eval` was constructing `WorkflowExecutor(llm=self._llm)` with NO `confluence_adapter` — the 3rd and previously overlooked executor construction site. The mcp_server lifespan fix (BUG-queue-081dc) wired the consumption /ask path executor but left _run_eval's own executor adapter-less, causing EVAL Path-A to deterministically hard-fail with `ConfluencePageNotInKBError: Confluence adapter is not configured` for ask_parameterized skills. Fix: call `_build_confluence_adapter(kbf_env, REPO_ROOT)` (identical pattern to conversation.py:4528 / :6401) and pass it as `confluence_adapter` to `WorkflowExecutor`. Factory returns None safely when unconfigured — graceful path unchanged. 2 new unit tests in `TestRunEvalExecutorConfluenceAdapterWiring` (sentinel+None cases). Branch `fix/run-eval-executor-confluence-adapter` committed; post-merge: exactly 8 baseline failures, 0 new. BUG filed in ADB `KB_SHIM.KBF_BUG_REPORTS` (see STEP below).

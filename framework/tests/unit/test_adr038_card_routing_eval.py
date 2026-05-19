@@ -815,10 +815,14 @@ class TestPromptRegistry:
         )
         assert spec.prompt_id == "design_skill_card"
         assert spec.model == "synthesis"
-        assert spec.max_tokens == 1024
+        # max_tokens was increased from 1024 → 1400 in v1.1 to accommodate
+        # do_not_invoke_if_phrases in the generated JSON response.
+        assert spec.max_tokens >= 1024
         assert "routing_queries" in spec.text
         assert "positive" in spec.text
         assert "negative" in spec.text
+        # v1.1: must include do_not_invoke_if_phrases instruction
+        assert "do_not_invoke_if_phrases" in spec.text
 
     def test_failure_classifier_checksum_unchanged(self):
         """ADR-038 must NOT touch failure_classifier — checksum must still be valid."""

@@ -104,6 +104,71 @@ def _build_proactive_connector_block() -> str:
 
 
 # ---------------------------------------------------------------------------
+# DECISION-020 §5 / EVAL Path-A representative page helpers
+# ---------------------------------------------------------------------------
+
+class NoRepresentativePageError(ValueError):
+    """Raised when an ask_parameterized skill has no resolvable representative
+    page in the current session state for EVAL Path-A.
+
+    This is a typed, actionable error (DECISION-020 §4/§6) — it identifies
+    WHY the EVAL Path-A execution cannot proceed and what the author must do.
+    """
+    def __init__(self, skill_name: str, input_param: str) -> None:
+        super().__init__(
+            f"EVAL Path-A cannot run for ask_parameterized skill '{skill_name}': "
+            f"no representative page found in session state for input_param='{input_param}'. "
+            f"The INSPECT_SOURCES phase must have fetched at least one Confluence page "
+            f"(visible in source_samples). "
+            f"If source_samples is empty, re-run INSPECT_SOURCES before EVAL, or "
+            f"add at least one page to the skill's source list during CONFIGURE_SOURCES. "
+            f"Per DECISION-020 §5, EVAL requires an author-supplied representative page."
+        )
+        self.skill_name = skill_name
+        self.input_param = input_param
+
+
+def _resolve_representative_page(
+    source_samples: dict,
+    sources: list,
+) -> str | None:
+    """Resolve a representative page reference for EVAL Path-A.
+
+    Search order (most reliable → least reliable):
+    1. source_samples keys (format "confluence:{source_id}") — these are
+       pages the author actually fetched/confirmed during INSPECT_SOURCES.
+       Return the source_id part (numeric ID or full URL) of the first key.
+    2. self._data.sources list — fallback for pre-ADR-027 sessions that
+       skipped INSPECT_SOURCES.  Return the first page_id / page_url found.
+
+    Returns None only when both sources are empty.
+    """
+    # Priority 1: source_samples — confirmed fetched during INSPECT_SOURCES
+    for cache_key in source_samples:
+        # cache_key format: "confluence:{source_id}"
+        if cache_key.startswith("confluence:"):
+            page_ref = cache_key[len("confluence:"):]
+            if page_ref:
+                return page_ref
+
+    # Priority 2: sources list — fallback
+    for src in sources:
+        if src.get("kind", "confluence") != "confluence":
+            continue
+        page_id = src.get("page_id")
+        if page_id:
+            return str(page_id)
+        page_url = src.get("page_url")
+        if page_url:
+            return str(page_url)
+        pages = src.get("pages") or []
+        if pages:
+            return str(pages[0])
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # ADR-032 P1-D: source_binding contract validation helpers
 # ---------------------------------------------------------------------------
 
@@ -5035,6 +5100,36 @@ class SkillBuilderConversation:
                 domains = (self._data.normalised_intent or {}).get("scope_domains", [skill_name])
                 canonical_question = f"What is the status of the {' '.join(domains)} project for this week?"
                 exec_inputs = {"input": canonical_question, "persona": persona}
+
+                # DECISION-020 §5: for ask_parameterized skills, resolve the
+                # representative page from session state and inject it into
+                # exec_inputs under the skill's declared input_param key.
+                # Without this, _retrieve_ask_parameterized receives an empty
+                # page_id → FileNotFoundError ("could not fetch page : …").
+                _eval_sb = wf_cfg.get("source_binding") or {}
+                if _eval_sb.get("mode") == "ask_parameterized":
+                    _input_param = _eval_sb.get("input_param", "")
+                    if not _input_param:
+                        raise NoRepresentativePageError(
+                            skill_name=skill_name or "",
+                            input_param="<missing>",
+                        )
+                    _rep_page = _resolve_representative_page(
+                        self._data.source_samples,
+                        self._data.sources,
+                    )
+                    if _rep_page is None:
+                        raise NoRepresentativePageError(
+                            skill_name=skill_name or "",
+                            input_param=_input_param,
+                        )
+                    exec_inputs[_input_param] = _rep_page
+                    log.info(
+                        "_run_eval: Path-A ask_parameterized — injecting "
+                        "%s=%r from session representative page",
+                        _input_param, _rep_page,
+                    )
+
                 t0 = time.monotonic()
                 # Build Confluence adapter for EVAL Path-A executor — mirrors the
                 # identical pattern at conversation.py:4528 (INGEST) and :6401
@@ -5068,6 +5163,13 @@ class SkillBuilderConversation:
                     f"Re-commit the skill before running EVAL."
                 )
                 log.warning("_run_eval: Path-A skipped — no workflow_skill artifact in ADB.")
+        except NoRepresentativePageError:
+            # DECISION-020 §4/§6: no silent fallback — propagate as a loud typed error.
+            # The author MUST run INSPECT_SOURCES to obtain a representative page before EVAL
+            # can proceed for ask_parameterized skills.  Catching and suppressing this error
+            # would silently fail with an empty page_id → ConfluencePageNotInKBError, which
+            # is less actionable than the typed NoRepresentativePageError.
+            raise
         except Exception as exc:
             # ADR-038 §B.2: execution failure is HIGH-severity; NOT collapsed to soft note.
             execution_status = "failure"
