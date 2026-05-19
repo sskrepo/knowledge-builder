@@ -4,6 +4,12 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-18] backend-dev | fix(ingest): author_fixed+!ingest_on_demand skills ingest pinned page into persona KB (DECISION-020 §3/§4 write-side; BUG-queue-13e25)
+
+`confluence_wiki_ingest.py`: `ingest_page()` now stamps `canonical_ref` (connector_id="confluence", resource_type="page", canonical_id=<numeric>) into `wiki_metadata_store` via `resolve_to_numeric_id()` fast-path. Warns (no crash) if resolution fails. `wiki_metadata_store.py`: `upsert_page()` preserves `canonical_ref` field in JSON record. `search_wiki.py` + `read_wiki_page.py`: retrievers now forward `canonical_ref` from the store record into passage `metadata` so `_passage_matches_canonical()` (ADR-039) can do canonical==canonical comparison. `conversation.py` `_run_ingest()`: for `author_fixed + ingest_on_demand:false + pinned canonical_id`, INGEST explicitly calls `ingestor.ingest_page(canonical_id)` after space-based ingestion. Loud-fail (status=failed, INGEST parks) when adapter is None or fetch raises (DECISION-020 §4/§6 no silent skip). 15 new unit tests in `test_decision020_ingest_pinned_page.py`. BUG-queue-13e25 filed in `KB_SHIM.KBF_BUG_REPORTS` (COUNT=1 confirmed). Full suite: exactly 8 pre-existing failures, 0 new (1737 passed).
+
+---
+
 ## [2026-05-18] backend-dev | FIX 1+2: ask_parameterized EVAL Path-A representative page + routing precision (DECISION-013 bugs BUG-queue filed in ADB)
 
 FIX 1 (`conversation.py`): `_run_eval` now injects `exec_inputs[input_param]` from session `source_samples` (Priority 1) or `sources` (Priority 2) for `ask_parameterized` skills. `_resolve_representative_page()` helper added. `NoRepresentativePageError` typed loud-failure when no page is resolvable (DECISION-020 §4/§6). 18 new unit tests in `test_eval_ask_param_representative_page.py`.
