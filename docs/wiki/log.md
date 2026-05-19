@@ -4,6 +4,20 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-18] architect | DECISION-021 / ADR-038 §B.5 amendment: EVAL Path-B uses production IntentClassifier (routing-precision loop exit)
+
+DECISION-021 filed: EVAL Path-B routing self-test must use the production `IntentClassifier` internally (INGEST+ candidate set, non-executing) instead of token-overlap `ShimWorkflows.resolve_only`. Rationale: token-overlap cannot distinguish shared-vocabulary cases (Mango vs. Kiwi project, single-fact vs. agenda-email). DECISION-017's public-flag rejection stands — classifier is constructed internally, no new HTTP surface. Options: (rejected) keep token-overlap; (rejected, DECISION-017) public /ask flags; (CHOSEN) internal IntentClassifier INGEST+ scope non-executing.
+
+ADR-038 §B.5 amended in-place: §B.5 text updated to document the amendment with original struck-through. Component table updated (resolve_only → dead code note; IntentClassifier row added). Consequences section updated. Cross-references updated. `amended: 2026-05-18` added to frontmatter.
+
+Implementation (`conversation.py` `_run_eval`): two `_shim.resolve_only(q, scope="ingest_or_later")` call sites replaced with `IntentClassifier(self._llm, ShimFaaas(_faaas_path)).classify(q, available_workflows=all_cards_including_draft())`. Construction mirrors `context_builder.py:143`. `ShimWorkflows.resolve_only` retained (for its direct-call tests). Public consumption path (`all_cards()` promoted-only) unchanged.
+
+13 new unit tests in `test_decision021_pathb_intent_classifier.py`: wiring/mechanism (T1-T4), gate semantics (T5-T6 positive/negative), PROMOTE gate regression guard (T7), graceful skip (T8). All 13 pass.
+
+BUG-queue-2d7fd filed in `KB_SHIM.KBF_BUG_REPORTS` (ADB, COUNT=1 confirmed). Full suite: exactly 8 baseline failures, 0 new (1750 passed).
+
+---
+
 ## [2026-05-18] backend-dev | fix(ingest): author_fixed+!ingest_on_demand skills ingest pinned page into persona KB (DECISION-020 §3/§4 write-side; BUG-queue-13e25)
 
 `confluence_wiki_ingest.py`: `ingest_page()` now stamps `canonical_ref` (connector_id="confluence", resource_type="page", canonical_id=<numeric>) into `wiki_metadata_store` via `resolve_to_numeric_id()` fast-path. Warns (no crash) if resolution fails. `wiki_metadata_store.py`: `upsert_page()` preserves `canonical_ref` field in JSON record. `search_wiki.py` + `read_wiki_page.py`: retrievers now forward `canonical_ref` from the store record into passage `metadata` so `_passage_matches_canonical()` (ADR-039) can do canonical==canonical comparison. `conversation.py` `_run_ingest()`: for `author_fixed + ingest_on_demand:false + pinned canonical_id`, INGEST explicitly calls `ingestor.ingest_page(canonical_id)` after space-based ingestion. Loud-fail (status=failed, INGEST parks) when adapter is None or fetch raises (DECISION-020 §4/§6 no silent skip). 15 new unit tests in `test_decision020_ingest_pinned_page.py`. BUG-queue-13e25 filed in `KB_SHIM.KBF_BUG_REPORTS` (COUNT=1 confirmed). Branch SHA: 493201c. Merge SHA: 4a8089b. Full suite: exactly 8 pre-existing failures, 0 new (1737 passed). Exported to pmo/bugs/.
