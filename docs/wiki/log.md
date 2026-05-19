@@ -4,6 +4,10 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-19] architect | DECISION-023 filed — pptx reference-fidelity RCA + options (ADR-028 §8; Proposed)
+
+RCA: uploaded reference layout is dropped at `analyze_artifact.py:_analyze_pptx` (lines 41-108) — only field names extracted, all geometry/structure discarded. Renderer dispatches to hardcoded preset (`weekly_exec_review_v1`), not the reference's structure. Comparator scores 0.0/0.0 because blank-layout slides have `shapes.title = None` (comparator.py:172), so section extraction returns empty. Three options filed: (A) template-clone rendering, (B) structured layout-spec extraction (spec §8 research path), (C) honest-signal interim (fix scoring bug + promote blocker). Recommended: C as immediate prerequisite fix + A as primary fidelity upgrade. Awaiting user decision.
+
 ## [2026-05-19] backend-dev | TWO-SKILL E2E MISSION COMPLETE — both SKILL 1 (faaas_kiwi_project_pptx) and SKILL 2 (confluence_project_tracking_rods_support_for_dynamic_tables) PROMOTED to production
 
 **Mission**: Resume synth-tpm-628a9647 (SKILL 1, author_fixed pptx) + author brand-new synth-tpm-4bebf913 (SKILL 2, ask_parameterized .eml email draft). Both driven to genuine ADB-backed PROMOTE. Anti-fabrication: PROMOTED is real only if ADB `status=promoted`, real non-empty artifact files on disk, genuine Path-A/B EVAL runs.
