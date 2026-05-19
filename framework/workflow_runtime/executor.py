@@ -16,6 +16,7 @@ on no-match. See _retrieve_author_fixed_pinned() below.
 """
 from __future__ import annotations
 import hashlib
+import inspect
 import json
 import logging
 import os
@@ -319,6 +320,90 @@ def _make_raw_item_ref(page_id: str):
             source = "confluence"
             source_id = page_id
         return _Ref()
+
+
+def _invoke_retriever_compat(
+    retriever,
+    *,
+    tool_name: str,
+    query: str,
+    corpus: str,
+    persona: str | None,
+):
+    """Invoke a heterogeneous retriever callable via signature introspection.
+
+    Retrievers in framework/retrievers/ have non-uniform __call__ signatures
+    (vector_search needs `corpus`; search_wiki takes `query, persona`;
+    text_to_sql takes `nl_query`; read_wiki_page/query_fleet/graph_traverse
+    require params a generic pinned-source query cannot supply).  Strategy 1a
+    must drive whichever retriever the KB card names without hard-coding any
+    one signature.
+
+    Behaviour:
+      - Inspect the callable's signature and pass ONLY the parameters it
+        declares, sourced from a fixed value pool.
+      - If the callable has a required parameter (no default) that the pool
+        cannot satisfy, this retriever is not drivable from a generic
+        pinned-source context: log at INFO and return None (caller skips it —
+        Strategy 1b is the safety net).  Never raise.
+      - Any exception from the call itself is logged and converted to None.
+        A bad/unsupported retriever NEVER aborts _retrieve_author_fixed_pinned.
+
+    Returns the retriever's result list, or None if it was skipped/failed.
+    """
+    pool: dict[str, object] = {
+        "query": query,
+        "nl_query": query,
+        "corpus": corpus,
+        "persona": persona,
+    }
+    try:
+        # inspect.signature() handles plain functions, lambdas, AND callable
+        # class instances correctly (for instances it follows __call__ and
+        # strips `self`).  Do NOT introspect `retriever.__call__` directly:
+        # for a plain function that resolves to the method-wrapper whose
+        # signature is the useless (*args, **kwargs).
+        sig = inspect.signature(retriever)
+    except (TypeError, ValueError):
+        # Builtin / unintrospectable — best-effort legacy call, never crash.
+        try:
+            return retriever(query=query)
+        except Exception as exc:  # noqa: BLE001
+            log.info(
+                "ADR-039 pinned retriever %s not introspectable and legacy "
+                "call failed (%s) — skipping (Strategy 1b will handle).",
+                tool_name, exc,
+            )
+            return None
+
+    kwargs: dict[str, object] = {}
+    for pname, param in sig.parameters.items():
+        if pname == "self":
+            continue
+        if param.kind in (inspect.Parameter.VAR_POSITIONAL,
+                           inspect.Parameter.VAR_KEYWORD):
+            continue
+        if pname in pool and pool[pname] is not None:
+            kwargs[pname] = pool[pname]
+        elif param.default is inspect.Parameter.empty:
+            # Required parameter we cannot supply from the generic pool.
+            log.info(
+                "ADR-039 pinned retriever %s requires parameter %r which is "
+                "not available in a generic pinned-source context — skipping "
+                "(Strategy 1b will handle).",
+                tool_name, pname,
+            )
+            return None
+
+    try:
+        return retriever(**kwargs)
+    except Exception as exc:  # noqa: BLE001
+        log.error(
+            "ADR-039 pinned retriever %s raised during invocation: %s — "
+            "skipping (Strategy 1b will handle).",
+            tool_name, exc,
+        )
+        return None
 
 
 def _extract_body_text(raw_item) -> str:
@@ -1100,12 +1185,18 @@ class WorkflowExecutor:
                     retriever = self.retrievers.get(tool_name)
                     if retriever is None:
                         continue
-                    try:
-                        results = retriever(query=query_text, persona=card.get("persona"))
-                    except TypeError:
-                        results = retriever(query=query_text)
-                    except Exception as exc:
-                        log.error("ADR-039 pinned retriever %s raised: %s", tool_name, exc)
+                    # D1: signature-driven dispatch — supply corpus/query/etc.
+                    # per the retriever's actual __call__ contract.
+                    # D2: never raises — an unsupported/failing retriever is
+                    # logged and skipped so Strategy 1b can still run.
+                    results = _invoke_retriever_compat(
+                        retriever,
+                        tool_name=tool_name,
+                        query=query_text,
+                        corpus=(kb_full_name or short_name),
+                        persona=card.get("persona"),
+                    )
+                    if results is None:
                         continue
                     for r in results or []:
                         p = {
