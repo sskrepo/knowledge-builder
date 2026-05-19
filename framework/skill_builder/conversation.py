@@ -4562,9 +4562,56 @@ class SkillBuilderConversation:
         self._state = "INGEST"
 
         kbf_env = _os.environ.get("KBF_ENV", "laptop")
+
+        # DECISION-020 §3/§4 write-side: for author_fixed + ingest_on_demand:false skills
+        # the pinned page MUST be ingested into the persona KB at author time so the
+        # executor's _retrieve_author_fixed_pinned() finds it via KB retrieval.
+        # Read the committed YAML's source_binding to get the pinned canonical_id.
+        _pinned_canonical_id: str | None = None
+        if self._data.source_binding_mode == "author_fixed":
+            _wf_key = (
+                f"framework/workflow_skills/{self._data.persona}"
+                f"/{self._data.skill_name}.yaml"
+            )
+            _cached = self._data.synthesized_artifacts.get(_wf_key)
+            _synthesized_wf: dict = {}
+            if isinstance(_cached, dict):
+                _synthesized_wf = _cached
+            else:
+                _fs_wf_path = (
+                    REPO_ROOT / "framework" / "workflow_skills"
+                    / self._data.persona / f"{self._data.skill_name}.yaml"
+                )
+                if _fs_wf_path.exists():
+                    try:
+                        _synthesized_wf = yaml.safe_load(_fs_wf_path.read_text()) or {}
+                    except Exception as _wf_exc:
+                        log.warning(
+                            "_run_ingest: could not read workflow YAML for pinned-page check "
+                            "(%s)", _wf_exc,
+                        )
+            _sb_block = _synthesized_wf.get("source_binding") or {}
+            _sb_ingest_on_demand = _sb_block.get("ingest_on_demand", False)
+            if not _sb_ingest_on_demand:
+                # Prefer canonical_ref.canonical_id (already resolved); fall back to pinned_ref.
+                _cref_block = _sb_block.get("canonical_ref") or {}
+                _pinned_canonical_id = (
+                    _cref_block.get("canonical_id")
+                    or _sb_block.get("pinned_ref")
+                    or None
+                )
+                if _pinned_canonical_id:
+                    log.info(
+                        "_run_ingest: author_fixed+!ingest_on_demand skill=%s — "
+                        "will ensure pinned page canonical_id=%r is in persona KB",
+                        self._data.skill_name, _pinned_canonical_id,
+                    )
+
         confluence_sources = [s for s in self._data.sources if s.get("kind") == "confluence"]
 
-        if not confluence_sources:
+        # DECISION-020 §3/§4: if there are no confluence sources AND no pinned page
+        # to ingest, take the early-return path (nothing to ingest).
+        if not confluence_sources and not _pinned_canonical_id:
             # No Confluence sources — nothing to ingest; other kinds are query-time or Phase 2
             for src in self._data.sources:
                 kind = src.get("kind")
@@ -4689,6 +4736,58 @@ class SkillBuilderConversation:
                          src.get("table", "?"))
             elif kind in ("jira", "git"):
                 log.info("_run_ingest: source kind=%s — Phase 2, not yet wired", kind)
+
+        # DECISION-020 §3/§4 write-side: ingest pinned page for author_fixed skills.
+        # After all space-based sources are processed, explicitly ingest the pinned
+        # page by canonical_id so _retrieve_author_fixed_pinned() finds it in the KB.
+        # MUST run even if confluence_sources was empty (skill has no space crawl but
+        # does have a pinned_ref that EVAL resolves at runtime).
+        # LOUD failure if the adapter is missing or fetch fails — no silent skip
+        # (DECISION-020 §4/§6: fail at author time, not at EVAL time).
+        if _pinned_canonical_id and not failures:
+            if confluence_adapter is None:
+                _pinned_err = (
+                    f"author_fixed skill requires the pinned page {_pinned_canonical_id!r} "
+                    f"to be ingested into the persona KB (DECISION-020 §3/§4), but no "
+                    f"Confluence adapter is configured (mode={mode}). "
+                    f"Configure a Confluence adapter in "
+                    f"framework/config/adapters/confluence.yaml for environment '{kbf_env}', "
+                    f"or set source_binding.ingest_on_demand: true to defer to runtime."
+                )
+                log.error("_run_ingest: %s", _pinned_err)
+                failures.append((_pinned_canonical_id, _pinned_err))
+            else:
+                try:
+                    log.info(
+                        "_run_ingest: ingesting pinned page canonical_id=%r for "
+                        "author_fixed skill=%s persona=%s into persona KB",
+                        _pinned_canonical_id, self._data.skill_name, self._data.persona,
+                    )
+                    _pinned_result = ingestor.ingest_page(_pinned_canonical_id)
+                    _pinned_status = _pinned_result.get("status", "unknown")
+                    log.info(
+                        "_run_ingest: pinned page canonical_id=%r ingested status=%s",
+                        _pinned_canonical_id, _pinned_status,
+                    )
+                    if _pinned_status == "new":
+                        total_new += 1
+                    elif _pinned_status == "updated":
+                        total_updated += 1
+                    else:
+                        total_unchanged += 1
+                except Exception as _pinned_exc:
+                    _pinned_err = (
+                        f"author_fixed+!ingest_on_demand: failed to ingest pinned page "
+                        f"{_pinned_canonical_id!r} into persona KB at author time "
+                        f"(DECISION-020 §3/§4 write-side requirement): {_pinned_exc}. "
+                        f"Fix the Confluence adapter / network / page access and retry ingestion. "
+                        f"Do NOT skip — EVAL will fail with ConfluencePageNotInKBError at runtime."
+                    )
+                    log.error(
+                        "_run_ingest: pinned page ingest failed for canonical_id=%r skill=%s: %s",
+                        _pinned_canonical_id, self._data.skill_name, _pinned_exc,
+                    )
+                    failures.append((_pinned_canonical_id, _pinned_err))
 
         items_upserted = total_new + total_updated
         items_processed = total_new + total_updated + total_unchanged

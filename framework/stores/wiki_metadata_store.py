@@ -50,7 +50,7 @@ class WikiMetadataStore:
         Returns the page_id (generated from path if not provided).
         """
         page_id = page_meta.get("page_id") or _derive_page_id(page_meta.get("path", ""))
-        record = {
+        record: dict[str, Any] = {
             "page_id": page_id,
             "title": page_meta.get("title", ""),
             "path": page_meta.get("path", ""),
@@ -60,6 +60,11 @@ class WikiMetadataStore:
             "content_hash": page_meta.get("content_hash"),
             "extraction_version": page_meta.get("extraction_version"),
         }
+        # ADR-039 (DECISION-020) write-side: preserve canonical_ref when stamped
+        # by the ingestor so the search_wiki / read_wiki_page retrievers can return
+        # it in passage metadata for executor canonical==canonical matching.
+        if page_meta.get("canonical_ref") is not None:
+            record["canonical_ref"] = page_meta["canonical_ref"]
         # page_id may contain characters illegal in filenames (slashes from a
         # URL, colons, '+' etc.). Sanitise to a filesystem-safe stem for the
         # JSON file while preserving the original page_id inside the record.

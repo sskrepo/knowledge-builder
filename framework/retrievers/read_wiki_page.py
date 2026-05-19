@@ -45,17 +45,23 @@ class ReadWikiPageRetriever:
             return None
 
         page_id = rec.get("page_id", path)
+        passage_meta: dict = {
+            "page_id": page_id,
+            "title":   rec.get("title", ""),
+            "path":    rec.get("path", path),
+            "persona": rec.get("persona", ""),
+            "tags":    rec.get("tags", []),
+        }
+        # ADR-039 (DECISION-020) read-side: forward canonical_ref so the
+        # executor's _passage_matches_canonical() can do canonical==canonical
+        # comparison without any URL-heuristic matching.
+        if rec.get("canonical_ref") is not None:
+            passage_meta["canonical_ref"] = rec["canonical_ref"]
         return Result(
             content_id=page_id,
             chunk_id=None,
             text=body,
             score=1.0,
             citation_url=rec.get("source_url") or f"wiki://{path}",
-            metadata={
-                "page_id": page_id,
-                "title":   rec.get("title", ""),
-                "path":    rec.get("path", path),
-                "persona": rec.get("persona", ""),
-                "tags":    rec.get("tags", []),
-            },
+            metadata=passage_meta,
         )

@@ -207,8 +207,34 @@ class ConfluenceWikiIngestor:
         # pages ingested via ConfluenceWikiIngestor(persona="tpm") when the
         # raw Confluence item has no persona field.
         effective_persona = _raw.get("persona") or self._persona
+        # ADR-039 (DECISION-020) write-side: stamp canonical_ref so the executor's
+        # _passage_matches_canonical() can match passages by canonical==canonical.
+        # resolve_to_numeric_id() fast-path only (no live REST); if the page_id is
+        # already numeric this is a zero-cost identity operation.
+        _canonical_ref: dict | None = None
+        try:
+            from ..adapters.confluence.shared import resolve_to_numeric_id
+            from ..adapters._base import CanonicalRef
+            _cref = resolve_to_numeric_id(
+                reference=page_id,
+                resource_type="page",
+                session=None,
+                base_url="",
+            )
+            if isinstance(_cref, CanonicalRef):
+                _canonical_ref = {
+                    "connector_id": _cref.connector_id,
+                    "resource_type": _cref.resource_type,
+                    "canonical_id": _cref.canonical_id,
+                }
+        except Exception as _cref_exc:
+            log.warning(
+                "ingest_page %s: could not stamp canonical_ref (%s) — "
+                "executor canonical==canonical match will not work for this page",
+                page_id, _cref_exc,
+            )
         if self._wiki_store is not None:
-            self._wiki_store.upsert_page({
+            upsert_dict: dict = {
                 "page_id":            page_id,
                 "title":              title,
                 "path":               str(md_path),
@@ -217,7 +243,10 @@ class ConfluenceWikiIngestor:
                 "last_modified":      _raw.get("updated_at"),
                 "content_hash":       content_hash,
                 "extraction_version": self.PARSER_VERSION,
-            })
+            }
+            if _canonical_ref is not None:
+                upsert_dict["canonical_ref"] = _canonical_ref
+            self._wiki_store.upsert_page(upsert_dict)
 
         log.info("ingest_page %s: status=%s path=%s", page_id, status, md_path)
         return {"status": status, "page_id": page_id, "path": str(md_path)}
