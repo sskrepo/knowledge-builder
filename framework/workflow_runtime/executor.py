@@ -367,6 +367,7 @@ class WorkflowExecutor:
         retrievers=None,
         shim_kb=None,
         confluence_adapter=None,
+        wiki_store=None,
     ):
         """Construct a WorkflowExecutor.
 
@@ -393,6 +394,15 @@ class WorkflowExecutor:
             silently fall back to a different page or empty content).
             Backward-compatible: existing constructions that omit this param
             default to None — author_fixed skills are unaffected.
+        wiki_store:
+            Optional WikiMetadataStore instance.  When provided,
+            _retrieve_author_fixed_pinned can resolve an ingested pinned page
+            DIRECTLY by canonical_id without requiring a KB card in ShimKb.
+            This is the fix for the INGEST→EVAL store-mismatch bug (Issue-1a
+            root cause): the EVAL executor previously had no retrievers/shim_kb,
+            so Strategy 1 was entirely skipped even though the page was already
+            correctly written by INGEST.  Passing wiki_store here (and wiring it
+            in _run_eval) closes the gap.  Default None is backward-compatible.
         """
         self.store = store
         self.llm = llm
@@ -402,6 +412,9 @@ class WorkflowExecutor:
         # None = not configured; ask_parameterized skills hard-fail actionably.
         # NEVER used for author_fixed skills.
         self.confluence_adapter = confluence_adapter
+        # Direct wiki store reference for Strategy 1b in _retrieve_author_fixed_pinned.
+        # None = not provided; Strategy 1b is skipped (Strategy 1a or 2/3 applies).
+        self.wiki_store = wiki_store
 
     def execute(self, skill_yaml_path: Path, inputs: dict) -> dict:
         """Execute a workflow skill from a YAML file path.
@@ -1064,10 +1077,12 @@ class WorkflowExecutor:
             pinned_ref, pinned_page_id,
         )
 
-        # --- Strategy 1: KB retriever lookup scoped to the pinned page -------
+        # --- Strategy 1a: KB retriever lookup scoped to the pinned page ------
         # Retrieve passages from the KB and filter to only those whose
         # canonical_ref.canonical_id matches the pinned canonical ID.
         # ADR-039: canonical==canonical comparison; no regex, no URL matching.
+        # Requires shim_kb to resolve KB-card → retrieval_tools.  Skip if the
+        # KB card is absent (not yet promoted) — Strategy 1b handles that case.
         passages: list[dict] = []
         query_text = " ".join(str(v) for v in inputs.values() if v)
 
@@ -1106,9 +1121,77 @@ class WorkflowExecutor:
         if passages:
             log.info(
                 "ADR-039 pinned-source: resolved %d passage(s) for skill=%s pinned_ref=%r "
-                "(canonical_id=%r) via KB retriever (pinned page found in KB).",
+                "(canonical_id=%r) via KB retriever Strategy 1a (KB card found).",
                 len(passages), skill_name, pinned_ref, pinned_page_id,
             )
+            return passages
+
+        # --- Strategy 1b: direct WikiMetadataStore lookup by canonical_id ----
+        # Fixes Issue-1a root cause: the EVAL executor had no retrievers/shim_kb,
+        # so Strategy 1a was always skipped even though INGEST had correctly written
+        # the page.  Strategy 1b queries the wiki store directly by canonical_id —
+        # no KB card required.  This path fires whenever:
+        #   - self.wiki_store is set (EVAL executor + mcp_server wire it in), AND
+        #   - Strategy 1a found no passages (KB card absent or no retriever match)
+        # The wiki_store is the SAME instance used by ConfluenceWikiIngestor in
+        # _run_ingest (~/.kbf/store/wiki_metadata by default), so the write and
+        # read paths are guaranteed to share the same backing store.
+        if not passages and self.wiki_store is not None:
+            try:
+                all_records = self.wiki_store.list_pages()
+                for rec in all_records:
+                    cref = rec.get("canonical_ref") or {}
+                    if (
+                        cref.get("connector_id") == canonical.connector_id
+                        and cref.get("resource_type") == canonical.resource_type
+                        and cref.get("canonical_id") == canonical.canonical_id
+                    ):
+                        # Found — read body from filesystem path.
+                        body = ""
+                        file_path = rec.get("path", "")
+                        if file_path:
+                            try:
+                                body = Path(file_path).read_text(encoding="utf-8")
+                            except OSError as _read_err:
+                                log.warning(
+                                    "ADR-039 Strategy 1b: could not read file %r for "
+                                    "canonical_id=%r: %s",
+                                    file_path, pinned_page_id, _read_err,
+                                )
+                        if body:
+                            kb_full_name = ""
+                            for req in cfg.get("requires_extractions", []):
+                                kb_full_name = req.get("kb") or ""
+                                break
+                            passage_meta = {
+                                "page_id":      rec.get("page_id", pinned_page_id),
+                                "title":        rec.get("title", ""),
+                                "path":         file_path,
+                                "persona":      rec.get("persona", ""),
+                                "tags":         rec.get("tags", []),
+                                "canonical_ref": cref,
+                            }
+                            passages.append({
+                                "text":     body,
+                                "citation": rec.get("source_url") or f"wiki://{pinned_page_id}",
+                                "metadata": passage_meta,
+                                "kb":       kb_full_name,
+                            })
+                            log.info(
+                                "ADR-039 pinned-source: resolved passage for skill=%s "
+                                "pinned_ref=%r (canonical_id=%r) via Strategy 1b "
+                                "(direct WikiMetadataStore lookup — KB card not required).",
+                                skill_name, pinned_ref, pinned_page_id,
+                            )
+                            break  # one record per canonical_id is sufficient
+            except Exception as _s1b_exc:
+                log.error(
+                    "ADR-039 Strategy 1b: WikiMetadataStore lookup failed for "
+                    "canonical_id=%r: %s — falling through to Strategy 2/3.",
+                    pinned_page_id, _s1b_exc,
+                )
+
+        if passages:
             return passages
 
         # --- Strategy 2: on-demand fetch (if ingest_on_demand: true) ---------
