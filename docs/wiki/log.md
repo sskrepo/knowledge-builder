@@ -4,6 +4,18 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-18] backend-dev | fix/author-fixed-real-ingest-roundtrip: Issue-1a executor Strategy 1b + canonical_ref hard-fail
+
+Issue-1a root cause traced and fixed. The prior fix (602b0df / BUG-queue-13e25) was defective: INGEST correctly wrote page 20382503622 to `~/.kbf/store/wiki_metadata/20382503622.json` with `canonical_ref` stamped, BUT the EVAL `WorkflowExecutor` in `_run_eval` was constructed with `retrievers={}` (falsy in Python) and `shim_kb=None`. This caused `_retrieve_author_fixed_pinned` Strategy 1 to be entirely skipped (`if self.retrievers and self.shim_kb:` was False), falling through to Strategy 3 (`ConfluencePageNotInKBError`) every time. The false `ingest_result:success` came because INGEST succeeded; EVAL is where it failed.
+
+Fix: (1) `executor.py`: add `wiki_store` param + Strategy 1b — direct `WikiMetadataStore` lookup by `canonical_id`, no KB card required, fires when Strategy 1a finds nothing. (2) `conversation.py _run_eval`: wire `WikiMetadataStore()` (same default root as INGEST) into EVAL executor. (3) `confluence_wiki_ingest.py ingest_page`: `require_canonical_ref=True` param — failure to stamp `canonical_ref` is now a HARD FAIL, not warning-and-continue. (4) `_run_ingest`: pass `require_canonical_ref=True` + post-ingest store verification. (5) `mcp_server.py`: wire `wiki_store` into production `WorkflowExecutor`.
+
+Real round-trip: live `~/.kbf/store/wiki_metadata` store (page 20382503622, already ingested from prior session) — Strategy 1b found record, returned passage, `_passage_matches_canonical=True`. ADB (`KB_SHIM.KBF_BUG_REPORTS`) NOT accessible in this environment (no DSN, no Oracle thick client, bastion tunnel not running). Bug entry written to local JSONL only (BUG-queue-f7d90). Manual ADB insert steps: run `adb-connect.sh`, then `kb-cli export-bugs --env laptop`.
+
+16 new unit tests (`test_author_fixed_ingest_roundtrip.py`). Post-merge suite: exactly 8 baseline failures, 0 new, 1766 passed. Branch: `fix/author-fixed-real-ingest-roundtrip`. Fix commit: `1c95d3d`. Merge commit: `98576ab`.
+
+---
+
 ## [2026-05-18] architect | DECISION-021 / ADR-038 §B.5 amendment: EVAL Path-B uses production IntentClassifier (routing-precision loop exit)
 
 DECISION-021 filed: EVAL Path-B routing self-test must use the production `IntentClassifier` internally (INGEST+ candidate set, non-executing) instead of token-overlap `ShimWorkflows.resolve_only`. Rationale: token-overlap cannot distinguish shared-vocabulary cases (Mango vs. Kiwi project, single-fact vs. agenda-email). DECISION-017's public-flag rejection stands — classifier is constructed internally, no new HTTP surface. Options: (rejected) keep token-overlap; (rejected, DECISION-017) public /ask flags; (CHOSEN) internal IntentClassifier INGEST+ scope non-executing.
