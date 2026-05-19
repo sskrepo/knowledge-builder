@@ -14,7 +14,7 @@ Implementation (`conversation.py` `_run_eval`): two `_shim.resolve_only(q, scope
 
 13 new unit tests in `test_decision021_pathb_intent_classifier.py`: wiring/mechanism (T1-T4), gate semantics (T5-T6 positive/negative), PROMOTE gate regression guard (T7), graceful skip (T8). All 13 pass.
 
-BUG-queue-XXXXX filed in `KB_SHIM.KBF_BUG_REPORTS` (ADB). Full suite: exactly 8 baseline failures, 0 new (1750 passed).
+BUG-queue-2d7fd filed in `KB_SHIM.KBF_BUG_REPORTS` (ADB, COUNT=1 confirmed). Full suite: exactly 8 baseline failures, 0 new (1750 passed).
 
 ---
 
