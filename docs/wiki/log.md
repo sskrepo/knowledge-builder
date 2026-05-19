@@ -4,6 +4,36 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-19] backend-dev | TWO-SKILL E2E MISSION COMPLETE — both SKILL 1 (faaas_kiwi_project_pptx) and SKILL 2 (confluence_project_tracking_rods_support_for_dynamic_tables) PROMOTED to production
+
+**Mission**: Resume synth-tpm-628a9647 (SKILL 1, author_fixed pptx) + author brand-new synth-tpm-4bebf913 (SKILL 2, ask_parameterized .eml email draft). Both driven to genuine ADB-backed PROMOTE. Anti-fabrication: PROMOTED is real only if ADB `status=promoted`, real non-empty artifact files on disk, genuine Path-A/B EVAL runs.
+
+### SKILL 1: tpm.faaas_kiwi_project_pptx (synth-tpm-628a9647)
+- **Bugs fixed before this session**: BUG-014 (Path-B case-insensitive comparison, 38d4b71), BUG-015 (executor `delivery` sub-dict extraction in `_run_eval`, f249c25)
+- **EVAL**: Path-B 8/8 (5 positive + 3 negative) PASS; Path-A SUCCESS — artifact at `~/.kbf/outputs/faaas_kiwi_project_pptx.pptx` (30,057 bytes, real OOXML); Comparator: structure_score=0.0, density_score=0.0 (NON-NULL, ran directly on produced vs reference bytes)
+- **ADB evidence**: `KB_SHIM.AUTHOR_SKILL_SESSIONS synth_id=synth-tpm-628a9647 state=DONE status=completed`; 5 artifacts in `KB_SHIM.KBF_SKILL_ARTIFACTS` all `status=promoted`
+- **Key state-machine issue resolved**: `_eval_pending_route` is TRANSIENT (not persisted to ADB), resets to "REVIEW_DESIGN" on reload — navigated using correct `"userInput"` field (not `"input"`) via `/api/v1/kb/authorSkill/{synth_id}` route on port 8080
+
+### SKILL 2: tpm.confluence_project_tracking_rods_support_for_dynamic_tables (synth-tpm-4bebf913)
+- **Type**: `ask_parameterized` (Confluence page URL supplied at query time, `ingest_on_demand:true`)
+- **Source**: Confluence page 18625350641 (RODS Support for Dynamic Tables Replication — OCIFACP space)
+- **Schema**: 18 fields including `draft_eml` (RFC-822 formatted email draft, no SMTP/send path)
+- **Hard safety**: `.email` output only — no SMTP, no sendmail, no send path (verified by grep)
+- **Routing fix**: First EVAL run had 1 negative FAIL ("Make a slide deck agenda…" routed to email skill). Fixed by:
+  1. Patching `design_skill_card` in ADB directly (strengthened `use_when` to explicitly exclude slide decks/PPTX/presentations, added 2 new negative routing queries → 5 total)
+  2. Re-COMMITTED YAML on disk with same strengthened content
+  3. Re-ran full pipeline (VALIDATE PASS → INGEST 1 page unchanged → EVAL)
+- **EVAL**: Path-B 10/10 (5 positive + 5 negative) PASS; Path-A SUCCESS — artifact at `~/.kbf/outputs/confluence_project_tracking_rods_support_for_dynamic_tables.email` (17,849 bytes, HTML+RFC-822 email draft); Comparator: SKIPPED (no reference artifact — correct per ADR-035, `has_bound_reference_artifact()=False`)
+- **ADB evidence**: `KB_SHIM.AUTHOR_SKILL_SESSIONS synth_id=synth-tpm-4bebf913 state=DONE status=completed`; 5 artifacts in `KB_SHIM.KBF_SKILL_ARTIFACTS` all `status=promoted`
+
+### Technical findings
+- **BUG-015** (f249c25): `_run_eval` only checked top-level `artifact_url`/`artifact_path`/`output_path` keys but executor returns `{"delivery": {"path": "..."}}` sub-dict — comparator was skipped despite file on disk. Fixed: added `_delivery = exec_result.get("delivery") or {}` fallback chain.
+- **Server port**: runs on 8080 (not 8000); route is `/api/v1/kb/authorSkill/{synth_id}`, auth token from `framework/config/consumer_manifests/dev-local.yaml`
+- **ADB session reload**: sessions load fresh from ADB on every request — in-memory ADB patching of `design_skill_card` takes effect immediately on next request
+- **Git SHA at completion**: f249c25
+
+---
+
 ## [2026-05-18] architect | feat/adb-backed-wiki-kb: DECISION-022 — ADB-backed wiki/page KB store
 
 DECISION-022 filed and accepted. Root cause: `WikiMetadataStore` was filestore-only (`~/.kbf/store/wiki_metadata/`). Promoted `author_fixed` skills pinned to Confluence pages stored only on the authoring laptop — not portable across hosts, violating ADR-023 (ADB-always for promoted artifacts).

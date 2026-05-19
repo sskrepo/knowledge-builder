@@ -56,14 +56,16 @@ requires_extractions:
   - schedule_health
   - metrics_snapshot
   - workstreams_summary
-  - blocking_issues
   - next_steps
-  - exec_asks
   - decisions_needed
   - key_links
   - do_not_invoke_if_phrases
   - capacity_constraints
   - dependencies_external_teams
+- kb: tpm.tpm_weekly_ops
+  required_fields:
+  - blocking_issues
+  - exec_asks
 synthesis:
   output_format: pptx
   template: synthesis/templates/faaas_kiwi_project_pptx.pptx

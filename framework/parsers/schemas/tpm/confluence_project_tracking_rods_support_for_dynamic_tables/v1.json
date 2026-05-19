@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "framework/parsers/schemas/tpm/confluence_project_tracking_rods_support_for_dynamic_tables/v1.json",
+  "title": "tpm \u2014 confluence_project_tracking_rods_support_for_dynamic_tables \u2014 v1",
+  "description": "Synthesized by skill_builder for persona=tpm, kb=confluence_project_tracking_rods_support_for_dynamic_tables. Refine before promoting.",
+  "type": "object",
+  "required": [
+    "confluence_source_url",
+    "project_name",
+    "meeting_name",
+    "send_ahead_days",
+    "meeting_datetime_local",
+    "timezone",
+    "to_recipients",
+    "cc_recipients",
+    "orm_status",
+    "rag_summary",
+    "schedule_health",
+    "blockers_with_owners_and_etas",
+    "dependencies",
+    "per_stakeholder_status_rollcall",
+    "next_steps",
+    "exec_asks",
+    "reference_links",
+    "draft_eml",
+    "use_when",
+    "do_not_invoke_if_phrases",
+    "routing_queries"
+  ],
+  "properties": {
+    "confluence_source_url": {
+      "type": "string",
+      "description": "At query time, accept the Confluence page URL that is the single source of truth for this project/program tracking update; echo it back verbatim as the cited source link in the email.",
+      "maxLength": 500
+    },
+    "project_name": {
+      "type": "string",
+      "description": "Extract the project/program name from the page title and/or the 'Architecture / Product Definition' linked title; use the most human-readable name for the email subject and header.",
+      "maxLength": 200
+    },
+    "meeting_name": {
+      "type": "string",
+      "description": "If the page explicitly names a recurring meeting or forum, extract it; otherwise return an empty string (do not invent a meeting series name).",
+      "maxLength": 200
+    },
+    "send_ahead_days": {
+      "type": "integer",
+      "description": "Capture the user-provided number of days ahead this email is framed as being sent before the meeting; if not provided at query time, set to 2.",
+      "maxLength": 200
+    },
+    "meeting_datetime_local": {
+      "type": "string",
+      "description": "If the page explicitly states a meeting date/time, extract it including timezone; otherwise return an empty string (do not infer from task dates).",
+      "maxLength": 200
+    },
+    "timezone": {
+      "type": "string",
+      "description": "If a timezone is explicitly stated on the page for dates/ETAs, extract it; otherwise return an empty string.",
+      "maxLength": 200
+    },
+    "to_recipients": {
+      "type": "array",
+      "description": "Derive the To: list by extracting stakeholder emails only when the page explicitly provides email addresses; otherwise return an empty array (do not guess distribution intent).",
+      "maxLength": 2000
+    },
+    "cc_recipients": {
+      "type": "array",
+      "description": "Derive the Cc: list only if the page explicitly indicates a distribution list or secondary recipients; otherwise return an empty array.",
+      "maxLength": 2000
+    },
+    "orm_status": {
+      "type": "string",
+      "description": "Extract ORM status only if the page contains an ORM ticket and/or explicit ORM status text; if the ORM field is a placeholder or absent, return 'Unknown (not specified on source page)'.",
+      "maxLength": 200
+    },
+    "rag_summary": {
+      "type": "string",
+      "description": "Derive a single exec-safe RAG (Red/Amber/Green) plus exactly one sentence justification by summarising: (1) WBS task statuses, (2) dated Task Status Updates, and (3) any Issues/Bug Tracking notes; avoid acronyms without expansion and do not list raw task-by-task detail.",
+      "maxLength": 500
+    },
+    "schedule_health": {
+      "type": "string",
+      "description": "Derive schedule health in 1\u20132 sentences by combining: (1) WBS due dates and milestone dates, (2) statements like 'must be delivered by' in updates, and (3) environment rollout timing notes; state whether the plan is on track, at risk, or slipping and why.",
+      "maxLength": 500
+    },
+    "blockers_with_owners_and_etas": {
+      "type": "array",
+      "description": "Derive the open blockers list by aggregating: (1) 'Issues encountered' / blockers language in Task Status Updates, (2) Bug Tracking items that are described as impacting progress, and (3) WBS rows that indicate dependency/blocked status. For each item, include: description, owner (person or team), target_resolution_date (ETA if stated), and critical_path (true if it blocks a dated milestone or 'must be delivered by' commitment; else false). If none, return an empty array.",
+      "maxLength": 2000
+    },
+    "dependencies": {
+      "type": "array",
+      "description": "Extract and normalise dependencies by aggregating the WBS 'Dependency (FS, SS)' column and any dependency statements in Task Status Updates; output concise dependency statements with the dependent item and what it depends on (do not include internal shorthand without expansion).",
+      "maxLength": 2000
+    },
+    "per_stakeholder_status_rollcall": {
+      "type": "array",
+      "description": "Derive a per-stakeholder roll-call by combining: (1) the Stakeholders roster, (2) WBS task owners, and (3) the most recent dated Task Status Updates mentioning each owner. For each stakeholder/owner, provide: name_or_team, current_status (1 line), next_commitment (what they will deliver), and eta_or_date (if stated; otherwise 'TBD'). Do not fabricate ETAs.",
+      "maxLength": 2000
+    },
+    "next_steps": {
+      "type": "array",
+      "description": "Derive 3\u20137 time-bound next steps by summarising the most recent Task Status Updates and any remaining WBS items not marked complete; each step must include an owner and a due date ('by [date]' if stated, otherwise 'this sprint').",
+      "maxLength": 2000
+    },
+    "exec_asks": {
+      "type": "array",
+      "description": "Derive executive asks by aggregating explicit requests in Task Status Updates (e.g., approvals, sign-offs, resourcing, cross-team escalations) and any statements that indicate a decision is needed; phrase each ask as a single sentence with the ask, the decision-maker/audience, and the needed-by date if stated. If none are explicit, return an empty array (do not invent asks).",
+      "maxLength": 2000
+    },
+    "reference_links": {
+      "type": "array",
+      "description": "Extract key reference links from the page: Jira links, bug tracking links, test plan link, release/patch links, repository link, and architecture/design link; include each as {label, url}.",
+      "maxLength": 2000
+    },
+    "draft_eml": {
+      "type": "string",
+      "description": "Compose a draft RFC-822 .eml email (plain text body) as meeting-prep sent N days ahead. Must include: Subject, To, Cc, and a structured agenda-style body with sections for ORM status, RAG summary (with 1-sentence justification), schedule health, blockers (with owners+ETAs), dependencies, per-stakeholder roll-call (owners+ETAs), next steps (time-bound), and exec asks. Include the Confluence source URL and key reference links. Draft only; never imply sending.",
+      "maxLength": 2000
+    },
+    "use_when": {
+      "type": "string",
+      "description": "Use ONLY when the requested output is an email draft in RFC-822 .eml format (agenda-style meeting prep). NOT for slide decks, PowerPoint presentations, PPTX files, or any non-email agenda format.",
+      "maxLength": 500
+    },
+    "do_not_invoke_if_phrases": {
+      "type": "array",
+      "description": "Must include at least: 'slide deck', 'powerpoint', 'pptx', 'presentation', 'make a presentation'.",
+      "maxLength": 2000
+    },
+    "routing_queries": {
+      "type": "object",
+      "description": "Update routing_queries.negative to include: (1) 'Make a slide deck agenda for the stakeholder status meeting based on the Confluence page.' (2) 'Create a PowerPoint presentation summarising the RODS Support project status from the Confluence tracking page.' (3) 'Build a deck for the stakeholder meeting that includes blockers and next steps from the Confluence tracker.'",
+      "maxLength": 2000
+    }
+  },
+  "additionalProperties": false
+}

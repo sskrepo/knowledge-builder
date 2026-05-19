@@ -1,0 +1,175 @@
+workflow_skill: confluence_project_tracking_rods_support_for_dynamic_tables
+persona: tpm
+status: draft
+trigger:
+  on_request:
+    enabled: true
+    inputs:
+    - name: page_id
+      type: confluence_page_ref
+      description: Confluence pageId or full page URL of the page to use
+      required: true
+    output_format: email
+    response_mode: artifact_url
+skill_card:
+  summary: Produces a draft stakeholder status meeting agenda email (.eml) from a
+    Confluence project tracking page URL, pre-filled with RAG, schedule health, blockers,
+    dependencies, next steps, exec asks, and a per-stakeholder status roll-call.
+  use_when: Use ONLY when you need to generate a draft stakeholder status meeting
+    agenda in EMAIL (.eml) format—not a slide deck, not a PPTX presentation, not a
+    plain-text summary. The output must be an RFC-822 .eml email draft that compiles
+    multiple sections (RAG summary, schedule health, blockers with owners/ETAs, dependencies,
+    next steps, exec asks, and per-stakeholder roll-call) from a Confluence tracking
+    page. Do NOT invoke this skill if the request asks for a slide deck, PowerPoint
+    presentation, PPTX, or any non-email format—even if it mentions "agenda" or "meeting".
+  example_invocations:
+  - 'Draft an agenda email (.eml) for the RODS Support for Dynamic Tables stakeholder
+    status meeting using this Confluence tracking page: https://confluence.example.com/x/abcd
+    — send it as a prep note 2 days ahead.'
+  - 'Generate a meeting-prep agenda email (.eml draft only) from this Confluence project
+    tracking URL and include RAG, schedule health, blockers/owners/ETAs, dependencies,
+    next steps, exec asks, and a roll-call: https://confluence.example.com/x/abcd'
+  do_not_invoke_if_phrases:
+  - what is the current rag
+  - what is the schedule health
+  - slide deck
+  - slide deck agenda
+  - powerpoint
+  - pptx
+  - presentation
+  - make a presentation
+  routing_queries:
+    positive:
+    - 'Create a draft agenda email (.eml) for next week’s stakeholder status meeting
+      from this Confluence project tracking page URL: https://confluence.example.com/x/abcd,
+      framed as a prep email 3 days ahead.'
+    - Generate an .eml draft email agenda from the Confluence tracking page for RODS
+      Support for Dynamic Tables and include RAG summary, schedule health, blockers
+      with owners/ETAs, dependencies, next steps, exec asks, and a roll-call.
+    - 'I need a meeting preparation email (.eml draft) based on this Confluence project
+      tracker: https://confluence.example.com/x/abcd — include blockers, dependencies,
+      and per-team status requests with owners and ETAs.'
+    - 'Draft the stakeholder status meeting agenda email (.eml) using this Confluence
+      URL and make sure it has RAG, schedule health, next steps, exec asks, and a
+      roll-call section: https://confluence.example.com/x/abcd.'
+    - 'Turn this Confluence project tracking page into a draft agenda email (.eml)
+      for stakeholders, to be sent 1 day before the meeting, with blockers/owners/ETAs
+      and dependency callouts: https://confluence.example.com/x/abcd.'
+    negative:
+    - For RODS Support for Dynamic Tables, what is the current RAG status on the Confluence
+      tracker?
+    - Write a Jira JQL query to find open blockers for Dynamic Tables replication.
+    - Make a slide deck agenda for the stakeholder status meeting based on the Confluence
+      page.
+    - Create a PowerPoint presentation summarising the RODS Support project status
+      from the Confluence tracking page.
+    - Build a deck for the stakeholder meeting that includes blockers and next steps
+      from the Confluence tracker.
+requires_extractions:
+- kb: tpm.confluence_project_tracking_rods_support_for_dynamic_tables
+  required_fields:
+  - confluence_source_url
+  - project_name
+  - meeting_name
+  - send_ahead_days
+  - meeting_datetime_local
+  - timezone
+  - to_recipients
+  - cc_recipients
+  - orm_status
+  - rag_summary
+  - schedule_health
+  - blockers_with_owners_and_etas
+  - dependencies
+  - per_stakeholder_status_rollcall
+  - next_steps
+  - exec_asks
+  - reference_links
+  - draft_eml
+  - use_when
+  - do_not_invoke_if_phrases
+  - routing_queries
+synthesis:
+  output_format: email
+  template: synthesis/templates/confluence_project_tracking_rods_support_for_dynamic_tables.email
+  slide_mapping: synthesis/mappings/confluence_project_tracking_rods_support_for_dynamic_tables.yaml
+  field_mapping:
+    confluence_source_url:
+      section: Confluence Source Url
+      source_field: confluence_source_url
+    project_name:
+      section: Project Name
+      source_field: project_name
+    meeting_name:
+      section: Meeting Name
+      source_field: meeting_name
+    send_ahead_days:
+      section: Send Ahead Days
+      source_field: send_ahead_days
+    meeting_datetime_local:
+      section: Meeting Datetime Local
+      source_field: meeting_datetime_local
+    timezone:
+      section: Timezone
+      source_field: timezone
+    to_recipients:
+      section: To Recipients
+      source_field: to_recipients
+    cc_recipients:
+      section: Cc Recipients
+      source_field: cc_recipients
+    orm_status:
+      section: Orm Status
+      source_field: orm_status
+    rag_summary:
+      section: Rag Summary
+      source_field: rag_summary
+    schedule_health:
+      section: Schedule Health
+      source_field: schedule_health
+    blockers_with_owners_and_etas:
+      section: Blockers With Owners And Etas
+      source_field: blockers_with_owners_and_etas
+    dependencies:
+      section: Dependencies
+      source_field: dependencies
+    per_stakeholder_status_rollcall:
+      section: Per Stakeholder Status Rollcall
+      source_field: per_stakeholder_status_rollcall
+    next_steps:
+      section: Next Steps
+      source_field: next_steps
+    exec_asks:
+      section: Exec Asks
+      source_field: exec_asks
+    reference_links:
+      section: Reference Links
+      source_field: reference_links
+    draft_eml:
+      section: Draft Eml
+      source_field: draft_eml
+    use_when:
+      section: Use When
+      source_field: use_when
+    do_not_invoke_if_phrases:
+      section: Do Not Invoke If Phrases
+      source_field: do_not_invoke_if_phrases
+    routing_queries:
+      section: Routing Queries
+      source_field: routing_queries
+delivery:
+  kind: filesystem
+  path: ~/.kbf/outputs/confluence_project_tracking_rods_support_for_dynamic_tables.email
+eval:
+  gold_set: eval/gold_sets/tpm-confluence_project_tracking_rods_support_for_dynamic_tables-workflow.jsonl
+  exit_criteria:
+    field_accuracy: 0.85
+    delivery_success_rate: 0.99
+source_binding:
+  mode: ask_parameterized
+  input_param: page_id
+  ingest_on_demand: true
+  source_type: confluence_page
+  space_allow_list:
+  - OCIFACP
+  ephemeral_ttl_seconds: 300
