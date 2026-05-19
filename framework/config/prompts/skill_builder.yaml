@@ -416,11 +416,11 @@ prompts:
   # ---------------------------------------------------------------------------
   design_skill_card:
     id: design_skill_card
-    version: "1.0"
+    version: "1.1"
     model: synthesis
-    max_tokens: 1024
+    max_tokens: 1400
     response_format: json_object
-    description: "Generate a consumer-facing skill card with routing_queries for the Tier-1 classifier."
+    description: "Generate a consumer-facing skill card with routing_queries and do_not_invoke_if_phrases for the Tier-1 classifier."
     required_vars: [skill_name, persona, task_description, output_format, intent_summary]
     template: |
       You are a Knowledge Builder Framework skill card writer. Generate a consumer-facing
@@ -436,23 +436,27 @@ prompts:
       Return ONLY a JSON object:
       {{
         "summary": "One sentence: what this skill produces when invoked (consumer perspective).",
-        "use_when": "One sentence: the specific situation when a consumer should invoke this skill.",
+        "use_when": "One sentence beginning with a strong action verb ('Use when you need to generate/draft/produce...') that clearly states the FULL OUTPUT this skill creates — name the output format ({output_format}) and the multi-field composite nature of the output. This must be clearly different from a single-value lookup.",
         "example_invocations": [
           "A realistic consumer query that would route to this skill (includes output format hint)",
           "A second realistic phrasing of the same consumer need"
         ],
+        "do_not_invoke_if_phrases": [
+          "a concrete short phrase fragment (3-7 words) that, if present in a query, means the user wants a single-fact value and NOT the full {output_format} output — e.g. 'what is the current', 'what is the status of', 'tell me the value of', 'show me the'",
+          "a second concrete short phrase that signals a clearly different output type (e.g. 'slide deck', 'summary only', 'just the number')"
+        ],
         "routing_queries": {{
           "positive": [
-            "consumer query 1 that SHOULD route to this skill",
+            "consumer query 1 that SHOULD route to this skill — must mention the full {output_format} output or agenda/draft/email action",
             "consumer query 2 that SHOULD route to this skill",
             "consumer query 3 that SHOULD route to this skill",
             "consumer query 4 that SHOULD route to this skill",
             "consumer query 5 that SHOULD route to this skill"
           ],
           "negative": [
-            "consumer query that should NOT route here (different topic)",
-            "consumer query that should NOT route here (single-fact lookup)",
-            "consumer query that should NOT route here (different output type)"
+            "consumer query that should NOT route here — single-fact value lookup using vocabulary shared with this skill (e.g. asking for a single field value like RAG status or schedule health as a direct answer, NOT as part of a full document)",
+            "consumer query that should NOT route here — addresses a clearly different topic",
+            "consumer query that should NOT route here — implies a different output format"
           ]
         }}
       }}
@@ -460,14 +464,29 @@ prompts:
       Rules:
       - "summary" and "use_when" must be written from the CONSUMER perspective — describe
         what the skill DOES, not what it was designed to do. Never start with "Create a skill".
+      - "use_when" MUST clearly distinguish this skill from a single-fact lookup. If this skill
+        produces a composite document ({output_format}), "use_when" must mention the composite
+        nature (e.g. "a ready-to-send email agenda", "a full status report deck") — not just
+        "get the status".
       - "example_invocations" must be realistic consumer phrasings. Include the output format
         ({output_format}) so the Tier-1 classifier can distinguish this skill from similar
         skills with different output types.
+      - "do_not_invoke_if_phrases": CRITICAL — provide 2-3 short phrase fragments (3-7 words
+        each, lowercase) that unambiguously signal the query is asking for a single-fact value
+        or a completely different output type. The Tier-1 classifier uses these as hard exclusion
+        triggers: if ANY phrase appears in the query, this skill is bypassed entirely regardless
+        of other vocabulary overlap. Examples for an email-agenda skill that also mentions RAG
+        status in its content: ["what is the current rag", "what is the current status",
+        "tell me the value", "show me just the"]. These must be concrete and discriminative —
+        NOT generic stopwords.
       - "routing_queries.positive": 5 distinct phrasings of consumer queries that SHOULD
         route to this skill. Must be specific enough to distinguish from other skills.
+        All positives must mention the composite output ({output_format}) or the full-document
+        action — never just "what is the status".
       - "routing_queries.negative": 3 queries that SHOULD NOT route to this skill —
-        include at least one single-fact lookup, one that addresses a clearly different
-        topic, and one that implies a different output format.
+        the single-fact negative MUST use vocabulary heavily shared with the positives (e.g.
+        the same project domain, the same data fields) but ask for a single value, not the
+        full document. This tests the classifier's ability to distinguish intent, not just vocab.
       - All queries must be realistic end-user phrasings, not internal system descriptions.
 
   # ---------------------------------------------------------------------------
