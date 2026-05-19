@@ -4,6 +4,20 @@ Append-only. Format: `## [YYYY-MM-DD] agent | what changed`
 
 ---
 
+## [2026-05-18] backend-dev | DECISION-013: emcp_direct canonical_identity structural gap fixed — BUG-queue-20071
+
+Gap: `emcp_direct.canonical_identity()` called `resolve_to_numeric_id(session=None)`, which always returns `Unresolvable(TRANSIENT)` for `/display/SPACE/Title` URLs (can't do REST title lookup without a session). This was a STRUCTURAL gap in laptop mode. The prior keychain-retry RCA (BUG-queue-98ca0, session synth-tpm-fbaafad2) was a mis-diagnosis.
+
+Fix: `canonical_identity()` in `emcp_direct.py` now resolves display-by-title URLs via `_resolve_via_emcp()` — the same `EmcpRuntime.call_tool_for_text("fetch", {"id": ref})` channel that CONFIGURE_SOURCES/sampler already uses successfully. Reads numeric `id` from `results.metadata.id` in payload. Fast-path for numeric refs unchanged (no MCP round-trip). Typed error mapping: `EmcpAuthError` → NO_ACCESS; `EmcpError`/transient → TRANSIENT; not-found payload → NOT_FOUND.
+
+`shared.py` unchanged. `synthesize_workflow.py`/`conversation.py`/upper layers byte-unchanged. No keychain-retry (mis-diagnosis, out of scope). No prod/native retry (deferred).
+
+15 new unit tests in `test_emcp_direct_canonical_via_runtime.py` (all pass, mocked runtime). Full suite: exactly 8 pre-existing failures, 0 new. Live laptop eMCP validation deferred to user re-authoring run.
+
+Bug `BUG-queue-20071` filed (filesystem JSONL, COUNT=1 verified). Branch `fix/emcp-direct-canonical-via-runtime`.
+
+---
+
 ## [2026-05-18] architect | DECISION-020/ADR-039 bind-side canonicalization gap closed — BUG-queue-43ac1 filed
 
 Gap: `derive_pinned_source()` stored raw display URLs in `source_binding.pinned_ref` without calling `canonical_identity()`. Executor read path (session=None) returned `Unresolvable(TRANSIENT)` for display-by-title URLs, surfacing as `ConfluencePageNotInKBError` at EVAL. Evidence: session `synth-tpm-58a9780c` artifact confirmed in ADB.
